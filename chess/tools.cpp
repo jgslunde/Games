@@ -208,7 +208,7 @@ void get_threat_board(bool threat_board[8][8], short *board, int player){
 
 
 extern "C"
-int get_all_legal_moves(short *board, short *legal_move_list, int player){
+int get_all_possible_moves(short *board, short *move_list, int player){
     bool threat_board[8][8] = {0};
     get_threat_board(threat_board, board, -player);
 
@@ -216,7 +216,6 @@ int get_all_legal_moves(short *board, short *legal_move_list, int player){
     int flat_idx;
     int new_x, new_y;
     int move_list_idx = 0;
-    short move_list[600] = {0};
     for(int board_y=0; board_y<8; board_y++){
         for(int board_x=0; board_x<8; board_x++){
             flat_idx = board_y*8 + board_x;
@@ -421,11 +420,18 @@ int get_all_legal_moves(short *board, short *legal_move_list, int player){
             }
         }
     }
+    return move_list_idx/6;
+}
+
+extern "C"
+int get_all_legal_moves(short *board, short *legal_move_list, int player){
+    short move_list[600] = {0};
+    int num_moves = get_all_possible_moves(board, move_list, player);
 
     short tmp_board[64] = {0};
     bool tmp_threat_board[8][8] = {0};
     int legal_move_list_idx = 0;
-    for(int imove=0; imove<move_list_idx/6; imove++){
+    for(int imove=0; imove<num_moves; imove++){
         int piece = move_list[imove*6+0];
         int capture = move_list[imove*6+1];
         int board_y = move_list[imove*6+2];
