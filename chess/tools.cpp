@@ -28,6 +28,37 @@ inline int is_inside_board(int y, int x){
 }
 
 
+bool eval_sufficient_material(short *board){
+    int bishops_and_knights = 0;
+    for(int i=0; i<64; i++){
+        if(board[i] == +1)
+            return true;
+        else if(board[i] == -1)
+            return true;
+        else if(board[i] == +4)
+            return true;
+        else if(board[i] == -4)
+            return true;
+        else if(board[i] == +5)
+            return true;
+        else if(board[i] == -5)
+            return true;
+        else if(board[i] == +2)
+            bishops_and_knights++;
+        else if(board[i] == -2)
+            bishops_and_knights++;
+        else if(board[i] == -3)
+            bishops_and_knights++;
+        else if(board[i] == -3)
+            bishops_and_knights++;
+    }
+    if(bishops_and_knights >= 2){
+        return true;
+    }
+    return false;
+}
+
+
 extern "C"
 int get_all_threat_moves(short *board, short *move_list, int player){
     int piece;
@@ -476,4 +507,85 @@ int get_all_legal_moves(short *board, short *legal_move_list, int player){
         }
     }
     return legal_move_list_idx/6;  // num moves tot.
+}
+
+
+float get_board_score(short *board){
+    float score = 0.0;
+    int piece;
+    for(int i=0; i<64; i++){
+        piece = board[i];
+        if((piece == +2) || (piece == -2)){
+            score += 1.5*piece;
+        }
+        else if((piece == +4) || (piece == -4)){
+            score += 1.25*piece;
+        }
+        else if((piece == +5) || (piece == -5)){
+            score += 1.8*piece;
+        }
+        else if((piece == +6) || (piece == -6)){
+            score += 100*piece;
+        }
+        else{
+            score += piece;
+        }
+    }
+    return score;
+}
+
+
+extern "C"
+float eval_move_score(short *board, int player, int depth, int max_depth){
+    short legal_moves[600] = {0};
+    short tmp_board[64] = {0};
+    int num_legal_moves = get_all_legal_moves(board, legal_moves, player);
+    float move_scores[num_legal_moves] = {0};
+    if(num_legal_moves == 0){
+        return -9999*player;
+    }
+    for(int imove=0; imove<num_legal_moves; imove++){
+        for(int i=0; i<64; i++){
+            tmp_board[i] = board[i];
+        }
+
+        int board_y = legal_moves[imove*6+2];
+        int board_x = legal_moves[imove*6+3];
+        int new_y = legal_moves[imove*6+4];
+        int new_x = legal_moves[imove*6+5];
+        tmp_board[new_y*8+new_x] = tmp_board[board_y*8+board_x];
+        tmp_board[board_y*8+board_x] = 0;
+
+        if(depth == max_depth){
+            move_scores[imove] = get_board_score(tmp_board);
+            // cout << board_y << " " << board_x << " " << new_y << " " << new_x << " " << move_scores[imove] << endl;
+        }
+        else{
+            if(eval_sufficient_material(tmp_board)){
+                move_scores[imove] = eval_move_score(tmp_board, -player, depth+1, max_depth);
+            }
+            else{
+                move_scores[imove] = 0.0;
+            }
+        }
+    }
+    int best_move_idx = 0;
+    if(player == 1){
+        for(int imove=1; imove<num_legal_moves; imove++){
+            // cout << depth << " " << move_scores[imove] << " " << best_score << endl;
+            if(move_scores[imove] > move_scores[best_move_idx]){
+                best_move_idx = imove;
+            }
+        }
+    }
+    else{
+        for(int imove=1; imove<num_legal_moves; imove++){
+            if(move_scores[imove] < move_scores[best_move_idx]){
+                best_move_idx = imove;
+            }
+        }
+    }
+    float best_score = move_scores[best_move_idx];
+    // cout << player << " " << best_score << " " << legal_moves[best_move_idx*6+2] << " " << legal_moves[best_move_idx*6+3] << " " << legal_moves[best_move_idx*6+4] << " " << legal_moves[best_move_idx*6+5] << endl;
+    return best_score;
 }
