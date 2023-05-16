@@ -2,6 +2,7 @@ import random
 import numpy as np
 import time
 import ctypes
+from tqdm import trange
 
 # Known bugs:
 # - Rooks, queens and bishops can move through enemies.
@@ -13,6 +14,7 @@ int16_array1 = np.ctypeslib.ndpointer(dtype=ctypes.c_short, ndim=1, flags="conti
 bool_array2 = np.ctypeslib.ndpointer(dtype=bool, ndim=2, flags="contiguous")
 Clib.get_all_threat_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
 Clib.get_all_legal_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
+Clib.get_all_possible_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
 Clib.get_threat_board.argtypes = [bool_array2, int16_array2, ctypes.c_long]
 
 
@@ -241,6 +243,20 @@ def get_all_possible_moves(board, player):
     return possible_moves
 
 
+
+def C_get_all_possible_moves(board, player):
+    moves = np.zeros((600), dtype=np.int16)
+    num_moves = Clib.get_all_possible_moves(board, moves, player)
+    moves = moves.reshape(100,6)[:num_moves]
+    possible_moves = []
+    for move in moves:
+        string = f"{pieces_dict[move[0]]}: {idx_to_board_pos(move[2], move[3])} => {idx_to_board_pos(move[4], move[5])}"
+        possible_moves.append([string, move[0], (move[2], move[3]), (move[4], move[5]), move[1]])
+    # print([legal_move[0] for legal_move in legal_moves])
+    return possible_moves
+    
+
+
 def get_all_legal_moves(board, player):
     if True:
         moves = np.zeros((600), dtype=np.int16)
@@ -398,19 +414,20 @@ if __name__ == "__main__":
     random.seed(41)
     board = Board()
     state = 0
-    for iturn in range(400):
-        if state != 0:
-            break
-        for player in [1, -1]:
-            if state != 0:
-                break
-            board.display_board()
-            move_idx = random.randint(0, len(board.legal_moves)-1)
-            state = board.make_move(player, move_idx)
-            if state != 0:
-                if state == 99:
-                    print("STALEMATE")
-                else:
-                    print(f"VICTORY FOR PLAYER {np.sign(board.score)}.")
+    for iturn in trange(10000):
+        get_all_legal_moves(board.board, 1)
+        # if state != 0:
+        #     break
+        # for player in [1, -1]:
+        #     if state != 0:
+        #         break
+        #     board.display_board()
+        #     move_idx = random.randint(0, len(board.legal_moves)-1)
+        #     state = board.make_move(player, move_idx)
+        #     if state != 0:
+        #         if state == 99:
+        #             print("STALEMATE")
+        #         else:
+        #             print(f"VICTORY FOR PLAYER {np.sign(board.score)}.")
     board.display_board()
     print(board.PGN)
