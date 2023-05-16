@@ -2,6 +2,7 @@
 // g++ -shared -lm -fPIC -o tools.so.1 tools.cpp -std=c++11
 #include <stdio.h>
 #include <iostream>
+#include <string>
 
 using namespace std;
 
@@ -22,6 +23,8 @@ int rook_dirs[4][2] = {
     { 0,-1},
     { 0, 1}
 };
+
+string pos2str_array[8] = {"a", "b", "c", "d", "e", "f", "g", "h"};
 
 inline int is_inside_board(int y, int x){
     return (y >= 0)&&(x >= 0)&&(x < 8)&&(y < 8);
@@ -57,6 +60,19 @@ bool eval_sufficient_material(short *board){
     }
     return false;
 }
+
+
+string pos2str(short pos_y, short pos_x){
+    return pos2str_array[pos_x] + to_string(8 - pos_y);
+}
+
+
+struct move_struct{
+    float score;
+    short piece;
+    short from_y, from_x, to_y, to_x;
+    move_struct *next_move;
+};
 
 
 extern "C"
@@ -536,14 +552,17 @@ float get_board_score(short *board){
 
 
 extern "C"
-float eval_move_score(short *board, int player, int depth, int max_depth){
+move_struct eval_move_score(short *board, int player, int depth, int max_depth){
     short legal_moves[600] = {0};
     short tmp_board[64] = {0};
     int num_legal_moves = get_all_legal_moves(board, legal_moves, player);
-    float move_scores[num_legal_moves] = {0};
+    move_struct move_scores[num_legal_moves];
     if(num_legal_moves == 0){
-        return -9999*player;
+        move_struct current_move;
+        current_move.score = -9999.0*player;
+        return current_move;
     }
+    // cout << "depth: " << depth << endl;
     for(int imove=0; imove<num_legal_moves; imove++){
         for(int i=0; i<64; i++){
             tmp_board[i] = board[i];
@@ -553,19 +572,32 @@ float eval_move_score(short *board, int player, int depth, int max_depth){
         int board_x = legal_moves[imove*6+3];
         int new_y = legal_moves[imove*6+4];
         int new_x = legal_moves[imove*6+5];
+        move_struct current_move;
+        current_move.piece  = legal_moves[imove*6+0];
+        current_move.from_y = legal_moves[imove*6+2];
+        current_move.from_x = legal_moves[imove*6+3];
+        current_move.to_y   = legal_moves[imove*6+4];
+        current_move.to_x   = legal_moves[imove*6+5];
+        // move_scores[imove] =
+
         tmp_board[new_y*8+new_x] = tmp_board[board_y*8+board_x];
         tmp_board[board_y*8+board_x] = 0;
 
         if(depth == max_depth){
-            move_scores[imove] = get_board_score(tmp_board);
-            // cout << board_y << " " << board_x << " " << new_y << " " << new_x << " " << move_scores[imove] << endl;
+            move_scores[imove].score = get_board_score(tmp_board);
+            // for(int i=0; i<depth-1; i++) cout << "  ";
+            // cout << "depth " << depth << ": player " << player << ": " << pos2str(board_y, board_x) << " " << pos2str(new_y, new_x) << " " << move_scores[imove] << endl;
         }
         else{
+            // for(int i=0; i<depth-1; i++) cout << "  ";
+            // cout << "depth " << depth << ": player " << player << ": " << pos2str(board_y, board_x) << " " << pos2str(new_y, new_x) << endl;
             if(eval_sufficient_material(tmp_board)){
                 move_scores[imove] = eval_move_score(tmp_board, -player, depth+1, max_depth);
             }
             else{
-                move_scores[imove] = 0.0;
+                move_struct current_move;
+                current_move.score = -9999.0*player;
+                move_scores[imove] = current_move;
             }
         }
     }
@@ -573,19 +605,31 @@ float eval_move_score(short *board, int player, int depth, int max_depth){
     if(player == 1){
         for(int imove=1; imove<num_legal_moves; imove++){
             // cout << depth << " " << move_scores[imove] << " " << best_score << endl;
-            if(move_scores[imove] > move_scores[best_move_idx]){
+            if(move_scores[imove].score > move_scores[best_move_idx].score){
                 best_move_idx = imove;
             }
         }
     }
     else{
         for(int imove=1; imove<num_legal_moves; imove++){
-            if(move_scores[imove] < move_scores[best_move_idx]){
+            if(move_scores[imove].score < move_scores[best_move_idx].score){
                 best_move_idx = imove;
             }
         }
     }
-    float best_score = move_scores[best_move_idx];
+    float best_score = move_scores[best_move_idx].score;
+
+    // best_moves[(depth-1)*6+0] = best_score;
+    // best_moves[(depth-1)*6+1] = legal_moves[best_move_idx*6+0];
+    // best_moves[(depth-1)*6+2] = legal_moves[best_move_idx*6+2];
+    // best_moves[(depth-1)*6+3] = legal_moves[best_move_idx*6+3];
+    // best_moves[(depth-1)*6+4] = legal_moves[best_move_idx*6+4];
+    // best_moves[(depth-1)*6+5] = legal_moves[best_move_idx*6+5];
     // cout << player << " " << best_score << " " << legal_moves[best_move_idx*6+2] << " " << legal_moves[best_move_idx*6+3] << " " << legal_moves[best_move_idx*6+4] << " " << legal_moves[best_move_idx*6+5] << endl;
-    return best_score;
+    return current_move;
+}
+
+extern "C"
+void eval_move_score_wrapper(short *best_moves, short *board, int player, int depth, int max_depth){
+    
 }
