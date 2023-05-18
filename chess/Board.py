@@ -8,14 +8,14 @@ from tqdm import trange
 # - Rooks, queens and bishops can move through enemies.
 # - Threat it not calculated for piece targeting friendly piece, but it should.
 
-Clib = ctypes.cdll.LoadLibrary("/home/jonas/github/Games/chess/tools.so.1")
-int16_array2 = np.ctypeslib.ndpointer(dtype=ctypes.c_short, ndim=2, flags="contiguous")
-int16_array1 = np.ctypeslib.ndpointer(dtype=ctypes.c_short, ndim=1, flags="contiguous")
-bool_array2 = np.ctypeslib.ndpointer(dtype=bool, ndim=2, flags="contiguous")
-Clib.get_all_threat_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
-Clib.get_all_legal_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
-Clib.get_all_possible_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
-Clib.get_threat_board.argtypes = [bool_array2, int16_array2, ctypes.c_long]
+# Clib = ctypes.cdll.LoadLibrary("/mn/stornext/d22/cmbco/comap/jonas/personal/chess/Games/chess/tools.so.1")
+# int16_array2 = np.ctypeslib.ndpointer(dtype=ctypes.c_short, ndim=2, flags="contiguous")
+# int16_array1 = np.ctypeslib.ndpointer(dtype=ctypes.c_short, ndim=1, flags="contiguous")
+# bool_array2 = np.ctypeslib.ndpointer(dtype=bool, ndim=2, flags="contiguous")
+# Clib.get_all_threat_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
+# Clib.get_all_legal_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
+# Clib.get_all_possible_moves.argtypes = [int16_array2, int16_array1, ctypes.c_long]
+# Clib.get_threat_board.argtypes = [bool_array2, int16_array2, ctypes.c_long]
 
 
 
@@ -116,7 +116,7 @@ def get_threat_board(board, player):
     for move in possible_moves:
         string, piece, move_start, move_end, is_capture = move
         if is_capture:
-            threat_board[*move_end] = True
+            threat_board[move_end[0], move_end[1]] = True
     return threat_board
 
 
@@ -135,7 +135,7 @@ def get_all_possible_moves(board, player):
                     # 1 step forward
                     new_pos = (board_y-1*player, board_x)
                     if is_inside_board(*new_pos):
-                        if board[*new_pos] == 0:  # Pawns can't capture forward, so no piece can be at new pos.
+                        if board[new_pos[0], new_pos[1]] == 0:  # Pawns can't capture forward, so no piece can be at new pos.
                             possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, False])
                             # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
                     # The diagonal captures
@@ -149,14 +149,14 @@ def get_all_possible_moves(board, player):
                         if board[pos[0]-1, pos[1]] == 0:
                             new_pos = pos + np.array([-2,0])
                             if is_inside_board(*new_pos):
-                                if board[*new_pos] == 0:
+                                if board[new_pos[0], new_pos[1]] == 0:
                                     # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
                                     possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, False])
                     elif player == -1 and pos[0] == 1:
                         if board[pos[0]+1, pos[1]] == 0:
                             new_pos = pos + np.array([+2,0])
                             if is_inside_board(*new_pos):
-                                if board[*new_pos] == 0:
+                                if board[new_pos[0], new_pos[1]] == 0:
                                     possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, False])
                                     # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
                         
@@ -166,7 +166,7 @@ def get_all_possible_moves(board, player):
                     for move in knight_moves:
                         new_pos = pos + move
                         if is_inside_board(*new_pos):
-                            if board[*new_pos]*player <= 0:  # If no friendy piece at new pos.
+                            if board[new_pos[0], new_pos[1]]*player <= 0:  # If no friendy piece at new pos.
                                 possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, True])
                                 # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
 
@@ -178,10 +178,10 @@ def get_all_possible_moves(board, player):
                                 move = np.array([dx, dy])*length
                                 new_pos = pos + move
                                 if is_inside_board(*new_pos):
-                                    if board[*new_pos]*player <= 0:
+                                    if board[new_pos[0], new_pos[1]]*player <= 0:
                                         # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
                                         possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, True])
-                                    if board[*new_pos] != 0:
+                                    if board[new_pos[0], new_pos[1]] != 0:
                                         break  # If any piece is encountered in this direction, the rest of the diagonal will be illegal.
                                 else:
                                     break
@@ -193,10 +193,10 @@ def get_all_possible_moves(board, player):
                             move = dir*length
                             new_pos = pos + move
                             if is_inside_board(*new_pos):
-                                if board[*new_pos]*player <= 0:
+                                if board[new_pos[0], new_pos[1]]*player <= 0:
                                     possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, True])
                                     # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
-                                if board[*new_pos] != 0:
+                                if board[new_pos[0], new_pos[1]] != 0:
                                     break  # If any piece is encountered in this direction, the rest of the moves will be illegal.
                             else:
                                 break
@@ -208,10 +208,10 @@ def get_all_possible_moves(board, player):
                             move = dir*length
                             new_pos = pos + move
                             if is_inside_board(*new_pos):
-                                if board[*new_pos]*player <= 0:
+                                if board[new_pos[0], new_pos[1]]*player <= 0:
                                     possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, True])
                                     # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
-                                if board[*new_pos] != 0:
+                                if board[new_pos[0], new_pos[1]] != 0:
                                     break  # If any piece is encountered in this direction, the rest of the moves will be illegal.
                             else:
                                 break
@@ -221,10 +221,10 @@ def get_all_possible_moves(board, player):
                                 move = np.array([dx, dy])*length
                                 new_pos = pos + move
                                 if is_inside_board(*new_pos):
-                                    if board[*new_pos]*player <= 0:
+                                    if board[new_pos[0], new_pos[1]]*player <= 0:
                                         possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, True])
                                         # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
-                                    if board[*new_pos] != 0:
+                                    if board[new_pos[0], new_pos[1]] != 0:
                                         break  # If any piece is encountered in this direction, the rest of the diagonal will be illegal.
                                 else:
                                     break
@@ -237,7 +237,7 @@ def get_all_possible_moves(board, player):
                                 move = np.array([dy, dx])
                                 new_pos = pos + move
                                 if is_inside_board(*new_pos):
-                                    if board[*new_pos]*player <= 0:
+                                    if board[new_pos[0], new_pos[1]]*player <= 0:
                                         # print(piece_str, idx_to_board_pos(board_y, board_x), "==>", idx_to_board_pos(*new_pos))
                                         possible_moves.append([f"{piece_str}: {idx_to_board_pos(board_y, board_x)} ==> {idx_to_board_pos(*new_pos)}", piece, pos, new_pos, True])
     return possible_moves
@@ -258,7 +258,7 @@ def C_get_all_possible_moves(board, player):
 
 
 def get_all_legal_moves(board, player):
-    if True:
+    if False:
         moves = np.zeros((600), dtype=np.int16)
         num_moves = Clib.get_all_legal_moves(board, moves, player)
         moves = moves.reshape(100,6)[:num_moves]
@@ -274,28 +274,28 @@ def get_all_legal_moves(board, player):
         possible_moves = get_all_possible_moves(board, player)
         legal_moves = []
         king_pos = np.argwhere(board == player*6)[0]
-        if enemy_threat_board[*king_pos]:
+        if enemy_threat_board[king_pos[0], king_pos[1]]:
             check = True
         else:
             check = False
         for move in possible_moves:
             string, piece, move_start, move_end, is_capture = move
             if piece == player*1 and move_end[1] != move_start[1]:  # The diagonal pawn moves are only legal if there is an enemy piece there.
-                if board[*move_end]*player < 0:                       # We sort out the diagonal moves specifically by looking for a change in x-direction.
+                if board[move_end[0], move_end[1]]*player < 0:                       # We sort out the diagonal moves specifically by looking for a change in x-direction.
                     potential_board = board.copy()
-                    potential_board[*move[3]] = potential_board[*move[2]]
-                    potential_board[*move[2]] = 0
+                    potential_board[move[3][0], move[3][1]] = potential_board[move[2][0], move[2][1]]
+                    potential_board[move[2][0], move[2][1]] = 0
                     potential_enemy_threat_board = get_threat_board(potential_board, -player)  # Get board of all squares opponent can attack (for king movement).
                     potential_king_pos = np.argwhere(potential_board == player*6)[0]
-                    if not potential_enemy_threat_board[*potential_king_pos]:
+                    if not potential_enemy_threat_board[potential_king_pos[0], potential_king_pos[1]]:
                         legal_moves.append(move)
             else:
                 potential_board = board.copy()
-                potential_board[*move[3]] = potential_board[*move[2]]
-                potential_board[*move[2]] = 0
+                potential_board[move[3][0], move[3][1]] = potential_board[move[2][0], move[2][1]]
+                potential_board[move[2][0], move[2][1]] = 0
                 potential_enemy_threat_board = get_threat_board(potential_board, -player)  # Get board of all squares opponent can attack (for king movement).
                 potential_king_pos = np.argwhere(potential_board == player*6)[0]
-                if not potential_enemy_threat_board[*potential_king_pos]:
+                if not potential_enemy_threat_board[potential_king_pos[0], potential_king_pos[1]]:
                     legal_moves.append(move)
 
         return legal_moves
@@ -359,14 +359,14 @@ class Board:
 
         move = self.legal_moves[legal_move_idx]
         string, piece, move_start, move_end, is_capture = move
-        if self.board[*move_end] != 0:
-            self.score -= score_calc(self.board[*move_end])
-        self.board[*move_end] = self.board[*move_start]
-        self.board[*move_start] = 0
+        if self.board[move_end[0], move_end[1]] != 0:
+            self.score -= score_calc(self.board[move_end[0], move_end[1]])
+        self.board[move_end[0], move_end[1]] = self.board[move_start[0], move_start[1]]
+        self.board[move_start[0], move_start[1]] = 0
         if move_end[0] == 0 or move_end[0] == 7:
-            if abs(self.board[*move_end]) == 1:
+            if abs(self.board[move_end[0], move_end[1]]) == 1:
                 self.score += 8*player
-                self.board[*move_end] = player*5
+                self.board[move_end[0], move_end[1]] = player*5
         self.PGN += f"{string[0]}{string[4:6]}{string[-2:]} "
         
         self.current_player *= -1
@@ -375,7 +375,7 @@ class Board:
         if len(self.legal_moves) == 0:
             threat_board = get_threat_board(self.board, -self.current_player)
             king_pos = np.argwhere(self.board == self.current_player*6)[0]
-            if threat_board[*king_pos]:
+            if threat_board[king_pos[0], king_pos[1]]:
                 self.score = -1000*self.current_player
                 # print(f"VICTORY FOR {-self.current_player}.")
                 return -self.current_player
