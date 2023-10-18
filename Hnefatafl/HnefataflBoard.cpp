@@ -128,6 +128,11 @@ bool HnefataflBoard::makeMove(HnefataflBoard::Player player, int startX, int sta
         return false;
     }
 
+    // If all checks pass, check if the destination is a corner square and if the moving piece isn't the king
+    if ((endX == 0 || endX == 10) && (endY == 0 || endY == 10) && board[startX][startY] != KING) {
+        std::cout << "Only the king can move to the corner squares." << std::endl;
+        return false;
+    }
     // Check if the ending square is empty
     if (board[endX][endY] != HnefataflBoard::EMPTY) {
         std::cout << "The destination square is not empty." << std::endl;
