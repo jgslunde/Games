@@ -78,9 +78,3 @@ bool HnefataflGame::promptForMove(HnefataflBoard::Player player) {
 
     return true;  // continue game
 }
-
-int main() {
-    HnefataflGame game;
-    game.start();
-    return 0;
-}
