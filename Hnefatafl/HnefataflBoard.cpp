@@ -11,17 +11,17 @@ HnefataflBoard::HnefataflBoard() {
 
 void HnefataflBoard::resetBoard() {
     std::vector<std::vector<Piece>> initialPosition = {
-        {ATTACKER, ATTACKER, ATTACKER, EMPTY, EMPTY, EMPTY, EMPTY, ATTACKER, ATTACKER, ATTACKER, ATTACKER},
-        {ATTACKER, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, ATTACKER},
-        {ATTACKER, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, ATTACKER},
-        {EMPTY, EMPTY, EMPTY, DEFENDER, DEFENDER, DEFENDER, DEFENDER, DEFENDER, EMPTY, EMPTY, EMPTY},
-        {EMPTY, EMPTY, EMPTY, DEFENDER, EMPTY, EMPTY, EMPTY, DEFENDER, EMPTY, EMPTY, EMPTY},
-        {EMPTY, EMPTY, EMPTY, DEFENDER, EMPTY, KING, EMPTY, DEFENDER, EMPTY, EMPTY, EMPTY},
-        {EMPTY, EMPTY, EMPTY, DEFENDER, EMPTY, EMPTY, EMPTY, DEFENDER, EMPTY, EMPTY, EMPTY},
-        {EMPTY, EMPTY, EMPTY, DEFENDER, DEFENDER, DEFENDER, DEFENDER, DEFENDER, EMPTY, EMPTY, EMPTY},
-        {ATTACKER, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, ATTACKER},
-        {ATTACKER, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, ATTACKER},
-        {ATTACKER, ATTACKER, ATTACKER, EMPTY, EMPTY, EMPTY, EMPTY, ATTACKER, ATTACKER, ATTACKER, ATTACKER}
+        {EMPTY,    EMPTY,    EMPTY,     ATTACKER,  ATTACKER,  ATTACKER,  ATTACKER,  ATTACKER,  EMPTY,   EMPTY,     EMPTY},
+        {EMPTY,    EMPTY,    EMPTY,     EMPTY,     EMPTY,     ATTACKER,  EMPTY,     EMPTY,     EMPTY,   EMPTY,     EMPTY},
+        {EMPTY,    EMPTY,    EMPTY,     EMPTY,     EMPTY,     EMPTY,     EMPTY,     EMPTY,     EMPTY,   EMPTY,     EMPTY},
+        {ATTACKER, EMPTY,    EMPTY,     EMPTY,     EMPTY,     DEFENDER,  EMPTY,     EMPTY,     EMPTY,   EMPTY,     ATTACKER},
+        {ATTACKER, EMPTY,    EMPTY,     EMPTY,     DEFENDER,  DEFENDER,  DEFENDER,  EMPTY,     EMPTY,   EMPTY,     ATTACKER},
+        {ATTACKER, ATTACKER, EMPTY,     DEFENDER,  DEFENDER,  KING,      DEFENDER,  DEFENDER,  EMPTY,   ATTACKER,  ATTACKER},
+        {ATTACKER, EMPTY,    EMPTY,     EMPTY,     DEFENDER,  DEFENDER,  DEFENDER,  EMPTY,     EMPTY,   EMPTY,     ATTACKER},
+        {ATTACKER, EMPTY,    EMPTY,     EMPTY,     EMPTY,     DEFENDER,  EMPTY,     EMPTY,     EMPTY,   EMPTY,     ATTACKER},
+        {EMPTY,    EMPTY,    EMPTY,     EMPTY,     EMPTY,     EMPTY,     EMPTY,     EMPTY,     EMPTY,   EMPTY,     EMPTY},
+        {EMPTY,    EMPTY,    EMPTY,     EMPTY,     EMPTY,     ATTACKER,  EMPTY,     EMPTY,     EMPTY,   EMPTY,     EMPTY},
+        {EMPTY,    EMPTY,    EMPTY,     ATTACKER,  ATTACKER,  ATTACKER,  ATTACKER,  ATTACKER,  EMPTY,   EMPTY,     EMPTY}
     };
 
     board = initialPosition;
@@ -111,7 +111,6 @@ std::vector<HnefataflBoard::Move> HnefataflBoard::generateLegalMoves(HnefataflBo
 
 bool HnefataflBoard::makeMove(HnefataflBoard::Player player, int startX, int startY, int endX, int endY) {
     // Check if it's the correct player's turn
-    std::cout << player << " " << currentPlayer << std::endl;
     if (player != currentPlayer) {
         std::cout << "It's not this player's turn." << std::endl;
         return false;
@@ -138,6 +137,8 @@ bool HnefataflBoard::makeMove(HnefataflBoard::Player player, int startX, int sta
     // If all checks pass, move the piece and switch the current player
     board[endX][endY] = board[startX][startY];
     board[startX][startY] = HnefataflBoard::EMPTY;
+
+    std::cout << "Piece moved from " << startX << ", " << startY << " to " << endX << ", " << endY << std::endl;
 
     evaluateCaptures(endX, endY);
 
@@ -218,11 +219,20 @@ bool HnefataflBoard::isKingCaptured() const {
     for (int i = 0; i < 11; i++) {
         for (int j = 0; j < 11; j++) {
             if (board[i][j] == KING) {
-                // Assuming the king is captured when surrounded on all 4 sides
-                return (i > 0 && board[i - 1][j] == ATTACKER) &&
-                        (i < 10 && board[i + 1][j] == ATTACKER) &&
-                        (j > 0 && board[i][j - 1] == ATTACKER) &&
-                        (j < 10 && board[i][j + 1] == ATTACKER);
+                // Check for top edge or ATTACKER piece above
+                bool topHostile = (i == 0) || (board[i - 1][j] == ATTACKER);
+
+                // Check for bottom edge or ATTACKER piece below
+                bool bottomHostile = (i == 10) || (board[i + 1][j] == ATTACKER);
+
+                // Check for left edge or ATTACKER piece to the left
+                bool leftHostile = (j == 0) || (board[i][j - 1] == ATTACKER);
+
+                // Check for right edge or ATTACKER piece to the right
+                bool rightHostile = (j == 10) || (board[i][j + 1] == ATTACKER);
+
+                // If all sides around the king are hostile, then the king is captured
+                return topHostile && bottomHostile && leftHostile && rightHostile;
             }
         }
     }
@@ -265,33 +275,28 @@ void HnefataflBoard::evaluateCaptures(int x, int y) {
     Piece movedPiece = board[x][y];
     Piece opponentPiece = (movedPiece == ATTACKER) ? DEFENDER : ATTACKER;
 
+    // Function to check if the position is hostile
+    auto isHostile = [this, movedPiece](int x, int y) {
+        return ((x == 0 && y == 0) || (x == 10 && y == 0) || (x == 0 && y == 10) || (x == 10 && y == 10)) || board[x][y] == movedPiece;
+    };
+
     // Check horizontal capture
-    if (x > 1 && board[x - 1][y] == opponentPiece && board[x - 2][y] == movedPiece) {
+    if (x > 1 && board[x - 1][y] == opponentPiece && isHostile(x - 2, y)) {
         board[x - 1][y] = EMPTY;
-        std::cout << "Piece captured on " << x << ", " << y << std::endl;
+        std::cout << "### Piece captured on " << x - 1 << ", " << y << std::endl;
     }
-    if (x < 9 && board[x + 1][y] == opponentPiece && board[x + 2][y] == movedPiece) {
+    if (x < 9 && board[x + 1][y] == opponentPiece && isHostile(x + 2, y)) {
         board[x + 1][y] = EMPTY;
-        std::cout << "Piece captured on " << x << ", " << y << std::endl;
+        std::cout << "### Piece captured on " << x + 1 << ", " << y << std::endl;
     }
 
     // Check vertical capture
-    if (y > 1 && board[x][y - 1] == opponentPiece && board[x][y - 2] == movedPiece) {
+    if (y > 1 && board[x][y - 1] == opponentPiece && isHostile(x, y - 2)) {
         board[x][y - 1] = EMPTY;
-        std::cout << "Piece captured on " << x << ", " << y << std::endl;
+        std::cout << "### Piece captured on " << x << ", " << y - 1 << std::endl;
     }
-    if (y < 9 && board[x][y + 1] == opponentPiece && board[x][y + 2] == movedPiece) {
+    if (y < 9 && board[x][y + 1] == opponentPiece && isHostile(x, y + 2)) {
         board[x][y + 1] = EMPTY;
-        std::cout << "Piece captured on " << x << ", " << y << std::endl;
-    }
-
-    // King capture (assuming king is captured when surrounded on all 4 sides)
-    if (board[x][y] == KING) {
-        if ((x > 0 && board[x - 1][y] == ATTACKER) && 
-            (x < 10 && board[x + 1][y] == ATTACKER) && 
-            (y > 0 && board[x][y - 1] == ATTACKER) && 
-            (y < 10 && board[x][y + 1] == ATTACKER)) {
-            board[x][y] = EMPTY;  // King is captured
-        }
+        std::cout << "### Piece captured on " << x << ", " << y + 1 << std::endl;
     }
 }
