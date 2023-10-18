@@ -239,6 +239,15 @@ bool HnefataflBoard::isKingCaptured() const {
     return false; // This should never be reached, but it's here just in case.
 }
 
+HnefataflBoard::Piece HnefataflBoard::getPieceAt(int x, int y) const {
+    // You might want to add boundary checks to ensure x and y are valid
+    if(x < 0 || x >= board.size() || y < 0 || y >= board[0].size()) {
+        // Return a default value or throw an exception
+        return EMPTY; // or throw std::out_of_range("Invalid board coordinates");
+    }
+    return board[x][y];
+}
+
 
 HnefataflBoard::Player currentPlayer = HnefataflBoard::PLAYER_ATTACKER;  // We'll assume the attacker goes first.
 

@@ -32,6 +32,7 @@ public:
     Move getRandomMove(Player player) const;
     bool performRandomMove(Player player);
     bool checkForWin();
+    Piece getPieceAt(int x, int y) const;
 
 private:
     std::vector<std::vector<Piece>> board;
