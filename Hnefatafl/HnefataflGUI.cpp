@@ -32,6 +32,11 @@ void HnefataflGui::handleSquareClick(int x, int y) {
         board.makeMove(board.getCurrentPlayer(), selectedSquare.first, selectedSquare.second, x, y);
         selectedSquare = {-1, -1};
         updateBoardDisplay();
+        if (board.checkForWin()) {
+            board.printBoard();
+            std::cout << (board.getCurrentPlayer() == HnefataflBoard::PLAYER_ATTACKER ? "Defenders" : "Attackers") << " win!\n";
+            this->close();
+        }
     }
 }
 

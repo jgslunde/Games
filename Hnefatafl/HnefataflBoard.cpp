@@ -236,6 +236,7 @@ bool HnefataflBoard::isKingCaptured() const {
                 // Check for right edge or ATTACKER piece to the right
                 bool rightHostile = (j == 10) || (board[i][j + 1] == ATTACKER);
 
+                std::cout << topHostile << " " << bottomHostile << " " << leftHostile << " " << rightHostile << std::endl;
                 // If all sides around the king are hostile, then the king is captured
                 return topHostile && bottomHostile && leftHostile && rightHostile;
             }
