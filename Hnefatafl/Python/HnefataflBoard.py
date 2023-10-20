@@ -6,7 +6,8 @@ ATTACKER = 1
 DEFENDER = -1
 KING = -2
 
-corners = np.array([[0, 0], [10, 0], [0, 10], [10,10]])
+corners_arr = np.array([[0, 0], [10, 0], [0, 10], [10,10]])
+corners = [[0, 0], [10, 0], [0, 10], [10,10]]
 offsets = np.array([[-1,0], [0,-1], [1,0], [0,1]])
 
 piece_names = {0: "·", 1: "♖", -1: "♜", -2: "♚"}
@@ -61,25 +62,34 @@ class Board:
             self._legal_moves = []
             for x in range(11):
                 for y in range(11):
+                    piece = board[x,y]
                     if (player == ATTACKER and board[x,y] == ATTACKER) or (player == DEFENDER and (board[x,y] == DEFENDER or board[x,y] == KING)):
                         for x_new in range(x+1, 11, 1):
                             if board[x_new, y] == EMPTY:
-                                self._legal_moves.append([[x,y],[x_new,y]])
+                                if x_new != 5 or y != 5:  # Throne can never be moved to, but can be passed through.
+                                    if [x_new, y] not in corners or piece == KING:  # Only king can move to the corners
+                                        self._legal_moves.append([[x,y],[x_new,y]])
                             else:
                                 break
                         for x_new in range(x-1, -1, -1):
                             if board[x_new, y] == EMPTY:
-                                self._legal_moves.append([[x,y],[x_new,y]])
+                                if x_new != 5 or y != 5:
+                                    if [x_new, y] not in corners or piece == KING:
+                                        self._legal_moves.append([[x,y],[x_new,y]])
                             else:
                                 break
                         for y_new in range(y+1, 11, 1):
                             if board[x, y_new] == EMPTY:
-                                self._legal_moves.append([[x,y],[x,y_new]])
+                                if x != 5 or y_new != 5:
+                                    if [x, y_new] not in corners or piece == KING:
+                                        self._legal_moves.append([[x,y],[x,y_new]])
                             else:
                                 break
                         for y_new in range(y-1, -1, -1):
                             if board[x, y_new] == EMPTY:
-                                self._legal_moves.append([[x,y],[x,y_new]])
+                                if x != 5 or y_new != 5:
+                                    if [x, y_new] not in corners or piece == KING:
+                                        self._legal_moves.append([[x,y],[x,y_new]])
                             else:
                                 break
 
@@ -118,7 +128,7 @@ class Board:
     def evaluate_win(self):
         board = self.board
         king_pos = np.argwhere(board == KING)[0]
-        if (king_pos == corners[0]).all() or (king_pos == corners[1]).all() or (king_pos == corners[2]).all() or (king_pos == corners[3]).all():
+        if (king_pos == corners_arr[0]).all() or (king_pos == corners_arr[1]).all() or (king_pos == corners_arr[2]).all() or (king_pos == corners_arr[3]).all():
             print("King in corner.")
             return DEFENDER
         king_surrounded = True
