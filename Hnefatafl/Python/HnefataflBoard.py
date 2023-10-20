@@ -1,5 +1,6 @@
 import numpy as np
-from random import randint, choice
+from random import randint, choice, shuffle
+from copy import deepcopy
 
 EMPTY = 0
 ATTACKER = 1
@@ -33,6 +34,7 @@ class Board:
         self.current_player = ATTACKER
         self.turn = 1
         self._legal_moves = None
+        self.won = 0
 
 
     def print_board(self):
@@ -44,8 +46,10 @@ class Board:
         for x in range(11):
             printstring += f"{x+1:2d} "
             for y in range(11):
-                if x == 5 and y == 5 and board [x,y] == EMPTY:
+                if x in [0, 10] and y in [0, 10] and board [x,y] == EMPTY:
                     printstring += "○ "
+                elif x == 5 and y == 5 and board [x,y] == EMPTY:
+                    printstring += "□ "
                 else:
                     printstring += piece_names[board[x,y]] + " "
             printstring += f" {x+1:d}"
@@ -96,7 +100,7 @@ class Board:
         return self._legal_moves
 
 
-    def make_move(self, move):
+    def make_move(self, move, verbose=True):
         player = self.current_player
         board = self.board
         move_from, move_to = move
@@ -117,19 +121,23 @@ class Board:
                     if (0 <= double_neighbor_x <= 10 and 0 <= double_neighbor_y <= 10 and board[double_neighbor_x,double_neighbor_y]*player > 0)\
                         or (double_neighbor_x in [0, 10] and double_neighbor_y in [0,10]):
                         capture_x, capture_y = move_to[0]+offset[0], move_to[1]+offset[1]
-                        print(f"##### Piece captured on {capture_x}, {capture_y}. #####")
+                        if verbose:
+                            print(f"##### Piece captured on {capture_x}, {capture_y}. #####")
                         board[capture_x,capture_y] = EMPTY
-        print(f"Making move {move[0]} to {move[1]}.")
+        if verbose:
+            print(f"Making move {move[0]} to {move[1]}.")
 
         self.current_player *= -1  # Switching current player.
         self._legal_moves = None  # Resetting legal moves, as they don't apply to new board state.
 
 
-    def evaluate_win(self):
+    def evaluate_win(self, verbose=True):
         board = self.board
         king_pos = np.argwhere(board == KING)[0]
         if (king_pos == corners_arr[0]).all() or (king_pos == corners_arr[1]).all() or (king_pos == corners_arr[2]).all() or (king_pos == corners_arr[3]).all():
-            print("King in corner.")
+            if verbose:
+                print("King in corner.")
+            self.won = DEFENDER
             return DEFENDER
         king_surrounded = True
         for offset in offsets:
@@ -140,18 +148,22 @@ class Board:
                 if board[*pos] != ATTACKER:
                     king_surrounded = False
         if king_surrounded:
-            print("King surrounded.")
+            if verbose:
+                print("King surrounded.")
+            self.won = ATTACKER
             return ATTACKER
-        if np.sum(board == ATTACKER) == 0:
-            print("No .")
-            return DEFENDER
         if np.sum(board == DEFENDER) == 0:
+            if verbose:
+                print("No pieces left for defender.")
+            self.won = ATTACKER
             return ATTACKER
         return 0
 
 
     def get_current_score(self):
         board = self.board
+        if self.won != 0:
+            return np.inf*self.won
         return np.sum(board == 1) - np.sum(board==-1)*2
 
 
@@ -160,3 +172,15 @@ class Board:
         legal_moves = self.legal_moves
         chosen_move = choice(legal_moves)
         self.make_move(chosen_move)
+
+    def play_AI_1(self):
+        legal_moves = self.legal_moves.copy()
+        shuffle(legal_moves)  # Shuffle it so it plays a random best move, not just always the same best move.
+        scores = np.zeros((len(legal_moves)))
+        for i in range(len(legal_moves)):
+            new_board = deepcopy(self)
+            new_board.make_move(legal_moves[i], verbose=False)
+            new_board.evaluate_win(verbose=False)
+            scores[i] = new_board.get_current_score()
+        best_move_idx = np.argmax(scores*self.current_player)
+        self.make_move(legal_moves[best_move_idx])
