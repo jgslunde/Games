@@ -31,6 +31,7 @@ class Board:
         
         self.current_player = ATTACKER
         self.turn = 1
+        self._legal_moves = None
 
 
     def print_board(self):
@@ -52,34 +53,37 @@ class Board:
         print(printstring)
 
 
-    def get_legal_moves(self):
-        player = self.current_player
-        board = self.board
-        legal_moves = []
-        for x in range(11):
-            for y in range(11):
-                if (player == ATTACKER and board[x,y] == ATTACKER) or (player == DEFENDER and (board[x,y] == DEFENDER or board[x,y] == KING)):
-                    for x_new in range(x+1, 11, 1):
-                        if board[x_new, y] == EMPTY:
-                            legal_moves.append([[x,y],[x_new,y]])
-                        else:
-                            break
-                    for x_new in range(x-1, -1, -1):
-                        if board[x_new, y] == EMPTY:
-                            legal_moves.append([[x,y],[x_new,y]])
-                        else:
-                            break
-                    for y_new in range(y+1, 11, 1):
-                        if board[x, y_new] == EMPTY:
-                            legal_moves.append([[x,y],[x,y_new]])
-                        else:
-                            break
-                    for y_new in range(y-1, -1, -1):
-                        if board[x, y_new] == EMPTY:
-                            legal_moves.append([[x,y],[x,y_new]])
-                        else:
-                            break
-        return legal_moves
+    @property
+    def legal_moves(self):
+        if self._legal_moves is None:
+            player = self.current_player
+            board = self.board
+            self._legal_moves = []
+            for x in range(11):
+                for y in range(11):
+                    if (player == ATTACKER and board[x,y] == ATTACKER) or (player == DEFENDER and (board[x,y] == DEFENDER or board[x,y] == KING)):
+                        for x_new in range(x+1, 11, 1):
+                            if board[x_new, y] == EMPTY:
+                                self._legal_moves.append([[x,y],[x_new,y]])
+                            else:
+                                break
+                        for x_new in range(x-1, -1, -1):
+                            if board[x_new, y] == EMPTY:
+                                self._legal_moves.append([[x,y],[x_new,y]])
+                            else:
+                                break
+                        for y_new in range(y+1, 11, 1):
+                            if board[x, y_new] == EMPTY:
+                                self._legal_moves.append([[x,y],[x,y_new]])
+                            else:
+                                break
+                        for y_new in range(y-1, -1, -1):
+                            if board[x, y_new] == EMPTY:
+                                self._legal_moves.append([[x,y],[x,y_new]])
+                            else:
+                                break
+
+        return self._legal_moves
 
 
     def make_move(self, move):
@@ -88,6 +92,8 @@ class Board:
         move_from, move_to = move
         if (player == ATTACKER and board[*move_from] != 1) or (player == DEFENDER and board[*move_from] not in [DEFENDER, KING]):
             raise ValueError(f"Player {player} tried moving piece {piece_names[board[*move_from]]}")
+        if move not in self.legal_moves:
+            raise ValueError(f"Move {move} is not a legal move.")
         board[*move_to] = board[*move_from]
         board[*move_from] = EMPTY
 
@@ -104,7 +110,9 @@ class Board:
                         print(f"##### Piece captured on {capture_x}, {capture_y}. #####")
                         board[capture_x,capture_y] = EMPTY
         print(f"Making move {move[0]} to {move[1]}.")
-        self.current_player *= -1
+
+        self.current_player *= -1  # Switching current player.
+        self._legal_moves = None  # Resetting legal moves, as they don't apply to new board state.
 
 
     def evaluate_win(self):
@@ -139,6 +147,6 @@ class Board:
 
     def play_random_move(self):
         # Plays a random move for the current player.
-        legal_moves = self.get_legal_moves()
+        legal_moves = self.legal_moves
         chosen_move = choice(legal_moves)
         self.make_move(chosen_move)
