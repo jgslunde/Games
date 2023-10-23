@@ -23,7 +23,7 @@ const uint64_t corner_bb = 18295873486192705ull;
 const uint64_t throne_bb = 134217728ull;
 const uint64_t edge_bb = 18410856566090662016ull;
 
-int NUM_NODES = 0;
+vector<int> NUM_NODES(10);
 
 
 uint64_t board2bits(vector<vector<uint64_t>> board){
@@ -141,6 +141,7 @@ uint64_t get_legal_moves_as_bb(uint64_t piece_bb, uint64_t blocker_bb, vector<ve
 vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_bb){
     // 165 instructions??
     vector<uint64_t> legal_moves;
+    legal_moves.reserve(12);
     uint64_t proposed_move;
 
     // RIGHT
@@ -271,6 +272,7 @@ void make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, u
 vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player){
     // 284 instructions, including calls to "get_legal_moves_as_vector".
     vector<uint64_t> legal_moves;
+    legal_moves.reserve(100);
     uint64_t piece_bb;
     if(player == PLAYER_ATK){
         // Attacker moves.
@@ -326,7 +328,7 @@ vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb,
 
 
 int get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth){
-    NUM_NODES += 1;
+    NUM_NODES[depth] += 1;
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     vector<int> move_scores(num_legal_moves);
@@ -566,11 +568,11 @@ int main(){
 
 
     // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
-    cout << NUM_NODES << endl;
 
     cout << get_board_score_by_width_search(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 7) << endl;
-
-    cout << NUM_NODES << endl;
+    for(int i=0; i<8; i++){
+        cout << NUM_NODES[i] << endl;
+    }
     // print_bitboard(edge_bb);
 
     // cout << "BEFORE" << endl;
