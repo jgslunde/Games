@@ -95,6 +95,7 @@ void print_bitboard_move(uint64_t bb1, uint64_t bb2){
 
 
 uint64_t get_legal_moves_as_bb(uint64_t piece_bb, uint64_t blocker_bb, vector<vector<uint64_t>> &move_lookup){
+    // 60 instructions.
     uint64_t allowed_moves = 0;
     uint64_t possible_moves, masked_blocker_bb;
     int idx = __builtin_ctzll(piece_bb);
@@ -138,6 +139,7 @@ uint64_t get_legal_moves_as_bb(uint64_t piece_bb, uint64_t blocker_bb, vector<ve
 
 
 vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_bb){
+    // 165 instructions.
     vector<uint64_t> legal_moves;
     uint64_t proposed_move;
 
@@ -190,16 +192,39 @@ vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_b
 
 
 int get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return  __builtin_popcountll(atk_bb)
+    // 106 instructions.
+    uint64_t king_hostile_bb = atk_bb | corner_bb;
+    int score = 
+            __builtin_popcountll(atk_bb)
             - 2*__builtin_popcountll(def_bb)
-            - 9999.0*(__builtin_popcountll(atk_bb) == 0)
-            - 9999.0*((king_bb & corner_bb) > 0)
-            + 9999.0*((king_bb & atk_bb>>1) && (king_bb & atk_bb<<1) && (king_bb & atk_bb>>8) && (king_bb & atk_bb<<8))
-            ;
+            - 1000*(__builtin_popcountll(atk_bb) == 0)
+            - 1000*((king_bb & corner_bb) > 0);
+            if(king_bb & throne_bb){  // If king on throne, we need 4 capturing pieces.
+                if((king_bb>>1 & atk_bb) && (king_bb<<1 & atk_bb) && (king_bb>>8 & atk_bb) && (king_bb<<8 & atk_bb))
+                score += 1000;
+            }
+            else if((king_bb << 1 & throne_bb) || (king_bb >> 1 & throne_bb) || (king_bb << 8 & throne_bb) || (king_bb >> 8 & throne_bb)){
+                // If king is next to throne, we need 3 capturing pieces.
+                int enemy_right = ((king_bb>>1 & atk_bb) != 0);
+                int enemy_left = ((king_bb<<1 & atk_bb) != 0);
+                int enemy_down = ((king_bb>>8 & atk_bb) != 0);
+                int enemy_up = ((king_bb<<8 & atk_bb) != 0);
+                if(enemy_right+enemy_left+enemy_down+enemy_up >= 3){
+                    score += 1000;
+                }
+            }
+            else{
+                if(((king_bb>>1 & king_hostile_bb) && (king_bb<<1 & king_hostile_bb)) || ((king_bb>>8 & king_hostile_bb) && (king_bb<<8 & king_hostile_bb))){
+                    score += 1000;
+                }
+            }
+
+    return score;
 }
 
 
 uint64_t perform_captures(uint64_t moved_piece_bb, uint64_t allied_pieces_bb, uint64_t enemy_pices_bb){
+    // 34 instructions.
     uint64_t potential_capture, captured;
     captured = 0;
 
@@ -224,6 +249,7 @@ uint64_t perform_captures(uint64_t moved_piece_bb, uint64_t allied_pieces_bb, ui
 
 
 void make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, uint64_t move_from, uint64_t move_to){
+    // 95 instructions, including calls to "perform_captures".
     if(atk_bb & move_from){
         atk_bb ^= (move_from | move_to);
         uint64_t captures = perform_captures(move_to, atk_bb | corner_bb, def_bb);
@@ -243,6 +269,7 @@ void make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, u
 
 
 vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player){
+    // 284 instructions, including calls to "get_legal_moves_as_vector".
     vector<uint64_t> legal_moves;
     uint64_t piece_bb;
     for(int imove=0; imove<64; imove++){
@@ -344,58 +371,58 @@ int main(){
     }
 
 
-    vector<vector<uint64_t>> initial_board = {
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 2, 0, 0, 0, 0},
-        {1, 1, 2, 3, 2, 1, 1, 0},
-        {0, 0, 0, 2, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0}
-    };
+    // vector<vector<uint64_t>> initial_board = {
+    //     {0, 0, 0, 1, 0, 0, 0, 0},
+    //     {0, 0, 0, 1, 0, 0, 0, 0},
+    //     {0, 0, 0, 2, 0, 0, 0, 0},
+    //     {1, 1, 2, 3, 2, 1, 1, 0},
+    //     {0, 0, 0, 2, 0, 0, 0, 0},
+    //     {0, 0, 0, 1, 0, 0, 0, 0},
+    //     {0, 0, 0, 1, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0}
+    // };
 
 
-    vector<vector<uint64_t>> test_piece_board = {
-        {1, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0}
-    };
+    // vector<vector<uint64_t>> test_piece_board = {
+    //     {1, 0, 0, 0, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0}
+    // };
 
-    vector<vector<uint64_t>> test_blocker_board = {
-        {0, 0, 0, 1, 0, 0, 1, 0},
-        {0, 0, 0, 0, 0, 1, 0, 0},
-        {0, 0, 1, 1, 0, 0, 1, 0},
-        {0, 1, 0, 0, 0, 0, 0, 0},
-        {1, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 1, 0, 1, 0, 0, 0},
-        {1, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0}
-    };
+    // vector<vector<uint64_t>> test_blocker_board = {
+    //     {0, 0, 0, 1, 0, 0, 1, 0},
+    //     {0, 0, 0, 0, 0, 1, 0, 0},
+    //     {0, 0, 1, 1, 0, 0, 1, 0},
+    //     {0, 1, 0, 0, 0, 0, 0, 0},
+    //     {1, 0, 0, 0, 0, 0, 0, 0},
+    //     {0, 0, 1, 0, 1, 0, 0, 0},
+    //     {1, 0, 0, 1, 0, 0, 0, 0},
+    //     {0, 0, 0, 0, 0, 0, 0, 0}
+    // };
 
     vector<vector<uint64_t>> test_atk_board = {
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 1, 0, 0, 0, 0, 0},
+        {0, 1, 0, 0, 0, 0, 0, 0},
+        {0, 0, 1, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
-        {1, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0}
     };
 
     vector<vector<uint64_t>> test_def_board = {
-        {0, 0, 0, 1, 0, 0, 1, 0},
-        {0, 0, 0, 0, 0, 1, 0, 0},
-        {0, 0, 0, 0, 0, 0, 1, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 1, 1, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0}
     };
@@ -404,8 +431,8 @@ int main(){
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 1, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0}
@@ -413,15 +440,15 @@ int main(){
 
 
 
-    uint64_t test_blocker_bb = board2bits(test_blocker_board);
-    uint64_t test_piece_bb = board2bits(test_piece_board);
+    // uint64_t test_blocker_bb = board2bits(test_blocker_board);
+    // uint64_t test_piece_bb = board2bits(test_piece_board);
 
     uint64_t test_atk_bb = board2bits(test_atk_board);
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
 
-    // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
+    cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
 
     // print_bitboard(edge_bb);
 
