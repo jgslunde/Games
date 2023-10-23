@@ -19,11 +19,11 @@ const int RIGHT = 1;
 const int DOWN = 2;
 const int LEFT = 3;
 
-const uint64_t corner_bb = 18295873486192705;
-const uint64_t throne_bb = 134217728;
-const uint64_t edge_bb = 18410856566090662016;
+const uint64_t corner_bb = 18295873486192705ull;
+const uint64_t throne_bb = 134217728ull;
+const uint64_t edge_bb = 18410856566090662016ull;
 
-
+int NUM_NODES = 0;
 
 
 uint64_t board2bits(vector<vector<uint64_t>> board){
@@ -139,7 +139,7 @@ uint64_t get_legal_moves_as_bb(uint64_t piece_bb, uint64_t blocker_bb, vector<ve
 
 
 vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_bb){
-    // 165 instructions.
+    // 165 instructions??
     vector<uint64_t> legal_moves;
     uint64_t proposed_move;
 
@@ -272,21 +272,102 @@ vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb,
     // 284 instructions, including calls to "get_legal_moves_as_vector".
     vector<uint64_t> legal_moves;
     uint64_t piece_bb;
-    for(int imove=0; imove<64; imove++){
-        piece_bb = (uint64_t) 1 << imove;
-        if(atk_bb & piece_bb){
-            vector<uint64_t> legal_moves_piece = get_legal_moves_as_vector(piece_bb, atk_bb | def_bb | king_bb | edge_bb);
-            for(int i=0; i<legal_moves_piece.size(); i++){
-                legal_moves.push_back(piece_bb);
-                legal_moves.push_back(legal_moves_piece[i]);
+    if(player == PLAYER_ATK){
+        // Attacker moves.
+        // int x = 0;
+        for(int imove=0; imove<64; imove++){
+            piece_bb = (uint64_t) 1 << imove;
+            if(atk_bb & piece_bb){
+                // cout << imove << endl;
+                // print_bitboard(piece_bb);
+                vector<uint64_t> legal_moves_piece = get_legal_moves_as_vector(piece_bb, atk_bb | def_bb | king_bb | edge_bb | corner_bb);
+                for(int i=0; i<legal_moves_piece.size(); i++){
+                    // cout << x << endl;
+                    // x ++;
+                    // print_bitboard_move(piece_bb, legal_moves_piece[i]);
+                    // cout << "size before: " << legal_moves.size();
+                    legal_moves.push_back(piece_bb);
+                    // cout << "  size after1: " << legal_moves.size();
+                    legal_moves.push_back(legal_moves_piece[i]);
+                    // cout << "  size after2: " << legal_moves.size() << endl;;
+                }
+            }
+        }
+        // cout << legal_moves.size() << endl;
+    }
+    else{
+        for(int imove=0; imove<64; imove++){
+            // Defender moves.
+            piece_bb = (uint64_t) 1 << imove;
+            if(def_bb & piece_bb){
+                vector<uint64_t> legal_moves_piece = get_legal_moves_as_vector(piece_bb, atk_bb | def_bb | king_bb | edge_bb | corner_bb);
+                for(int i=0; i<legal_moves_piece.size(); i++){
+                    legal_moves.push_back(piece_bb);
+                    legal_moves.push_back(legal_moves_piece[i]);
+                }
+            }
+        }
+        for(int imove=0; imove<64; imove++){
+            // King (defender) moves.
+            piece_bb = (uint64_t) 1 << imove;
+            if(king_bb & piece_bb){
+                vector<uint64_t> legal_moves_piece = get_legal_moves_as_vector(piece_bb, atk_bb | def_bb | edge_bb);
+                for(int i=0; i<legal_moves_piece.size(); i++){
+                    legal_moves.push_back(piece_bb);
+                    legal_moves.push_back(legal_moves_piece[i]);
+                }
             }
         }
     }
+
+
     return legal_moves;
 }
 
 
-// vector<int> get_move_scores(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb)
+int get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth){
+    NUM_NODES += 1;
+    vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
+    int num_legal_moves = legal_moves.size()/2;
+    vector<int> move_scores(num_legal_moves);
+    for(int imove=0; imove<num_legal_moves; imove++){
+        uint64_t atk_bb_new = atk_bb;
+        uint64_t def_bb_new = def_bb;
+        uint64_t king_bb_new = king_bb;
+        make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
+        int move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new);
+        if((depth == max_depth) || abs(move_score) > 900){
+            move_scores[imove] = move_score;
+        }
+        else{
+            move_scores[imove] = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth);
+        }
+    }
+    // int best_board_score;
+    if(player == PLAYER_ATK){
+        int best_board_score = -999999;
+        for(int imove=0; imove<num_legal_moves; imove++){
+            if(move_scores[imove] > best_board_score){
+                best_board_score = move_scores[imove];
+            }
+        }
+    return best_board_score;
+    }
+    else{
+        int best_board_score = 999999;
+        for(int imove=0; imove<num_legal_moves; imove++){
+            if(move_scores[imove] < best_board_score){
+                best_board_score = move_scores[imove];
+            }
+        }
+    return best_board_score;
+    }
+}
+
+// vector<int> get_move_scores(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth){
+// }
+
+
 
 
 void compare_bbs_to_expected(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, uint64_t atk_bb_exp, uint64_t def_bb_exp, uint64_t king_bb_exp){
@@ -370,6 +451,39 @@ int main(){
         }
     }
 
+    vector<vector<uint64_t>> initial_atk_board = {
+        {0, 0, 0, 1, 0, 0, 0, 0},
+        {0, 0, 0, 1, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {1, 1, 0, 0, 0, 1, 1, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 1, 0, 0, 0, 0},
+        {0, 0, 0, 1, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0}
+    };
+
+    vector<vector<uint64_t>> initial_def_board = {
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 1, 0, 0, 0, 0},
+        {0, 0, 1, 0, 1, 0, 0, 0},
+        {0, 0, 0, 1, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0}
+    };
+
+    vector<vector<uint64_t>> initial_king_board = {
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 1, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0}
+    };
+
 
     // vector<vector<uint64_t>> initial_board = {
     //     {0, 0, 0, 1, 0, 0, 0, 0},
@@ -410,9 +524,9 @@ int main(){
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 1, 0, 0, 0, 0, 0},
         {0, 1, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 1, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0}
     };
 
@@ -439,7 +553,6 @@ int main(){
     };
 
 
-
     // uint64_t test_blocker_bb = board2bits(test_blocker_board);
     // uint64_t test_piece_bb = board2bits(test_piece_board);
 
@@ -447,9 +560,17 @@ int main(){
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
+    uint64_t initial_atk_bb = board2bits(initial_atk_board);
+    uint64_t initial_def_bb = board2bits(initial_def_board);
+    uint64_t initial_king_bb = board2bits(initial_king_board);
 
-    cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
 
+    // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
+    cout << NUM_NODES << endl;
+
+    cout << get_board_score_by_width_search(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 7) << endl;
+
+    cout << NUM_NODES << endl;
     // print_bitboard(edge_bb);
 
     // cout << "BEFORE" << endl;
