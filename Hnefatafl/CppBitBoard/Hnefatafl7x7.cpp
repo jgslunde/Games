@@ -22,7 +22,7 @@ const int DOWN = 2;
 const int LEFT = 3;
 
 const uint64_t corner_bb = 18295873486192705ull;
-const uint64_t throne_bb = 134217728ull;
+// const uint64_t throne_bb = 134217728ull;
 const uint64_t edge_bb = 18410856566090662016ull;
 const uint64_t diag2corner_bb = 0b00000000000000001000100000000000000000000000000010001000000000;
 
@@ -195,7 +195,7 @@ vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_b
         if(proposed_move & blocker_bb){
             break;
         }
-        if((proposed_move != 0) && proposed_move != throne_bb){
+        if((proposed_move != 0) && proposed_move){
             // legal_moves.push_back(piece_bb);
             legal_moves.push_back(proposed_move);
         }
@@ -206,7 +206,7 @@ vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_b
         if(proposed_move & blocker_bb){
             break;
         }
-        if((proposed_move != 0) && proposed_move != throne_bb){
+        if((proposed_move != 0) && proposed_move){
             // legal_moves.push_back(piece_bb);
             legal_moves.push_back(proposed_move);
         }
@@ -217,7 +217,7 @@ vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_b
         if(proposed_move & blocker_bb){
             break;
         }
-        if((proposed_move != 0) && proposed_move != throne_bb){
+        if((proposed_move != 0) && proposed_move){
             // legal_moves.push_back(piece_bb);
             legal_moves.push_back(proposed_move);
         }
@@ -228,7 +228,7 @@ vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_b
         if(proposed_move & blocker_bb){
             break;
         }
-        if((proposed_move != 0) && proposed_move != throne_bb){
+        if((proposed_move != 0) && proposed_move){
             // legal_moves.push_back(piece_bb);
             legal_moves.push_back(proposed_move);
         }
@@ -248,30 +248,11 @@ double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     // 106 instructions.
     uint64_t king_hostile_bb = atk_bb | corner_bb;
     double score = 
-            __builtin_popcountll(atk_bb)
-            - 2.0*__builtin_popcountll(def_bb)
-            - 1000.0*(__builtin_popcountll(atk_bb) == 0)
-            - 1000.0*((king_bb & corner_bb) > 0);
-    if(king_bb & throne_bb){  // If king on throne, we need 4 capturing pieces.
-        if((king_bb>>1 & atk_bb) && (king_bb<<1 & atk_bb) && (king_bb>>8 & atk_bb) && (king_bb<<8 & atk_bb))
-        score += 1000.0;
-    }
-    else if((king_bb << 1 & throne_bb) || (king_bb >> 1 & throne_bb) || (king_bb << 8 & throne_bb) || (king_bb >> 8 & throne_bb)){
-        // If king is next to throne, we need 3 capturing pieces.
-        int enemy_right = ((king_bb>>1 & atk_bb) != 0);
-        int enemy_left = ((king_bb<<1 & atk_bb) != 0);
-        int enemy_down = ((king_bb>>8 & atk_bb) != 0);
-        int enemy_up = ((king_bb<<8 & atk_bb) != 0);
-        if(enemy_right+enemy_left+enemy_down+enemy_up >= 3){
-            score += 1000.0;
-        }
-    }
-    else{
-        // If king is not on or next to throne, we only need two capturing pieces.
-        if(((king_bb>>1 & king_hostile_bb) && (king_bb<<1 & king_hostile_bb)) || ((king_bb>>8 & king_hostile_bb) && (king_bb<<8 & king_hostile_bb))){
-            score += 1000.0;
-        }
-    }
+            __builtin_popcountll(atk_bb)   // Num of attacking pieces.
+            - 2.0*__builtin_popcountll(def_bb)   // Num of defending pieces: Twice the value.
+            - 1000.0*(__builtin_popcountll(atk_bb) == 0)   // Defender wins if attacker is out of pieces.
+            - 1000.0*((king_bb & corner_bb) > 0)   // Defender wins if the king reaces a corner.
+            + 1000.0*(!king_bb);   // Attacker wins if king is captured, and therefore not on the board.
 
     score += get_board_heuristic_v1(atk_bb, def_bb, king_bb);
 
@@ -308,8 +289,9 @@ void make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, u
     // 95 instructions, including calls to "perform_captures".
     if(atk_bb & move_from){
         atk_bb ^= (move_from | move_to);
-        uint64_t captures = perform_captures(move_to, atk_bb | corner_bb, def_bb);
+        uint64_t captures = perform_captures(move_to, atk_bb | corner_bb, def_bb | king_bb);
         def_bb &= ~captures;
+        king_bb &= ~captures;
     }
     else if(def_bb & move_from){
         def_bb ^= (move_from | move_to);
@@ -642,7 +624,8 @@ int main(){
     // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
 
     // print_bitboard(next2corner_bb);
-
+    int num_wins_atk = 0;
+    int num_wins_def = 0;
     for(int game=0; game<100; game++){
         uint64_t atk_bb = initial_atk_bb;
         uint64_t def_bb = initial_def_bb;
@@ -660,14 +643,16 @@ int main(){
             vector<uint64_t> preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth);
             make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
             score = get_board_score(atk_bb, def_bb, king_bb);
-            cout << iturn << " " << score << endl;
-            print_bitgame(atk_bb, def_bb, king_bb);
+            // cout << iturn << " " << score << endl;
             if(abs(score) > 800){
                 if(score < 0){
                     cout << "DEFENDER WINS" << endl;
+                    num_wins_def++;
                 }else{
                     cout << "ATTACKER WINS" << endl;
+                    num_wins_atk++;
                 }
+                print_bitgame(atk_bb, def_bb, king_bb);
                 break;
             }
             current_player *= -1;
@@ -678,6 +663,8 @@ int main(){
             }
         }
     }
+    cout << "Total number of atk wins: " << num_wins_atk << endl;
+    cout << "Total number of def wins: " << num_wins_def << endl;
     
     // cout << get_board_score_by_width_search2(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 1) << endl;
     // for(int i=0; i<8; i++){
