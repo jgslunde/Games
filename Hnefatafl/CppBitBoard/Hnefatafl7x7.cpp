@@ -395,7 +395,7 @@ double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_
 
 
 
-vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth){
+vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose){
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     int preffered_move_idx = 0;
@@ -408,20 +408,31 @@ vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_b
         def_bb_new = def_bb;
         king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*i], legal_moves[2*i+1]);
-        double move_score = 0.0000000001*(thread_safe_rand()%100) + get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth);
+        double move_score = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth);
         move_scores[i] = move_score;
     }
 
+    // Finding the preffered (highest or lowest, depending on player) score among the options.
     double best_move_score = -9999999.0*player;
     for(int i=0; i<num_legal_moves; i++){
         if(move_scores[i]*player > best_move_score*player){
             best_move_score = move_scores[i];
-            preffered_move_idx = i;
         }
     }
+    // Finding all the moves with the preffered score.
+    vector<int> preffered_move_indices;
+    for(int i=0; i<num_legal_moves; i++){
+        if(move_scores[i] == best_move_score){
+            preffered_move_indices.push_back(i);
+        }
+    }
+    // Chosing a random among those.
+    uint chosen_move_index = thread_safe_rand()%preffered_move_indices.size();
 
-    cout << player << " " << best_move_score << endl;
-    return {legal_moves[2*preffered_move_idx], legal_moves[2*preffered_move_idx+1]};
+    if(verbose){
+        cout << "Player: " << player << ". Board eval: " << best_move_score << endl;
+    }
+    return {legal_moves[2*chosen_move_index], legal_moves[2*chosen_move_index+1]};
 }
 
 
@@ -640,7 +651,7 @@ int main(){
             }else{
                 depth=4;
             }
-            vector<uint64_t> preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth);
+            vector<uint64_t> preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false);
             make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
             score = get_board_score(atk_bb, def_bb, king_bb);
             // cout << iturn << " " << score << endl;
