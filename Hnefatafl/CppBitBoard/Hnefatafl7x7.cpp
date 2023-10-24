@@ -237,10 +237,16 @@ vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_b
 }
 
 
-double get_board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    double score = 0;
-    score += 0.1* (double) __builtin_popcountll(diag2corner_bb & atk_bb);
-    return score;
+double board_heuristic_pieces_only(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
+            - 2.0*__builtin_popcountll(def_bb);   // Number of defending pieces times two (they are half as many).
+}
+
+
+double board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
+            - 2.0*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
+            + 0.1* (double) __builtin_popcountll(diag2corner_bb & atk_bb);
 }
 
 
@@ -248,13 +254,9 @@ double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     // 106 instructions.
     uint64_t king_hostile_bb = atk_bb | corner_bb;
     double score = 
-            __builtin_popcountll(atk_bb)   // Num of attacking pieces.
-            - 2.0*__builtin_popcountll(def_bb)   // Num of defending pieces: Twice the value.
             - 1000.0*(__builtin_popcountll(atk_bb) == 0)   // Defender wins if attacker is out of pieces.
             - 1000.0*((king_bb & corner_bb) > 0)   // Defender wins if the king reaces a corner.
             + 1000.0*(!king_bb);   // Attacker wins if king is captured, and therefore not on the board.
-
-    score += get_board_heuristic_v1(atk_bb, def_bb, king_bb);
 
     return score;
 }
@@ -354,7 +356,7 @@ vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb,
 }
 
 
-double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth){
+double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
     NUM_NODES[depth] += 1;
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
@@ -364,12 +366,12 @@ double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_
         uint64_t def_bb_new = def_bb;
         uint64_t king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
-        double move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new);
+        double move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
         if((depth >= max_depth) || abs(move_score) > 900){
             move_scores[imove] = (1 - 0.01*depth)*move_score;
         }
         else{
-            move_scores[imove] = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth);
+            move_scores[imove] = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth, heuristic_function);
         }
     }
     // int best_board_score;
@@ -395,7 +397,7 @@ double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_
 
 
 
-vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose){
+vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     int preffered_move_idx = 0;
@@ -408,7 +410,7 @@ vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_b
         def_bb_new = def_bb;
         king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*i], legal_moves[2*i+1]);
-        double move_score = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth);
+        double move_score = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth, heuristic_function);
         move_scores[i] = move_score;
     }
 
@@ -427,7 +429,7 @@ vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_b
         }
     }
     // Chosing a random among those.
-    uint chosen_move_index = thread_safe_rand()%preffered_move_indices.size();
+    uint chosen_move_index = preffered_move_indices[thread_safe_rand()%preffered_move_indices.size()];
 
     if(verbose){
         cout << "Player: " << player << ". Board eval: " << best_move_score << endl;
@@ -637,7 +639,7 @@ int main(){
     // print_bitboard(next2corner_bb);
     int num_wins_atk = 0;
     int num_wins_def = 0;
-    for(int game=0; game<100; game++){
+    for(int game=0; game<1; game++){
         uint64_t atk_bb = initial_atk_bb;
         uint64_t def_bb = initial_def_bb;
         uint64_t king_bb = initial_king_bb;
@@ -651,10 +653,15 @@ int main(){
             }else{
                 depth=4;
             }
-            vector<uint64_t> preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false);
+            vector<uint64_t> preffered_move;
+            if(current_player == 1)
+                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, true, board_heuristic_pieces_only);
+            else
+                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, true, board_heuristic_pieces_only);
             make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
-            score = get_board_score(atk_bb, def_bb, king_bb);
-            // cout << iturn << " " << score << endl;
+            score = get_board_score(atk_bb, def_bb, king_bb) + board_heuristic_pieces_only(atk_bb, def_bb, king_bb);
+            cout << iturn << " " << score << endl;
+            print_bitgame(atk_bb, def_bb, king_bb);
             if(abs(score) > 800){
                 if(score < 0){
                     cout << "DEFENDER WINS" << endl;
