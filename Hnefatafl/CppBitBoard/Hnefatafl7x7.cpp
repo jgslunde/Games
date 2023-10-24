@@ -24,6 +24,7 @@ const int LEFT = 3;
 const uint64_t corner_bb = 18295873486192705ull;
 const uint64_t throne_bb = 134217728ull;
 const uint64_t edge_bb = 18410856566090662016ull;
+const uint64_t diag2corner_bb = 0b00000000000000001000100000000000000000000000000010001000000000;
 
 vector<int> NUM_NODES(10);
 
@@ -236,6 +237,13 @@ vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_b
 }
 
 
+double get_board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    double score = 0;
+    score += 0.1* (double) __builtin_popcountll(diag2corner_bb & atk_bb);
+    return score;
+}
+
+
 double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     // 106 instructions.
     uint64_t king_hostile_bb = atk_bb | corner_bb;
@@ -244,25 +252,28 @@ double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
             - 2.0*__builtin_popcountll(def_bb)
             - 1000.0*(__builtin_popcountll(atk_bb) == 0)
             - 1000.0*((king_bb & corner_bb) > 0);
-            if(king_bb & throne_bb){  // If king on throne, we need 4 capturing pieces.
-                if((king_bb>>1 & atk_bb) && (king_bb<<1 & atk_bb) && (king_bb>>8 & atk_bb) && (king_bb<<8 & atk_bb))
-                score += 1000.0;
-            }
-            else if((king_bb << 1 & throne_bb) || (king_bb >> 1 & throne_bb) || (king_bb << 8 & throne_bb) || (king_bb >> 8 & throne_bb)){
-                // If king is next to throne, we need 3 capturing pieces.
-                int enemy_right = ((king_bb>>1 & atk_bb) != 0);
-                int enemy_left = ((king_bb<<1 & atk_bb) != 0);
-                int enemy_down = ((king_bb>>8 & atk_bb) != 0);
-                int enemy_up = ((king_bb<<8 & atk_bb) != 0);
-                if(enemy_right+enemy_left+enemy_down+enemy_up >= 3){
-                    score += 1000.0;
-                }
-            }
-            else{
-                if(((king_bb>>1 & king_hostile_bb) && (king_bb<<1 & king_hostile_bb)) || ((king_bb>>8 & king_hostile_bb) && (king_bb<<8 & king_hostile_bb))){
-                    score += 1000.0;
-                }
-            }
+    if(king_bb & throne_bb){  // If king on throne, we need 4 capturing pieces.
+        if((king_bb>>1 & atk_bb) && (king_bb<<1 & atk_bb) && (king_bb>>8 & atk_bb) && (king_bb<<8 & atk_bb))
+        score += 1000.0;
+    }
+    else if((king_bb << 1 & throne_bb) || (king_bb >> 1 & throne_bb) || (king_bb << 8 & throne_bb) || (king_bb >> 8 & throne_bb)){
+        // If king is next to throne, we need 3 capturing pieces.
+        int enemy_right = ((king_bb>>1 & atk_bb) != 0);
+        int enemy_left = ((king_bb<<1 & atk_bb) != 0);
+        int enemy_down = ((king_bb>>8 & atk_bb) != 0);
+        int enemy_up = ((king_bb<<8 & atk_bb) != 0);
+        if(enemy_right+enemy_left+enemy_down+enemy_up >= 3){
+            score += 1000.0;
+        }
+    }
+    else{
+        // If king is not on or next to throne, we only need two capturing pieces.
+        if(((king_bb>>1 & king_hostile_bb) && (king_bb<<1 & king_hostile_bb)) || ((king_bb>>8 & king_hostile_bb) && (king_bb<<8 & king_hostile_bb))){
+            score += 1000.0;
+        }
+    }
+
+    score += get_board_heuristic_v1(atk_bb, def_bb, king_bb);
 
     return score;
 }
@@ -630,20 +641,22 @@ int main(){
 
     // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
 
+    // print_bitboard(next2corner_bb);
+
     for(int game=0; game<100; game++){
         uint64_t atk_bb = initial_atk_bb;
         uint64_t def_bb = initial_def_bb;
         uint64_t king_bb = initial_king_bb;
         int current_player = 1;
         int score = 0;
-        int depth = 6;
+        int depth = 4;
         int iturn = 0;
         while (true){
-            // if(current_player == 1){
-            //     depth=6;
-            // }else{
-            //     depth=4;
-            // }
+            if(current_player == 1){
+                depth=4;
+            }else{
+                depth=4;
+            }
             vector<uint64_t> preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth);
             make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
             score = get_board_score(atk_bb, def_bb, king_bb);
