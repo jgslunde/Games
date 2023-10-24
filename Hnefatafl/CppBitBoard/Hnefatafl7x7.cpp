@@ -24,7 +24,8 @@ const int LEFT = 3;
 const uint64_t corner_bb = 18295873486192705ull;
 // const uint64_t throne_bb = 134217728ull;
 const uint64_t edge_bb = 18410856566090662016ull;
-const uint64_t diag2corner_bb = 0b00000000000000001000100000000000000000000000000010001000000000;
+const uint64_t diag2corner_bb = 0x220000002200;
+const uint64_t fouredgesides_bb = 0x80022000800;
 
 vector<int> NUM_NODES(10);
 
@@ -243,10 +244,47 @@ double board_heuristic_pieces_only(uint64_t atk_bb, uint64_t def_bb, uint64_t ki
 }
 
 
+double board_heuristic_king_free_moves(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    uint64_t blocker_bb = atk_bb | def_bb | edge_bb;
+    double score = 0;
+    for(int i=0; i<6; i++){
+        score -= (double) 0.01*(((king_bb<<i) & (~blocker_bb)) != 0)
+                        + (((king_bb>>i) & (~blocker_bb))  != 0)
+                        + (((king_bb<<i*8) & (~blocker_bb)) != 0)
+                        + (((king_bb>>i*8) & (~blocker_bb)) != 0);
+    }
+    return score;
+}
+
+double board_heuristic_king_neighboring_enemies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return 0.3*(double) (((king_bb<<1 & atk_bb) != 0)
+                        + ((king_bb>>1 & atk_bb) != 0)
+                        + ((king_bb<<8 & atk_bb) != 0)
+                        + ((king_bb>>8 & atk_bb) != 0));
+}
+
+
 double board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
             - 2.0*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
             + 0.1* (double) __builtin_popcountll(diag2corner_bb & atk_bb);
+}
+
+
+double board_heuristic_v2(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
+            - 2.0*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
+            + 0.1* (double) __builtin_popcountll(diag2corner_bb & atk_bb)
+            + 0.05* (double) __builtin_popcountll(fouredgesides_bb & atk_bb);
+}
+
+double board_heuristic_v3(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return board_heuristic_v2(atk_bb, def_bb, king_bb) + board_heuristic_king_free_moves(atk_bb, def_bb, king_bb);
+}
+
+
+double board_heuristic_v4(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return board_heuristic_v3(atk_bb, def_bb, king_bb) + board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb);
 }
 
 
@@ -464,6 +502,68 @@ void compare_bbs_to_expected(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb,
 }
 
 
+void AI_vs_AI_tournament(int num_games, double (*atk_heuristic_function)(uint64_t, uint64_t, uint64_t), double (*def_heuristic_function)(uint64_t, uint64_t, uint64_t), bool verbose){
+    uint64_t initial_atk_bb = 0x8080063000808;
+    uint64_t initial_def_bb = 0x814080000;
+    uint64_t initial_king_bb = 0x8000000;
+
+    int num_wins_atk = 0;
+    int num_wins_def = 0;
+    int num_ties = 0;
+    for(int game=0; game<num_games; game++){
+        uint64_t atk_bb = initial_atk_bb;
+        uint64_t def_bb = initial_def_bb;
+        uint64_t king_bb = initial_king_bb;
+        int current_player = 1;
+        int score = 0;
+        int depth = 4;
+        int iturn = 0;
+        while (true){
+            if(current_player == 1){
+                depth=4;
+            }else{
+                depth=4;
+            }
+            vector<uint64_t> preffered_move;
+            if(current_player == 1)
+                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, atk_heuristic_function);
+            else
+                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, def_heuristic_function);
+            make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
+            score = get_board_score(atk_bb, def_bb, king_bb) + board_heuristic_pieces_only(atk_bb, def_bb, king_bb);
+            if(abs(score) > 800){
+                if(score < 0){
+                    num_wins_def++;
+                    if(verbose){
+                        cout << "DEFENDER WINS" << endl;
+                        print_bitgame(atk_bb, def_bb, king_bb);
+                    }
+                }else{
+                    num_wins_atk++;
+                    if(verbose){
+                        cout << "ATTACKER WINS" << endl;
+                        print_bitgame(atk_bb, def_bb, king_bb);
+                    }
+                }
+                break;
+            }
+            current_player *= -1;
+            iturn++;
+            if(iturn >= 100){
+                num_ties++;
+                if(verbose){
+                    cout << "100 TURNS REACHED" << endl;
+                    print_bitgame(atk_bb, def_bb, king_bb);
+                }
+                break;
+            }
+        }
+    }
+    cout << "Total number of atk wins: " << num_wins_atk << endl;
+    cout << "Total number of ties: " << num_ties << endl;
+    cout << "Total number of def wins: " << num_wins_def << endl;
+}
+
 
 
 
@@ -633,56 +733,26 @@ int main(){
     uint64_t initial_def_bb = board2bits(initial_def_board);
     uint64_t initial_king_bb = board2bits(initial_king_board);
 
+    cout << "same heuristics" << endl;
+    AI_vs_AI_tournament(10000, board_heuristic_pieces_only, board_heuristic_pieces_only, false);
+
+    cout << "v1" << endl;
+    AI_vs_AI_tournament(10000, board_heuristic_v1, board_heuristic_pieces_only, false);
+
+    cout << "v2" << endl;
+    AI_vs_AI_tournament(10000, board_heuristic_v2, board_heuristic_pieces_only, false);
+
+    cout << "v3" << endl;
+    AI_vs_AI_tournament(10000, board_heuristic_v3, board_heuristic_pieces_only, false);
+
+    cout << "v4" << endl;
+    AI_vs_AI_tournament(10000, board_heuristic_v4, board_heuristic_pieces_only, false);
+
 
     // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
 
     // print_bitboard(next2corner_bb);
-    int num_wins_atk = 0;
-    int num_wins_def = 0;
-    for(int game=0; game<1; game++){
-        uint64_t atk_bb = initial_atk_bb;
-        uint64_t def_bb = initial_def_bb;
-        uint64_t king_bb = initial_king_bb;
-        int current_player = 1;
-        int score = 0;
-        int depth = 4;
-        int iturn = 0;
-        while (true){
-            if(current_player == 1){
-                depth=4;
-            }else{
-                depth=4;
-            }
-            vector<uint64_t> preffered_move;
-            if(current_player == 1)
-                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, true, board_heuristic_pieces_only);
-            else
-                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, true, board_heuristic_pieces_only);
-            make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
-            score = get_board_score(atk_bb, def_bb, king_bb) + board_heuristic_pieces_only(atk_bb, def_bb, king_bb);
-            cout << iturn << " " << score << endl;
-            print_bitgame(atk_bb, def_bb, king_bb);
-            if(abs(score) > 800){
-                if(score < 0){
-                    cout << "DEFENDER WINS" << endl;
-                    num_wins_def++;
-                }else{
-                    cout << "ATTACKER WINS" << endl;
-                    num_wins_atk++;
-                }
-                print_bitgame(atk_bb, def_bb, king_bb);
-                break;
-            }
-            current_player *= -1;
-            iturn++;
-            if(iturn >= 200){
-                cout << "200 TURNS REACHED" << endl;
-                break;
-            }
-        }
-    }
-    cout << "Total number of atk wins: " << num_wins_atk << endl;
-    cout << "Total number of def wins: " << num_wins_def << endl;
+
     
     // cout << get_board_score_by_width_search2(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 1) << endl;
     // for(int i=0; i<8; i++){
