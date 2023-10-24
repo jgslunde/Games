@@ -2,6 +2,8 @@
 #include <vector>
 #include <ctime>
 #include <cstdlib>
+#include <random>
+#include <thread>
 
 using namespace std;
 
@@ -24,6 +26,13 @@ const uint64_t throne_bb = 134217728ull;
 const uint64_t edge_bb = 18410856566090662016ull;
 
 vector<int> NUM_NODES(10);
+
+
+thread_local std::mt19937 generator(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+
+int thread_safe_rand() {
+    return generator();
+}
 
 
 uint64_t board2bits(vector<vector<uint64_t>> board){
@@ -92,6 +101,41 @@ void print_bitboard_move(uint64_t bb1, uint64_t bb2){
     vector<vector<uint64_t>> board2 = bits2board(bb2);
     print_board_move(board1, board2);
 }
+
+
+
+void print_bitgame(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    vector<vector<uint64_t>> atk = bits2board(atk_bb);
+    vector<vector<uint64_t>> def = bits2board(def_bb);
+    vector<vector<uint64_t>> king = bits2board(king_bb);
+
+    cout << endl;
+    for(int y=0; y<8; y++){
+        for (int x=0; x<8; x++){
+            if(atk[y][x]){
+                cout << "○ ";
+            }
+            else if(def[y][x]){
+                cout << "● ";
+            }
+            else if(king[y][x]){
+                cout << "♚ ";
+            }
+            else if((y==0 || y==6) && (x==0 || x==6)){
+                cout << "· ";
+            }
+            else if(x==3 && y==3 && ~king[y][x]){
+                cout << "· ";
+            }
+            else{
+                cout << "  ";
+            }
+        }
+        cout << endl;
+    }
+        cout << endl;
+}
+
 
 
 uint64_t get_legal_moves_as_bb(uint64_t piece_bb, uint64_t blocker_bb, vector<vector<uint64_t>> &move_lookup){
@@ -192,17 +236,17 @@ vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_b
 }
 
 
-int get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     // 106 instructions.
     uint64_t king_hostile_bb = atk_bb | corner_bb;
-    int score = 
+    double score = 
             __builtin_popcountll(atk_bb)
-            - 2*__builtin_popcountll(def_bb)
-            - 1000*(__builtin_popcountll(atk_bb) == 0)
-            - 1000*((king_bb & corner_bb) > 0);
+            - 2.0*__builtin_popcountll(def_bb)
+            - 1000.0*(__builtin_popcountll(atk_bb) == 0)
+            - 1000.0*((king_bb & corner_bb) > 0);
             if(king_bb & throne_bb){  // If king on throne, we need 4 capturing pieces.
                 if((king_bb>>1 & atk_bb) && (king_bb<<1 & atk_bb) && (king_bb>>8 & atk_bb) && (king_bb<<8 & atk_bb))
-                score += 1000;
+                score += 1000.0;
             }
             else if((king_bb << 1 & throne_bb) || (king_bb >> 1 & throne_bb) || (king_bb << 8 & throne_bb) || (king_bb >> 8 & throne_bb)){
                 // If king is next to throne, we need 3 capturing pieces.
@@ -211,12 +255,12 @@ int get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
                 int enemy_down = ((king_bb>>8 & atk_bb) != 0);
                 int enemy_up = ((king_bb<<8 & atk_bb) != 0);
                 if(enemy_right+enemy_left+enemy_down+enemy_up >= 3){
-                    score += 1000;
+                    score += 1000.0;
                 }
             }
             else{
                 if(((king_bb>>1 & king_hostile_bb) && (king_bb<<1 & king_hostile_bb)) || ((king_bb>>8 & king_hostile_bb) && (king_bb<<8 & king_hostile_bb))){
-                    score += 1000;
+                    score += 1000.0;
                 }
             }
 
@@ -276,26 +320,16 @@ vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb,
     uint64_t piece_bb;
     if(player == PLAYER_ATK){
         // Attacker moves.
-        // int x = 0;
         for(int imove=0; imove<64; imove++){
             piece_bb = (uint64_t) 1 << imove;
             if(atk_bb & piece_bb){
-                // cout << imove << endl;
-                // print_bitboard(piece_bb);
                 vector<uint64_t> legal_moves_piece = get_legal_moves_as_vector(piece_bb, atk_bb | def_bb | king_bb | edge_bb | corner_bb);
                 for(int i=0; i<legal_moves_piece.size(); i++){
-                    // cout << x << endl;
-                    // x ++;
-                    // print_bitboard_move(piece_bb, legal_moves_piece[i]);
-                    // cout << "size before: " << legal_moves.size();
                     legal_moves.push_back(piece_bb);
-                    // cout << "  size after1: " << legal_moves.size();
                     legal_moves.push_back(legal_moves_piece[i]);
-                    // cout << "  size after2: " << legal_moves.size() << endl;;
                 }
             }
         }
-        // cout << legal_moves.size() << endl;
     }
     else{
         for(int imove=0; imove<64; imove++){
@@ -327,19 +361,19 @@ vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb,
 }
 
 
-int get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth){
+double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth){
     NUM_NODES[depth] += 1;
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
-    vector<int> move_scores(num_legal_moves);
+    vector<double> move_scores(num_legal_moves);
     for(int imove=0; imove<num_legal_moves; imove++){
         uint64_t atk_bb_new = atk_bb;
         uint64_t def_bb_new = def_bb;
         uint64_t king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
-        int move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new);
-        if((depth == max_depth) || abs(move_score) > 900){
-            move_scores[imove] = move_score;
+        double move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new);
+        if((depth >= max_depth) || abs(move_score) > 900){
+            move_scores[imove] = (1 - 0.01*depth)*move_score;
         }
         else{
             move_scores[imove] = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth);
@@ -347,7 +381,7 @@ int get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t k
     }
     // int best_board_score;
     if(player == PLAYER_ATK){
-        int best_board_score = -999999;
+        double best_board_score = -999999;
         for(int imove=0; imove<num_legal_moves; imove++){
             if(move_scores[imove] > best_board_score){
                 best_board_score = move_scores[imove];
@@ -356,7 +390,7 @@ int get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t k
     return best_board_score;
     }
     else{
-        int best_board_score = 999999;
+        double best_board_score = 999999;
         for(int imove=0; imove<num_legal_moves; imove++){
             if(move_scores[imove] < best_board_score){
                 best_board_score = move_scores[imove];
@@ -366,9 +400,36 @@ int get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t k
     }
 }
 
-// vector<int> get_move_scores(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth){
-// }
 
+
+vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth){
+    vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
+    int num_legal_moves = legal_moves.size()/2;
+    int preffered_move_idx = 0;
+    vector<double> move_scores(num_legal_moves);
+
+    #pragma omp parallel for
+    for(int i=0; i<num_legal_moves; i++){
+        uint64_t atk_bb_new, def_bb_new, king_bb_new;
+        atk_bb_new = atk_bb;
+        def_bb_new = def_bb;
+        king_bb_new = king_bb;
+        make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*i], legal_moves[2*i+1]);
+        double move_score = 0.0000000001*(thread_safe_rand()%100) + get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth);
+        move_scores[i] = move_score;
+    }
+
+    double best_move_score = -9999999.0*player;
+    for(int i=0; i<num_legal_moves; i++){
+        if(move_scores[i]*player > best_move_score*player){
+            best_move_score = move_scores[i];
+            preffered_move_idx = i;
+        }
+    }
+
+    cout << player << " " << best_move_score << endl;
+    return {legal_moves[2*preffered_move_idx], legal_moves[2*preffered_move_idx+1]};
+}
 
 
 
@@ -569,10 +630,46 @@ int main(){
 
     // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
 
-    cout << get_board_score_by_width_search(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 7) << endl;
-    for(int i=0; i<8; i++){
-        cout << NUM_NODES[i] << endl;
+    for(int game=0; game<100; game++){
+        uint64_t atk_bb = initial_atk_bb;
+        uint64_t def_bb = initial_def_bb;
+        uint64_t king_bb = initial_king_bb;
+        int current_player = 1;
+        int score = 0;
+        int depth = 6;
+        int iturn = 0;
+        while (true){
+            // if(current_player == 1){
+            //     depth=6;
+            // }else{
+            //     depth=4;
+            // }
+            vector<uint64_t> preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth);
+            make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
+            score = get_board_score(atk_bb, def_bb, king_bb);
+            cout << iturn << " " << score << endl;
+            print_bitgame(atk_bb, def_bb, king_bb);
+            if(abs(score) > 800){
+                if(score < 0){
+                    cout << "DEFENDER WINS" << endl;
+                }else{
+                    cout << "ATTACKER WINS" << endl;
+                }
+                break;
+            }
+            current_player *= -1;
+            iturn++;
+            if(iturn >= 200){
+                cout << "200 TURNS REACHED" << endl;
+                break;
+            }
+        }
     }
+    
+    // cout << get_board_score_by_width_search2(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 1) << endl;
+    // for(int i=0; i<8; i++){
+    //     cout << NUM_NODES[i] << endl;
+    // }
     // print_bitboard(edge_bb);
 
     // cout << "BEFORE" << endl;
