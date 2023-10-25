@@ -27,7 +27,7 @@ const uint64_t edge_bb = 18410856566090662016ull;
 const uint64_t diag2corner_bb = 0x220000002200;
 const uint64_t fouredgesides_bb = 0x80022000800;
 
-vector<int> NUM_NODES(10);
+// vector<int> NUM_NODES(10);
 
 
 thread_local std::mt19937 generator(std::hash<std::thread::id>{}(std::this_thread::get_id()));
@@ -184,7 +184,7 @@ uint64_t get_legal_moves_as_bb(uint64_t piece_bb, uint64_t blocker_bb, vector<ve
 }
 
 
-vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_bb){
+inline vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_bb){
     // 165 instructions??
     vector<uint64_t> legal_moves;
     legal_moves.reserve(12);
@@ -256,39 +256,38 @@ double board_heuristic_king_free_moves(uint64_t atk_bb, uint64_t def_bb, uint64_
     return score;
 }
 
-double board_heuristic_king_neighboring_enemies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return 0.3*(double) (((king_bb<<1 & atk_bb) != 0)
-                        + ((king_bb>>1 & atk_bb) != 0)
-                        + ((king_bb<<8 & atk_bb) != 0)
-                        + ((king_bb>>8 & atk_bb) != 0));
+inline double board_heuristic_king_neighboring_enemies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return 0.3*(((king_bb<<1 & atk_bb) != 0)
+                + ((king_bb>>1 & atk_bb) != 0)
+                + ((king_bb<<8 & atk_bb) != 0)
+                + ((king_bb>>8 & atk_bb) != 0));
 }
 
 
-double board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+inline double board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
             - 2.0*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
-            + 0.1* (double) __builtin_popcountll(diag2corner_bb & atk_bb);
+            + 0.1*__builtin_popcountll(diag2corner_bb & atk_bb);
 }
 
 
-double board_heuristic_v2(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
-            - 2.0*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
-            + 0.1* (double) __builtin_popcountll(diag2corner_bb & atk_bb)
-            + 0.05* (double) __builtin_popcountll(fouredgesides_bb & atk_bb);
+inline double board_heuristic_v2(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return  board_heuristic_v1(atk_bb, def_bb, king_bb);
+            + 0.1*__builtin_popcountll(diag2corner_bb & atk_bb)
+            + 0.05*__builtin_popcountll(fouredgesides_bb & atk_bb);
 }
 
-double board_heuristic_v3(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+inline double board_heuristic_v3(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return board_heuristic_v2(atk_bb, def_bb, king_bb) + board_heuristic_king_free_moves(atk_bb, def_bb, king_bb);
 }
 
 
-double board_heuristic_v4(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+inline double board_heuristic_v4(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return board_heuristic_v3(atk_bb, def_bb, king_bb) + board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb);
 }
 
 
-double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+inline double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     // 106 instructions.
     uint64_t king_hostile_bb = atk_bb | corner_bb;
     double score = 
@@ -300,7 +299,7 @@ double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
 }
 
 
-uint64_t perform_captures(uint64_t moved_piece_bb, uint64_t allied_pieces_bb, uint64_t enemy_pices_bb){
+inline uint64_t perform_captures(uint64_t moved_piece_bb, uint64_t allied_pieces_bb, uint64_t enemy_pices_bb){
     // 34 instructions.
     uint64_t potential_capture, captured;
     captured = 0;
@@ -325,7 +324,7 @@ uint64_t perform_captures(uint64_t moved_piece_bb, uint64_t allied_pieces_bb, ui
 }
 
 
-void make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, uint64_t move_from, uint64_t move_to){
+inline void make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, uint64_t move_from, uint64_t move_to){
     // 95 instructions, including calls to "perform_captures".
     if(atk_bb & move_from){
         atk_bb ^= (move_from | move_to);
@@ -346,7 +345,7 @@ void make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, u
 }
 
 
-vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player){
+inline vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player){
     // 284 instructions, including calls to "get_legal_moves_as_vector".
     vector<uint64_t> legal_moves;
     legal_moves.reserve(100);
@@ -394,8 +393,8 @@ vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb,
 }
 
 
-double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
-    NUM_NODES[depth] += 1;
+inline double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+    // NUM_NODES[depth] += 1;
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     vector<double> move_scores(num_legal_moves);
@@ -435,7 +434,7 @@ double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_
 
 
 
-vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+inline vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     int preffered_move_idx = 0;
@@ -755,20 +754,20 @@ int main(){
     uint64_t initial_def_bb = board2bits(initial_def_board);
     uint64_t initial_king_bb = board2bits(initial_king_board);
 
-    cout << "same heuristics" << endl;
-    AI_vs_AI_tournament(1000, board_heuristic_v4, board_heuristic_pieces_only, true);
+    // cout << "same heuristics" << endl;
+    // AI_vs_AI_tournament(1000, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
 
-    // cout << "v1" << endl;
-    // AI_vs_AI_tournament(10000, board_heuristic_v1, board_heuristic_pieces_only, false);
+    cout << "v1" << endl;
+    AI_vs_AI_tournament(1000, board_heuristic_v1, board_heuristic_pieces_only, true);
 
-    // cout << "v2" << endl;
-    // AI_vs_AI_tournament(10000, board_heuristic_v2, board_heuristic_pieces_only, false);
+    cout << "v2" << endl;
+    AI_vs_AI_tournament(1000, board_heuristic_v2, board_heuristic_pieces_only, false);
 
-    // cout << "v3" << endl;
-    // AI_vs_AI_tournament(10000, board_heuristic_v3, board_heuristic_pieces_only, false);
+    cout << "v3" << endl;
+    AI_vs_AI_tournament(1000, board_heuristic_v3, board_heuristic_pieces_only, false);
 
     // cout << "v4" << endl;
-    // AI_vs_AI_tournament(10000, board_heuristic_v4, board_heuristic_pieces_only, false);
+    // AI_vs_AI_tournament(1000, board_heuristic_v4, board_heuristic_pieces_only, false);
 
 
     // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
