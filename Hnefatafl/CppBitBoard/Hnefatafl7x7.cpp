@@ -502,15 +502,22 @@ void compare_bbs_to_expected(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb,
 }
 
 
-void AI_vs_AI_tournament(int num_games, double (*atk_heuristic_function)(uint64_t, uint64_t, uint64_t), double (*def_heuristic_function)(uint64_t, uint64_t, uint64_t), bool verbose){
+void AI_vs_AI_tournament(int num_games, double (*AI_1_heuristic_function)(uint64_t, uint64_t, uint64_t), double (*AI_2_heuristic_function)(uint64_t, uint64_t, uint64_t), bool verbose){
     uint64_t initial_atk_bb = 0x8080063000808;
     uint64_t initial_def_bb = 0x814080000;
     uint64_t initial_king_bb = 0x8000000;
 
-    int num_wins_atk = 0;
-    int num_wins_def = 0;
+    int num_AI_1_wins_atk = 0;
+    int num_AI_1_wins_def = 0;
+    int num_AI_1_ties_atk = 0;
+    int num_AI_1_ties_def = 0;
+    int num_AI_2_wins_atk = 0;
+    int num_AI_2_wins_def = 0;
     int num_ties = 0;
+    int AI_1_playing_as = 1;
     for(int game=0; game<num_games; game++){
+        if(verbose)
+            cout << "Game: " << game << endl;
         uint64_t atk_bb = initial_atk_bb;
         uint64_t def_bb = initial_def_bb;
         uint64_t king_bb = initial_king_bb;
@@ -525,21 +532,27 @@ void AI_vs_AI_tournament(int num_games, double (*atk_heuristic_function)(uint64_
                 depth=4;
             }
             vector<uint64_t> preffered_move;
-            if(current_player == 1)
-                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, atk_heuristic_function);
+            if(current_player*AI_1_playing_as == 1)
+                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, AI_1_heuristic_function);
             else
-                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, def_heuristic_function);
+                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, AI_2_heuristic_function);
             make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
             score = get_board_score(atk_bb, def_bb, king_bb) + board_heuristic_pieces_only(atk_bb, def_bb, king_bb);
             if(abs(score) > 800){
                 if(score < 0){
-                    num_wins_def++;
+                    if(AI_1_playing_as == -1)
+                        num_AI_1_wins_def++;
+                    else
+                        num_AI_2_wins_def++;
                     if(verbose){
                         cout << "DEFENDER WINS" << endl;
                         print_bitgame(atk_bb, def_bb, king_bb);
                     }
                 }else{
-                    num_wins_atk++;
+                    if(AI_1_playing_as == 1)
+                        num_AI_1_wins_atk++;
+                    else
+                        num_AI_2_wins_atk++;
                     if(verbose){
                         cout << "ATTACKER WINS" << endl;
                         print_bitgame(atk_bb, def_bb, king_bb);
@@ -550,7 +563,10 @@ void AI_vs_AI_tournament(int num_games, double (*atk_heuristic_function)(uint64_
             current_player *= -1;
             iturn++;
             if(iturn >= 100){
-                num_ties++;
+                if(AI_1_playing_as == 1)
+                    num_AI_1_ties_atk++;
+                else
+                    num_AI_1_ties_def++;
                 if(verbose){
                     cout << "100 TURNS REACHED" << endl;
                     print_bitgame(atk_bb, def_bb, king_bb);
@@ -558,10 +574,16 @@ void AI_vs_AI_tournament(int num_games, double (*atk_heuristic_function)(uint64_
                 break;
             }
         }
+        AI_1_playing_as *= -1;
     }
-    cout << "Total number of atk wins: " << num_wins_atk << endl;
-    cout << "Total number of ties: " << num_ties << endl;
-    cout << "Total number of def wins: " << num_wins_def << endl;
+    cout << "Total number of atk wins for AI_1: " << num_AI_1_wins_atk << endl;
+    cout << "Total number of atk wins for AI_2: " << num_AI_2_wins_atk << endl;
+    cout << "Total number of def wins for AI_1: " << num_AI_1_wins_def << endl;
+    cout << "Total number of def wins for AI_2: " << num_AI_2_wins_def << endl;
+    cout << "Total number of draws with AI_1 as atk: " << num_AI_1_ties_atk << endl;
+    cout << "Total number of draws with AI_1 as def: " << num_AI_1_ties_def << endl;
+    cout << "AI_1/AI_2 win ratio as atk: " << (double) num_AI_1_wins_atk / (double)num_AI_2_wins_atk << endl;
+    cout << "AI_1/AI_2 win ratio as def: " << (double) num_AI_1_wins_def / (double)num_AI_2_wins_def << endl;
 }
 
 
@@ -734,19 +756,19 @@ int main(){
     uint64_t initial_king_bb = board2bits(initial_king_board);
 
     cout << "same heuristics" << endl;
-    AI_vs_AI_tournament(10000, board_heuristic_pieces_only, board_heuristic_pieces_only, false);
+    AI_vs_AI_tournament(1000, board_heuristic_v4, board_heuristic_pieces_only, true);
 
-    cout << "v1" << endl;
-    AI_vs_AI_tournament(10000, board_heuristic_v1, board_heuristic_pieces_only, false);
+    // cout << "v1" << endl;
+    // AI_vs_AI_tournament(10000, board_heuristic_v1, board_heuristic_pieces_only, false);
 
-    cout << "v2" << endl;
-    AI_vs_AI_tournament(10000, board_heuristic_v2, board_heuristic_pieces_only, false);
+    // cout << "v2" << endl;
+    // AI_vs_AI_tournament(10000, board_heuristic_v2, board_heuristic_pieces_only, false);
 
-    cout << "v3" << endl;
-    AI_vs_AI_tournament(10000, board_heuristic_v3, board_heuristic_pieces_only, false);
+    // cout << "v3" << endl;
+    // AI_vs_AI_tournament(10000, board_heuristic_v3, board_heuristic_pieces_only, false);
 
-    cout << "v4" << endl;
-    AI_vs_AI_tournament(10000, board_heuristic_v4, board_heuristic_pieces_only, false);
+    // cout << "v4" << endl;
+    // AI_vs_AI_tournament(10000, board_heuristic_v4, board_heuristic_pieces_only, false);
 
 
     // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
