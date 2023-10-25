@@ -595,8 +595,96 @@ void AI_vs_AI_tournament(int num_games, double (*AI_1_heuristic_function)(uint64
 }
 
 
+uint64_t flip_bb_vertically(uint64_t bb) {
+    uint64_t r1 = (bb & 0x00000000000000FFULL) << 48;
+    uint64_t r2 = (bb & 0x000000000000FF00ULL) << 32;
+    uint64_t r3 = (bb & 0x0000000000FF0000ULL) << 16;
+    uint64_t r4 = (bb & 0x00000000FF000000ULL); // No change in position
+    uint64_t r5 = (bb & 0x000000FF00000000ULL) >> 16;
+    uint64_t r6 = (bb & 0x0000FF0000000000ULL) >> 32;
+    uint64_t r7 = (bb & 0x00FF000000000000ULL) >> 48;
+
+    return r1 | r2 | r3 | r4 | r5 | r6 | r7;
+}
 
 
+uint64_t flip_bb_horizontally(uint64_t bb) {
+    // Swap the 1st and 7th columns
+    uint64_t swap1 = ((bb & 0x0040404040404040ULL) >> 6) | 
+                     ((bb & 0x0001010101010101ULL) << 6);
+
+    // Swap the 2nd and 6th columns
+    uint64_t swap2 = ((bb & 0x0020202020202020ULL) >> 4) | 
+                     ((bb & 0x0002020202020202ULL) << 4);
+
+    // Swap the 3rd and 5th columns
+    uint64_t swap3 = ((bb & 0x0010101010101010ULL) >> 2) | 
+                     ((bb & 0x0004040404040404ULL) << 2);
+
+    // Preserve the 4th column as is
+    uint64_t middle = bb & 0x0008080808080808ULL;
+
+    return swap1 | swap2 | swap3 | middle;
+}
+
+
+uint64_t transpose_bb(uint64_t board) {
+    // Slow, rewrite later.
+    uint64_t transposed = 0;
+
+    for (int i = 0; i < 7; ++i) {
+        for (int j = 0; j < 7; ++j) {
+            // Calculate the bit position in the original bitboard
+            int originalPos = i * 8 + j;
+
+            // Calculate the bit position in the transposed bitboard
+            int transposedPos = j * 8 + i;
+
+            // Check if the bit at the original position is set
+            if (board & (1ULL << originalPos)) {
+                // Set the bit at the transposed position
+                transposed |= (1ULL << transposedPos);
+            }
+        }
+    }
+
+    return transposed;
+}
+
+
+uint64_t anti_transpose_bb(uint64_t board){
+    uint64_t reflected = 0;
+    for (int i = 0; i < 7; ++i) {
+        for (int j = 0; j < 7; ++j) {
+            // Calculate the bit position in the original bitboard
+            int originalPos = i * 8 + j;
+            // Calculate the bit position in the reflected bitboard
+            int reflectedPos = (6 - j) * 8 + (6 - i);
+
+            // Check if the bit at the original position is set
+            if (board & (1ULL << originalPos)) {
+                // Set the bit at the reflected position
+                reflected |= (1ULL << reflectedPos);
+            }
+        }
+    }
+
+    return reflected;
+}
+
+
+vector<uint64_t> get_all_board_symetries(uint64_t board){
+    vector<uint64_t> all_boards(8);
+    all_boards[0] = board;
+    all_boards[1] = flip_bb_horizontally(transpose_bb(board));  // 90 degree rotation.
+    all_boards[2] = flip_bb_vertically(flip_bb_horizontally(board));  // 180 degree rotation.
+    all_boards[3] = flip_bb_vertically(transpose_bb(board));  // 270 degree rotation.
+    all_boards[4] = flip_bb_horizontally(board);  // Horizontal flip.
+    all_boards[5] = flip_bb_vertically(board);  // Vertical flip.
+    all_boards[6] = transpose_bb(board);  // Diagonal reflection.
+    all_boards[7] = anti_transpose_bb(board);  // Anti-diagonal reflection.
+    return all_boards;
+}
 
 
 int main(){
