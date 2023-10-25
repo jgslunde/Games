@@ -21,9 +21,9 @@ const int RIGHT = 1;
 const int DOWN = 2;
 const int LEFT = 3;
 
-const uint64_t corner_bb = 18295873486192705ull;
-// const uint64_t throne_bb = 134217728ull;
-const uint64_t edge_bb = 18410856566090662016ull;
+// const uint64_t throne_bb = 0x8000000;
+const uint64_t corner_bb = 0x41000000000041;
+const uint64_t edge_bb = 0xff80808080808080;
 const uint64_t diag2corner_bb = 0x220000002200;
 const uint64_t fouredgesides_bb = 0x80022000800;
 
@@ -273,7 +273,6 @@ inline double board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king
 
 inline double board_heuristic_v2(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return  board_heuristic_v1(atk_bb, def_bb, king_bb);
-            + 0.1*__builtin_popcountll(diag2corner_bb & atk_bb)
             + 0.05*__builtin_popcountll(fouredgesides_bb & atk_bb);
 }
 
@@ -284,6 +283,16 @@ inline double board_heuristic_v3(uint64_t atk_bb, uint64_t def_bb, uint64_t king
 
 inline double board_heuristic_v4(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return board_heuristic_v3(atk_bb, def_bb, king_bb) + board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb);
+}
+
+
+inline double board_heuristic_v5(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
+            - 1.5*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
+            + 0.1*__builtin_popcountll(diag2corner_bb & atk_bb)
+            + 0.05*__builtin_popcountll(fouredgesides_bb & atk_bb)
+            + board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)
+            + board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb);
 }
 
 
@@ -588,126 +597,12 @@ void AI_vs_AI_tournament(int num_games, double (*AI_1_heuristic_function)(uint64
 
 
 
+
+
 int main(){
-    vector<vector<uint64_t>> move_lookup(64, vector<uint64_t>(4));
-
-    vector<vector<uint64_t>> board(8, vector<uint64_t>(8));
-    for(int y=0; y<7; y++){
-        for(int x=0; x<7; x++){
-            // UP
-            for(int y_loc=0; y_loc<8; y_loc++){
-                for(int x_loc=0; x_loc<8; x_loc++){
-                    board[y_loc][x_loc] = 0;
-                }
-            }
-            for(int y_loc=y-1; y_loc>=0; y_loc--){
-                board[y_loc][x] = 1;                
-            }
-            move_lookup[y*8 + x][UP] = board2bits(board);
-
-            // RIGHT
-            for(int y_loc=0; y_loc<8; y_loc++){
-                for(int x_loc=0; x_loc<8; x_loc++){
-                    board[y_loc][x_loc] = 0;
-                }
-            }
-            for(int x_loc=x+1; x_loc<=6; x_loc++){
-                board[y][x_loc] = 1;                
-            }
-            move_lookup[y*8 + x][RIGHT] = board2bits(board);
-
-            // DOWN
-            for(int y_loc=0; y_loc<8; y_loc++){
-                for(int x_loc=0; x_loc<8; x_loc++){
-                    board[y_loc][x_loc] = 0;
-                }
-            }
-            for(int y_loc=y+1; y_loc<=6; y_loc++){
-                board[y_loc][x] = 1;                
-            }
-            move_lookup[y*8 + x][DOWN] = board2bits(board);
-
-            // LEFT
-            for(int y_loc=0; y_loc<8; y_loc++){
-                for(int x_loc=0; x_loc<8; x_loc++){
-                    board[y_loc][x_loc] = 0;
-                }
-            }
-            for(int x_loc=x-1; x_loc>=0; x_loc--){
-                board[y][x_loc] = 1;
-            }
-            move_lookup[y*8 + x][LEFT] = board2bits(board);
-
-        }
-    }
-
-    vector<vector<uint64_t>> initial_atk_board = {
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {1, 1, 0, 0, 0, 1, 1, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0}
-    };
-
-    vector<vector<uint64_t>> initial_def_board = {
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 1, 0, 1, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0}
-    };
-
-    vector<vector<uint64_t>> initial_king_board = {
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 1, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0}
-    };
-
-
-    // vector<vector<uint64_t>> initial_board = {
-    //     {0, 0, 0, 1, 0, 0, 0, 0},
-    //     {0, 0, 0, 1, 0, 0, 0, 0},
-    //     {0, 0, 0, 2, 0, 0, 0, 0},
-    //     {1, 1, 2, 3, 2, 1, 1, 0},
-    //     {0, 0, 0, 2, 0, 0, 0, 0},
-    //     {0, 0, 0, 1, 0, 0, 0, 0},
-    //     {0, 0, 0, 1, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0}
-    // };
-
-
-    // vector<vector<uint64_t>> test_piece_board = {
-    //     {1, 0, 0, 0, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0}
-    // };
-
-    // vector<vector<uint64_t>> test_blocker_board = {
-    //     {0, 0, 0, 1, 0, 0, 1, 0},
-    //     {0, 0, 0, 0, 0, 1, 0, 0},
-    //     {0, 0, 1, 1, 0, 0, 1, 0},
-    //     {0, 1, 0, 0, 0, 0, 0, 0},
-    //     {1, 0, 0, 0, 0, 0, 0, 0},
-    //     {0, 0, 1, 0, 1, 0, 0, 0},
-    //     {1, 0, 0, 1, 0, 0, 0, 0},
-    //     {0, 0, 0, 0, 0, 0, 0, 0}
-    // };
+    uint64_t initial_atk_bb = 0x8080063000808;
+    uint64_t initial_def_bb = 0x814080000;
+    uint64_t initial_king_bb = 0x8000000;
 
     vector<vector<uint64_t>> test_atk_board = {
         {0, 0, 0, 0, 0, 0, 0, 0},
@@ -742,91 +637,26 @@ int main(){
         {0, 0, 0, 0, 0, 0, 0, 0}
     };
 
-
-    // uint64_t test_blocker_bb = board2bits(test_blocker_board);
-    // uint64_t test_piece_bb = board2bits(test_piece_board);
-
     uint64_t test_atk_bb = board2bits(test_atk_board);
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
-    uint64_t initial_atk_bb = board2bits(initial_atk_board);
-    uint64_t initial_def_bb = board2bits(initial_def_board);
-    uint64_t initial_king_bb = board2bits(initial_king_board);
-
     // cout << "same heuristics" << endl;
     // AI_vs_AI_tournament(1000, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
 
-    cout << "v1" << endl;
-    AI_vs_AI_tournament(1000, board_heuristic_v1, board_heuristic_pieces_only, true);
+    // cout << "v1" << endl;
+    // AI_vs_AI_tournament(1000, board_heuristic_v1, board_heuristic_pieces_only, true);
 
-    cout << "v2" << endl;
-    AI_vs_AI_tournament(1000, board_heuristic_v2, board_heuristic_pieces_only, false);
+    // cout << "v2" << endl;
+    // AI_vs_AI_tournament(1000, board_heuristic_v2, board_heuristic_pieces_only, false);
 
-    cout << "v3" << endl;
-    AI_vs_AI_tournament(1000, board_heuristic_v3, board_heuristic_pieces_only, false);
+    // cout << "v3" << endl;
+    // AI_vs_AI_tournament(1000, board_heuristic_v3, board_heuristic_pieces_only, false);
 
     // cout << "v4" << endl;
     // AI_vs_AI_tournament(1000, board_heuristic_v4, board_heuristic_pieces_only, false);
 
-
-    // cout << get_board_score(test_atk_bb, test_def_bb, test_king_bb) << endl;
-
-    // print_bitboard(next2corner_bb);
-
-    
-    // cout << get_board_score_by_width_search2(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 1) << endl;
-    // for(int i=0; i<8; i++){
-    //     cout << NUM_NODES[i] << endl;
-    // }
-    // print_bitboard(edge_bb);
-
-    // cout << "BEFORE" << endl;
-    // print_bitboard(test_atk_bb);
-    // print_bitboard(test_def_bb);
-    // print_bitboard(test_king_bb);
-    // vector<uint64_t> moves = get_all_legal_moves_as_vector(test_atk_bb, test_def_bb, test_king_bb, 1);
-    // for(int i=0; i<moves.size()/2; i++){
-    //     print_bitboard_move(moves[2*i], moves[2*i+1]);
-    // }
-
-    // for(int j=0; j<10000000; j++){
-    //     uint64_t atk_bb, def_bb, king_bb;
-    //     atk_bb = test_atk_bb;
-    //     def_bb = test_def_bb;
-    //     king_bb = test_king_bb;
-    //     vector<uint64_t> moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, 1);
-    //     for(int i=0; i<moves.size()/2; i++){
-    //         make_move_on_board(atk_bb, def_bb, king_bb, moves[2*i], moves[2*i+1]);
-    //     }
-    // }
-
-    // make_move_on_board(test_atk_bb, test_def_bb, test_king_bb, 4294967296, 34359738368);
-    // cout << "AFTER" << endl;
-    // print_bitboard(test_atk_bb);
-    // print_bitboard(test_def_bb);
-    // print_bitboard(test_king_bb);
-
-    // for(int i=0; i<10000000; i++){
-    //     get_legal_moves(test_piece_bb, test_blocker_bb, move_lookup);
-    // }
-
-    // uint64_t asdf = 1;
-    // cout << __builtin_clzll(asdf) << endl;
-    // cout << __builtin_ctzll(asdf) << endl;
-    // asdf = asdf << 63;
-    // cout << __builtin_clz(asdf) << endl;
-    // cout << __builtin_ctz(asdf) << endl;
-    // cout << __builtin_ffs(asdf) << endl;
-
-    // uint64_t test_bb = board2bits(test_board);
-
-    // cout << test_bb << endl;
-
-    // vector<vector<uint64_t>> test_board_out = bits2board(test_bb + 1);
-
-    // print_board(test_board_out);
-
-    // print_bitboard(test_bb + 1);
+    // cout << "v5" << endl;
+    // AI_vs_AI_tournament(1000, board_heuristic_v5, board_heuristic_pieces_only, true);
 
 }
