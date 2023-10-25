@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <random>
 #include <thread>
+#include <map>
+#include <random>
 
 using namespace std;
 
@@ -27,8 +29,85 @@ const uint64_t edge_bb = 0xff80808080808080;
 const uint64_t diag2corner_bb = 0x220000002200;
 const uint64_t fouredgesides_bb = 0x80022000800;
 
-// vector<int> NUM_NODES(10);
+vector<int> NUM_NODES(12);
+map<uint64_t, int> board_counts;
 
+uint64_t ZOBRIST_NUM_TIMES_READ = 0;
+uint64_t ZOBRIST_NUM_TIMES_WRITTEN = 0;
+uint64_t ZOBRIST_NUM_TIMES_MISSED = 0;
+const int BOARD_SIZE = 7;
+const int PIECE_TYPES = 3; // Attacker, Defender, King
+
+// Initialize the Zobrist table
+uint64_t zobristTable[BOARD_SIZE][BOARD_SIZE][PIECE_TYPES];
+uint64_t zobristTurn;
+
+void initializeZobristTable() {
+    std::random_device rd;
+    std::mt19937_64 engine(rd());
+    std::uniform_int_distribution<uint64_t> dist;
+
+    for (int i = 0; i < BOARD_SIZE; ++i) {
+        for (int j = 0; j < BOARD_SIZE; ++j) {
+            for (int k = 0; k < PIECE_TYPES; ++k) {
+                zobristTable[i][j][k] = dist(engine);
+            }
+        }
+    }
+
+    zobristTurn = dist(engine);
+}
+
+uint64_t computeHash(const uint64_t attackers, const uint64_t defenders, const uint64_t king, bool isAttackersTurn) {
+    uint64_t hash = 0;
+
+    for (int i = 0; i < BOARD_SIZE; ++i) {
+        for (int j = 0; j < BOARD_SIZE; ++j) {
+            int pos = i * 8 + j;
+            if (attackers & (1ULL << pos)) {
+                hash ^= zobristTable[i][j][0];
+            } else if (defenders & (1ULL << pos)) {
+                hash ^= zobristTable[i][j][1];
+            } else if (king & (1ULL << pos)) {
+                hash ^= zobristTable[i][j][2];
+            }
+        }
+    }
+
+    if (isAttackersTurn) {
+        hash ^= zobristTurn;
+    }
+
+    return hash;
+}
+
+
+const size_t TABLE_SIZE = 1 << 26;
+struct TTEntry {
+    uint64_t hash;
+    double eval;  // example data
+    // Add other game-related data as needed.
+};
+TTEntry transpositionTable[TABLE_SIZE];
+
+void storeInTable(uint64_t hash, double eval) {
+    ZOBRIST_NUM_TIMES_WRITTEN++;
+    size_t index = hash & (TABLE_SIZE - 1);
+    transpositionTable[index].hash = hash;
+    transpositionTable[index].eval = eval;
+}
+
+double* retrieveFromTable(uint64_t hash) {
+    size_t index = hash & (TABLE_SIZE - 1);
+    // cout << hash << " " << transpositionTable[index].hash << endl;
+    if (transpositionTable[index].hash == hash) {
+        ZOBRIST_NUM_TIMES_READ++;
+        return &transpositionTable[index].eval;
+    } else {
+        ZOBRIST_NUM_TIMES_MISSED++;
+        return nullptr;  // Entry not found (collision or never stored)
+    }
+}
 
 thread_local std::mt19937 generator(std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
@@ -66,7 +145,10 @@ void print_board(vector<vector<uint64_t>> board){
     cout << endl;
     for(int y=0; y<8; y++){
         for (int x=0; x<8; x++){
-            cout << board[y][x] << " ";
+            if(x<7 && y<7)
+                cout << board[y][x] << " ";
+            else
+                cout << "\033[0;90m" << board[y][x] << "\033[0m ";
         }
         cout << endl;
     }
@@ -137,6 +219,99 @@ void print_bitgame(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     }
         cout << endl;
 }
+
+
+uint64_t flip_bb_vertically(uint64_t bb) {
+    uint64_t r1 = (bb & 0x00000000000000FFULL) << 48;
+    uint64_t r2 = (bb & 0x000000000000FF00ULL) << 32;
+    uint64_t r3 = (bb & 0x0000000000FF0000ULL) << 16;
+    uint64_t r4 = (bb & 0x00000000FF000000ULL); // No change in position
+    uint64_t r5 = (bb & 0x000000FF00000000ULL) >> 16;
+    uint64_t r6 = (bb & 0x0000FF0000000000ULL) >> 32;
+    uint64_t r7 = (bb & 0x00FF000000000000ULL) >> 48;
+
+    return r1 | r2 | r3 | r4 | r5 | r6 | r7;
+}
+
+
+uint64_t flip_bb_horizontally(uint64_t bb) {
+    // Swap the 1st and 7th columns
+    uint64_t swap1 = ((bb & 0x0040404040404040ULL) >> 6) | 
+                     ((bb & 0x0001010101010101ULL) << 6);
+
+    // Swap the 2nd and 6th columns
+    uint64_t swap2 = ((bb & 0x0020202020202020ULL) >> 4) | 
+                     ((bb & 0x0002020202020202ULL) << 4);
+
+    // Swap the 3rd and 5th columns
+    uint64_t swap3 = ((bb & 0x0010101010101010ULL) >> 2) | 
+                     ((bb & 0x0004040404040404ULL) << 2);
+
+    // Preserve the 4th column as is
+    uint64_t middle = bb & 0x0008080808080808ULL;
+
+    return swap1 | swap2 | swap3 | middle;
+}
+
+
+uint64_t transpose_bb(uint64_t board) {
+    // Slow, rewrite later.
+    uint64_t transposed = 0;
+
+    for (int i = 0; i < 7; ++i) {
+        for (int j = 0; j < 7; ++j) {
+            // Calculate the bit position in the original bitboard
+            int originalPos = i * 8 + j;
+
+            // Calculate the bit position in the transposed bitboard
+            int transposedPos = j * 8 + i;
+
+            // Check if the bit at the original position is set
+            if (board & (1ULL << originalPos)) {
+                // Set the bit at the transposed position
+                transposed |= (1ULL << transposedPos);
+            }
+        }
+    }
+
+    return transposed;
+}
+
+
+uint64_t anti_transpose_bb(uint64_t board){
+    uint64_t reflected = 0;
+    for (int i = 0; i < 7; ++i) {
+        for (int j = 0; j < 7; ++j) {
+            // Calculate the bit position in the original bitboard
+            int originalPos = i * 8 + j;
+            // Calculate the bit position in the reflected bitboard
+            int reflectedPos = (6 - j) * 8 + (6 - i);
+
+            // Check if the bit at the original position is set
+            if (board & (1ULL << originalPos)) {
+                // Set the bit at the reflected position
+                reflected |= (1ULL << reflectedPos);
+            }
+        }
+    }
+
+    return reflected;
+}
+
+
+vector<uint64_t> get_all_board_symetries(uint64_t board){
+    vector<uint64_t> all_boards(8);
+    all_boards[0] = board;
+    all_boards[1] = flip_bb_horizontally(transpose_bb(board));  // 90 degree rotation.
+    all_boards[2] = flip_bb_vertically(flip_bb_horizontally(board));  // 180 degree rotation.
+    all_boards[3] = flip_bb_vertically(transpose_bb(board));  // 270 degree rotation.
+    all_boards[4] = flip_bb_horizontally(board);  // Horizontal flip.
+    all_boards[5] = flip_bb_vertically(board);  // Vertical flip.
+    all_boards[6] = transpose_bb(board);  // Diagonal reflection.
+    all_boards[7] = anti_transpose_bb(board);  // Anti-diagonal reflection.
+    return all_boards;
+}
+
 
 
 
@@ -402,8 +577,9 @@ inline vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t 
 }
 
 
-inline double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
-    // NUM_NODES[depth] += 1;
+
+inline double get_board_score_by_width_search_zobrist(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+    NUM_NODES[depth] += 1;
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     vector<double> move_scores(num_legal_moves);
@@ -412,14 +588,76 @@ inline double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, 
         uint64_t def_bb_new = def_bb;
         uint64_t king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
-        double move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
-        if((depth >= max_depth) || abs(move_score) > 900){
-            move_scores[imove] = (1 - 0.01*depth)*move_score;
+
+        vector<uint64_t> all_sym_atk_bb = get_all_board_symetries(atk_bb_new);
+        vector<uint64_t> all_sym_def_bb = get_all_board_symetries(def_bb_new);
+        vector<uint64_t> all_sym_king_bb = get_all_board_symetries(king_bb_new);
+        vector<uint64_t> sym_hashes(8);
+        for(int i=0; i<8; i++)
+            sym_hashes[i] = computeHash(all_sym_atk_bb[i], all_sym_def_bb[i], all_sym_king_bb[i], player==1);
+        uint64_t hash = min(min(min(sym_hashes[0], sym_hashes[1]), min(sym_hashes[2], sym_hashes[3])), min(min(sym_hashes[4], sym_hashes[5]), min(sym_hashes[6], sym_hashes[7])));
+        // uint64_t hash = computeHash(atk_bb_new, def_bb_new, king_bb_new, player==1);
+        double* zobrist_score_ptr = retrieveFromTable(hash);
+        if(zobrist_score_ptr){  // If we didn't get a nullptr in return, the board position already exists in our table.
+            // We then therminate the entire rest of the search down this branch, and set the score:
+            // cout << "hello" << endl;
+            move_scores[imove] = *zobrist_score_ptr;
         }
         else{
+            // If not, we will have to calculate the board score:
+            double move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
+            if((depth >= max_depth) || abs(move_score) > 900){  // If we're at max depth, or someone has won, we terminate.
+                move_scores[imove] = (1 - 0.01*depth)*move_score;
+            }
+            else{  // If nobody has won and we're not at max depth, we continue down the tree:
+                move_scores[imove] = get_board_score_by_width_search_zobrist(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth, heuristic_function);
+            }
+        storeInTable(hash, move_scores[imove]);
+        }
+    }
+
+    // int best_board_score;
+    if(player == PLAYER_ATK){
+        double best_board_score = -999999;
+        for(int imove=0; imove<num_legal_moves; imove++){
+            if(move_scores[imove] > best_board_score){
+                best_board_score = move_scores[imove];
+            }
+        }
+    return best_board_score;
+    }
+    else{
+        double best_board_score = 999999;
+        for(int imove=0; imove<num_legal_moves; imove++){
+            if(move_scores[imove] < best_board_score){
+                best_board_score = move_scores[imove];
+            }
+        }
+    return best_board_score;
+    }
+}
+
+
+inline double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+    NUM_NODES[depth] += 1;
+    vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
+    int num_legal_moves = legal_moves.size()/2;
+    vector<double> move_scores(num_legal_moves);
+    for(int imove=0; imove<num_legal_moves; imove++){
+        uint64_t atk_bb_new = atk_bb;
+        uint64_t def_bb_new = def_bb;
+        uint64_t king_bb_new = king_bb;
+        make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
+        // If not, we will have to calculate the board score:
+        double move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
+        if((depth >= max_depth) || abs(move_score) > 900){  // If we're at max depth, or someone has won, we terminate.
+            move_scores[imove] = (1 - 0.01*depth)*move_score;
+        }
+        else{  // If nobody has won and we're not at max depth, we continue down the tree:
             move_scores[imove] = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth, heuristic_function);
         }
     }
+
     // int best_board_score;
     if(player == PLAYER_ATK){
         double best_board_score = -999999;
@@ -456,7 +694,11 @@ inline vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t
         def_bb_new = def_bb;
         king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*i], legal_moves[2*i+1]);
-        double move_score = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth, heuristic_function);
+        double move_score;
+        if(player==1)
+            move_score = get_board_score_by_width_search(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth, heuristic_function);
+        else
+            move_score = get_board_score_by_width_search_zobrist(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth, heuristic_function);
         move_scores[i] = move_score;
     }
 
@@ -595,97 +837,6 @@ void AI_vs_AI_tournament(int num_games, double (*AI_1_heuristic_function)(uint64
 }
 
 
-uint64_t flip_bb_vertically(uint64_t bb) {
-    uint64_t r1 = (bb & 0x00000000000000FFULL) << 48;
-    uint64_t r2 = (bb & 0x000000000000FF00ULL) << 32;
-    uint64_t r3 = (bb & 0x0000000000FF0000ULL) << 16;
-    uint64_t r4 = (bb & 0x00000000FF000000ULL); // No change in position
-    uint64_t r5 = (bb & 0x000000FF00000000ULL) >> 16;
-    uint64_t r6 = (bb & 0x0000FF0000000000ULL) >> 32;
-    uint64_t r7 = (bb & 0x00FF000000000000ULL) >> 48;
-
-    return r1 | r2 | r3 | r4 | r5 | r6 | r7;
-}
-
-
-uint64_t flip_bb_horizontally(uint64_t bb) {
-    // Swap the 1st and 7th columns
-    uint64_t swap1 = ((bb & 0x0040404040404040ULL) >> 6) | 
-                     ((bb & 0x0001010101010101ULL) << 6);
-
-    // Swap the 2nd and 6th columns
-    uint64_t swap2 = ((bb & 0x0020202020202020ULL) >> 4) | 
-                     ((bb & 0x0002020202020202ULL) << 4);
-
-    // Swap the 3rd and 5th columns
-    uint64_t swap3 = ((bb & 0x0010101010101010ULL) >> 2) | 
-                     ((bb & 0x0004040404040404ULL) << 2);
-
-    // Preserve the 4th column as is
-    uint64_t middle = bb & 0x0008080808080808ULL;
-
-    return swap1 | swap2 | swap3 | middle;
-}
-
-
-uint64_t transpose_bb(uint64_t board) {
-    // Slow, rewrite later.
-    uint64_t transposed = 0;
-
-    for (int i = 0; i < 7; ++i) {
-        for (int j = 0; j < 7; ++j) {
-            // Calculate the bit position in the original bitboard
-            int originalPos = i * 8 + j;
-
-            // Calculate the bit position in the transposed bitboard
-            int transposedPos = j * 8 + i;
-
-            // Check if the bit at the original position is set
-            if (board & (1ULL << originalPos)) {
-                // Set the bit at the transposed position
-                transposed |= (1ULL << transposedPos);
-            }
-        }
-    }
-
-    return transposed;
-}
-
-
-uint64_t anti_transpose_bb(uint64_t board){
-    uint64_t reflected = 0;
-    for (int i = 0; i < 7; ++i) {
-        for (int j = 0; j < 7; ++j) {
-            // Calculate the bit position in the original bitboard
-            int originalPos = i * 8 + j;
-            // Calculate the bit position in the reflected bitboard
-            int reflectedPos = (6 - j) * 8 + (6 - i);
-
-            // Check if the bit at the original position is set
-            if (board & (1ULL << originalPos)) {
-                // Set the bit at the reflected position
-                reflected |= (1ULL << reflectedPos);
-            }
-        }
-    }
-
-    return reflected;
-}
-
-
-vector<uint64_t> get_all_board_symetries(uint64_t board){
-    vector<uint64_t> all_boards(8);
-    all_boards[0] = board;
-    all_boards[1] = flip_bb_horizontally(transpose_bb(board));  // 90 degree rotation.
-    all_boards[2] = flip_bb_vertically(flip_bb_horizontally(board));  // 180 degree rotation.
-    all_boards[3] = flip_bb_vertically(transpose_bb(board));  // 270 degree rotation.
-    all_boards[4] = flip_bb_horizontally(board);  // Horizontal flip.
-    all_boards[5] = flip_bb_vertically(board);  // Vertical flip.
-    all_boards[6] = transpose_bb(board);  // Diagonal reflection.
-    all_boards[7] = anti_transpose_bb(board);  // Anti-diagonal reflection.
-    return all_boards;
-}
-
 
 int main(){
     uint64_t initial_atk_bb = 0x8080063000808;
@@ -699,7 +850,7 @@ int main(){
         {0, 1, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 1, 0, 0, 0, 0, 0},
+        {0, 0, 1, 0, 0, 0, 1, 0},
         {0, 0, 0, 0, 0, 0, 0, 0}
     };
 
@@ -729,8 +880,30 @@ int main(){
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
-    // cout << "same heuristics" << endl;
-    // AI_vs_AI_tournament(1000, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
+    initializeZobristTable();
+
+    double score = get_board_score_by_width_search(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 10, board_heuristic_pieces_only);
+    cout << score << endl;
+
+    for(int i=0; i<12; i++){
+        cout << i << " " << NUM_NODES[i] << endl;
+    }
+    cout << "Zobrist times read: " << ZOBRIST_NUM_TIMES_READ << endl;
+    cout << "Zobrist times written: " << ZOBRIST_NUM_TIMES_WRITTEN << endl;
+    cout << "Zobrist times missed: " << ZOBRIST_NUM_TIMES_MISSED << endl;
+
+    // uint64_t flipped_bb;
+    // print_bitboard(test_atk_bb);
+    // flipped_bb = anti_transpose_bb(test_atk_bb);
+    // print_bitboard(flipped_bb);
+
+    // vector<uint64_t> all_boards = get_all_board_symetries(test_atk_bb);
+    // for(int i=0; i<8; i++){
+    //     print_bitboard(all_boards[i]);
+    // }
+
+    cout << "same heuristics" << endl;
+    AI_vs_AI_tournament(1, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
 
     // cout << "v1" << endl;
     // AI_vs_AI_tournament(1000, board_heuristic_v1, board_heuristic_pieces_only, true);
