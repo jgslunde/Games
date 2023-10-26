@@ -28,11 +28,13 @@ const HnefataflGame = {
                 G.validMoves = getValidMoves(G.cells, x, y);
             }
         },
+
+        deselectPiece: ({G}) => {
+            G.selected = null;
+            G.validMoves = [];
+        },
             
         movePiece: ({G, ctx, events}, x, y) => {
-            console.log("From movePiece:");
-            console.log(G);
-            console.log(ctx);
             if (G.selected && G.validMoves.some(move => move.x === x && move.y === y)) {
                 const fromX = G.selected.x;
                 const fromY = G.selected.y;
