@@ -58,16 +58,53 @@ const HnefataflGame = {
                 }
                 events.endTurn();  // This will end the turn and switch to the next player.
             }
+        },
+
+        makeRandomMove: ({G, ctx, events}) => {
+            let moves = [];    
+            // Loop through all cells to find possible moves
+            for (let y = 0; y < 7; y++) {
+                for (let x = 0; x < 7; x++) {
+                    const cell = G.cells[y][x];
+                    if ((cell === 'A' && ctx.currentPlayer === '0') || 
+                        (cell === 'D' && ctx.currentPlayer === '1') ||
+                        (cell === 'K' && ctx.currentPlayer === '1')) {
+                        const validMoves = getValidMoves(G.cells, x, y); 
+                        for (const move of validMoves) {
+                        // moves.push({ move: 'movePiece', args: [x, y, move.x, move.y] });
+                        moves.push([x, y, move.x, move.y]);
+                        }
+                    }
+                }
+            }
+            // if (moves.length > 0) {
+            const randomMove = moves[Math.floor(Math.random() * moves.length)];        
+            // }
+            let fromX = randomMove[0];
+            let fromY = randomMove[1];
+            let x = randomMove[2];
+            let y = randomMove[3];
+            G.selected = { x, y };
+            // Swap pieces
+            G.cells[y][x] = G.cells[fromY][fromX];
+            G.cells[fromY][fromX] = '0';
+
+            // Clear selection and valid moves
+            G.selected = null;
+            G.validMoves = [];
+            
+            checkCapture(G, x, y);
+
+            G.score = calculateScore(G.cells);
+
+            // Check for win conditions
+            const winner = checkWinCondition(G);
+            if (winner) {
+                events.endGame({ winner });
+            }
+            events.endTurn();  // This will end the turn and switch to the next player.
         }
     },
-
-    turn: {
-        // order: {
-        //     startTurn: '0', // The attacker starts
-        //     // playOrder: ['0', '1'] // 0 is the attacker, 1 is the defender
-        // },
-    }
-    
 
     // Add any other game-specific configurations, e.g., turn order, endgame conditions, etc.
 };
@@ -146,7 +183,7 @@ function getValidMoves(cells, x, y) {
 }
 
 
-export { HnefataflGame };
+export { HnefataflGame, getValidMoves };
 
 
 function checkWinCondition(G) {

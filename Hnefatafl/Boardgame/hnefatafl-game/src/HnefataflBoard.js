@@ -30,6 +30,10 @@ const HnefataflBoard = ({ ctx, G, events, moves }) => {
         }
         return false;
     };
+
+    const handleRandomMoveClick = () => {
+        moves.makeRandomMove();
+    }
     
     return (
         <div className="container">
@@ -79,6 +83,7 @@ const HnefataflBoard = ({ ctx, G, events, moves }) => {
                 })}
             </div>
             <div className="score-display" style={{fontSize : "32px"}}> {displayMessage}</div>
+            <button onClick={handleRandomMoveClick}>Make Random Move</button>
         </div>
     );
 };
