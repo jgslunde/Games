@@ -1,12 +1,35 @@
-const HnefataflBoard = ({ ctx, G, moves }) => {
+const HnefataflBoard = ({ ctx, G, events, moves }) => {
 
+    const handleRestart = () => {
+        events.endGame();
+        // events.restart();
+    };
     let gameover = ctx.gameover;
     let displayMessage;
     if (gameover) {
-        displayMessage = `Winner: ${gameover.winner}`;
+        displayMessage = (
+            <div>
+                <div>Winner: {gameover.winner}</div>
+                <button onClick={handleRestart}>Play Again</button>
+            </div>
+        );
     } else {
-        displayMessage = `Current score: ${G.score}`;
+        displayMessage = (
+            <div>
+                <div>Current score: {G.score}</div>
+                <div>To play: {ctx.currentPlayer==='0' ? "Attacker" : "Defender"}</div>
+            </div>
+        )
     }
+
+    const isPlayablePiece = (piece) => {
+        if ((ctx.currentPlayer === '0') && (piece === 'A')) {
+            return true;
+        } else if ((ctx.currentPlayer === '1') && ((piece === 'D') || (piece === 'K'))) {
+            return true;
+        }
+        return false;
+    };
     
     return (
         <div className="container">
@@ -36,8 +59,9 @@ const HnefataflBoard = ({ ctx, G, moves }) => {
                                 border: '0px solid black',
                                 textAlign: 'center',
                                 lineHeight: '120px',  // Adjusted line height
-                                backgroundColor: isSelected ? 'yellow' : isValidMove ? 'lightgreen' : squareColor,  // Integrated square color
+                                backgroundColor: isSelected ? "rgba(100, 200, 0, 1.0)" : isValidMove ? "rgba(50, 150, 0, 1.0)" : squareColor,  // Integrated square color
                                 fontSize: '60px',
+                                cursor: isPlayablePiece(cell) ? 'pointer' : 'default',
                             }}
                             onClick={() => {                   
                                 if (cell !== '0' && !isSelected) {
