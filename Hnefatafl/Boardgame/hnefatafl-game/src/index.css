@@ -11,3 +11,19 @@ code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
 }
+
+.container {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 100vh; /* This ensures the container takes up the full viewport height */
+  width: 100vw; /* This ensures the container takes up the full viewport width */
+}
+
+body, html {
+  margin: 0;
+  padding: 0;
+  background-color: #000;  /* Setting the background color to black */
+  color: #FFF;            /* Setting the default text color to white */
+}

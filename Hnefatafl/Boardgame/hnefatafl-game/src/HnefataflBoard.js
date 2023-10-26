@@ -5,13 +5,12 @@ const HnefataflBoard = ({ ctx, G, moves }) => {
     if (gameover) {
         displayMessage = `Winner: ${gameover.winner}`;
     } else {
-        displayMessage = `Score: ${G.score}`;
+        displayMessage = `Current score: ${G.score}`;
     }
     
     return (
-        <div>
-            <div className="score-display">{displayMessage}</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 100px)' }}> {/* Adjusted grid column size */}
+        <div className="container">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 120px)' }}> {/* Adjusted grid column size */}
                 {G.cells.flat().map((cell, idx) => {
                     const x = idx % 7;
                     const y = Math.floor(idx / 7);
@@ -32,13 +31,13 @@ const HnefataflBoard = ({ ctx, G, moves }) => {
                         <div
                             key={idx}
                             style={{
-                                width: '100px',  // Adjusted width
-                                height: '100px',  // Adjusted height
+                                width: '120px',  // Adjusted width
+                                height: '120px',  // Adjusted height
                                 border: '0px solid black',
                                 textAlign: 'center',
-                                lineHeight: '100px',  // Adjusted line height
+                                lineHeight: '120px',  // Adjusted line height
                                 backgroundColor: isSelected ? 'yellow' : isValidMove ? 'lightgreen' : squareColor,  // Integrated square color
-                                fontSize: '50px',
+                                fontSize: '60px',
                             }}
                             onClick={() => {                   
                                 if (cell !== '0' && !isSelected) {
@@ -55,6 +54,7 @@ const HnefataflBoard = ({ ctx, G, moves }) => {
                     );
                 })}
             </div>
+            <div className="score-display" style={{fontSize : "32px"}}> {displayMessage}</div>
         </div>
     );
 };
