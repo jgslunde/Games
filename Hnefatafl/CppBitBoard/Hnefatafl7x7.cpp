@@ -86,12 +86,12 @@ const size_t TABLE_SIZE = 1 << 25;
 struct TTEntry {
     uint64_t hash;
     double eval;  // example data
-    uint depth;
+    uint64_t depth;
     // Add other game-related data as needed.
 };
 TTEntry transpositionTable[TABLE_SIZE];
 
-void storeInTable(uint64_t hash, double eval, uint depth){
+void storeInTable(uint64_t hash, double eval, uint64_t depth){
     ZOBRIST_NUM_TIMES_WRITTEN++;
     size_t index = hash & (TABLE_SIZE - 1);
     transpositionTable[index].hash = hash;
@@ -345,7 +345,7 @@ uint64_t get_legal_moves_as_bb(uint64_t piece_bb, uint64_t blocker_bb, vector<ve
     if(masked_blocker_bb){
         int first_blocking_idx = 63 - __builtin_clzll(masked_blocker_bb) + 1;
         uint64_t asdf = 1;
-        asdf = asdf << first_blocking_idx - 1;
+        asdf = asdf << (first_blocking_idx - 1);
         allowed_moves &= ~(move_lookup[first_blocking_idx][LEFT]);
     }
 
@@ -731,7 +731,7 @@ inline vector<uint64_t> AI_zobrist_get_move(uint64_t atk_bb, uint64_t def_bb, ui
         }
     }
     // Chosing a random among those.
-    uint chosen_move_index = preffered_move_indices[thread_safe_rand()%preffered_move_indices.size()];
+    uint64_t chosen_move_index = preffered_move_indices[thread_safe_rand()%preffered_move_indices.size()];
 
     if(verbose){
         cout << "Player: " << player << ". Board eval: " << best_move_score << endl;
@@ -772,7 +772,7 @@ inline vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t
         }
     }
     // Chosing a random among those.
-    uint chosen_move_index = preffered_move_indices[thread_safe_rand()%preffered_move_indices.size()];
+    uint64_t chosen_move_index = preffered_move_indices[thread_safe_rand()%preffered_move_indices.size()];
 
     if(verbose){
         cout << "Player: " << player << ". Board eval: " << best_move_score << endl;
@@ -780,6 +780,38 @@ inline vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t
     return {legal_moves[2*chosen_move_index], legal_moves[2*chosen_move_index+1]};
 }
 
+
+extern "C" {
+    void AI_web_get_move(int *move_from_x, int *move_from_y, int *move_to_x, int *move_to_y, int *JS_board, int player, int max_depth){
+        vector<vector<uint64_t>> board_atk(8, vector<uint64_t>(8));
+        vector<vector<uint64_t>> board_def(8, vector<uint64_t>(8));
+        vector<vector<uint64_t>> board_king(8, vector<uint64_t>(8));
+        for(int y=0; y<7; y++){
+            for(int x=0; x<7; x++){
+                int idx = y*7 + x;  // The JS boards are only 7x7.
+                if(JS_board[idx] == 1)
+                    board_atk[y][x] = 1;
+                if(JS_board[idx] == 2)
+                    board_def[y][x] = 1;
+                if(JS_board[idx] == 3)
+                    board_king[y][x] = 1;
+            }
+        }
+        uint64_t atk_bb = board2bits(board_atk);
+        uint64_t def_bb = board2bits(board_def);
+        uint64_t king_bb = board2bits(board_king);
+
+        vector<uint64_t> chosen_move = AI_1_get_move(atk_bb, def_bb, king_bb, player, max_depth, false, board_heuristic_pieces_only);
+        uint64_t move_from = chosen_move[0];
+        uint64_t move_to = chosen_move[1];
+        int move_from_bit_loc = __builtin_ctzll(move_from);
+        int move_to_bit_loc = __builtin_ctzll(move_to);
+        *move_from_x = move_from_bit_loc%8;
+        *move_from_y = move_from_bit_loc/8;
+        *move_to_x = move_to_bit_loc%8;
+        *move_to_y = move_to_bit_loc/8;
+    }
+}
 
 
 void compare_bbs_to_expected(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, uint64_t atk_bb_exp, uint64_t def_bb_exp, uint64_t king_bb_exp){
