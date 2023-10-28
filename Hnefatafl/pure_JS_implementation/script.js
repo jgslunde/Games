@@ -348,18 +348,36 @@ function handleCellClick(event) {
 
     // If a piece is already selected
     if (selectedPiece) {
-        // If trying to replace an existing piece, ignore
-        if (cell.innerText && ['A', 'D', 'K'].includes(cell.innerText)) {
-            return;
-        }
-        if (!isValidMove(selectedPiece, cell, boardElement)) {
+        // If trying to replace an existing piece, check if it's the same piece to deselect
+        if (cell === selectedPiece) {
+            removeHighlights(boardElement); // Remove any move highlights
+            selectedPiece = null;
             return;
         }
 
-        movePiece(selectedPiece, cell);
-        // Deselect the piece
-        selectedPiece = null;
-        return;
+        // If trying to select another piece of the same player
+        if (currentPlayer === 'attacker' && cell.innerText === 'A') {
+            removeHighlights(boardElement); // Remove any move highlights
+            highlightLegalMoves(cell, boardElement);
+            selectedPiece = cell;
+            return;
+        } else if (currentPlayer === 'defender' && isDefender(cell.innerText)) {
+            removeHighlights(boardElement); // Remove any move highlights
+            highlightLegalMoves(cell, boardElement);
+            selectedPiece = cell;
+            return;
+        }
+
+        // If making a move to an empty square
+        if (!cell.innerText) {
+            if (!isValidMove(selectedPiece, cell, boardElement)) {
+                return;
+            }
+            movePiece(selectedPiece, cell);
+            removeHighlights(boardElement); // Remove move highlights after moving
+            selectedPiece = null;
+            return;
+        }
     }
 
     // If a piece is not selected and the clicked cell has a piece
@@ -371,6 +389,17 @@ function handleCellClick(event) {
         selectedPiece = cell; // Mark the piece as selected
     }
 }
+
+
+function removeHighlights(boardElement) {
+    const cells = boardElement.querySelectorAll('td');
+    cells.forEach(cell => {
+        // Adjust this depending on how you're indicating a legal move. 
+        // Here, I'm assuming a CSS class "highlight" is added to show legal moves.
+        cell.classList.remove('highlight'); 
+    });
+}
+
 
 function resetGame() {
     clearTimeout(aiMoveTimeout);
