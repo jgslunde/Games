@@ -4,6 +4,7 @@ table {
 }
 
 td {
+    cursor: default; /* normal arrow cursor for all cells */
     width: 100px;  /* Increase from previous value */
     height: 100px;  /* Increase from previous value */
     text-align: center;
@@ -11,6 +12,19 @@ td {
     font-size: 40px;  /* Adjust font size to match larger cell size */
     border: none;  /* Remove cell borders */
     transition: background-color 0.3s;  /* Smooth transition for highlighting */
+}
+
+/* For the attacker */
+#board.attacker td.A:hover {
+    cursor: pointer;
+    background-color: rgba(0, 0, 0, 0.1);
+}
+
+/* For the defender */
+#board.defender td.D:hover, 
+#board.defender td.K:hover {
+    cursor: pointer;
+    background-color: rgba(0, 0, 0, 0.1);
 }
 
 /* Light squares */
@@ -23,6 +37,10 @@ tr:nth-child(even) td:nth-child(even) {
 tr:nth-child(odd) td:nth-child(even),
 tr:nth-child(even) td:nth-child(odd) {
     background-color: #b58863;
+}
+
+#board td.selected {
+    background-color: rgba(255, 223, 186, 0.7);  /* Example color; feel free to adjust */
 }
 
 /* Highlighting for legal squares */

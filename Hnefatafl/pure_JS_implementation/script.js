@@ -236,6 +236,11 @@ function highlightLegalMoves(source, boardElement) {
     }
 }
 
+function deselectAll(boardElement) {
+    const cells = boardElement.querySelectorAll('td');
+    cells.forEach(cell => cell.classList.remove('selected'));
+}
+
 function resetBoard() {
     gameOver = false;
 
@@ -268,6 +273,7 @@ function resetBoard() {
         boardElement.appendChild(tr);
     }
 
+    boardElement.className = "attacker";
 }
 
 function movePiece(sourceCell, targetCell) {
@@ -275,6 +281,12 @@ function movePiece(sourceCell, targetCell) {
     targetCell.innerText = sourceCell.innerText;
     capturePieces(sourceCell, targetCell, boardElement);
     sourceCell.innerText = ''; // Clear the old position
+    // Clear class of source and destination
+    sourceCell.className = '';
+    targetCell.className = '';
+    // Add appropriate class to the destination
+    targetCell.classList.add(targetCell.innerText);
+
 
     for (let row of boardElement.rows) {
         for (let cell of row.cells) {
@@ -319,7 +331,13 @@ function makeAIMove() {
 }
 
 function togglePlayer() {
-    currentPlayer = currentPlayer === 'attacker' ? 'defender' : 'attacker';
+    if (currentPlayer === 'attacker') {
+        currentPlayer = 'defender';
+        boardElement.className = 'defender';
+    } else {
+        currentPlayer = 'attacker';
+        boardElement.className = 'attacker';
+    }
 }
 
 let gameOver = false;
@@ -345,12 +363,13 @@ function startGame(attackerMode, defenderMode) {
 function handleCellClick(event) {
     if (gameOver) return;
     const cell = event.target;
-
+    
     // If a piece is already selected
     if (selectedPiece) {
         // If trying to replace an existing piece, check if it's the same piece to deselect
         if (cell === selectedPiece) {
             removeHighlights(boardElement); // Remove any move highlights
+            cell.classList.remove('selected');  // Remove the 'selected' class
             selectedPiece = null;
             return;
         }
@@ -358,11 +377,15 @@ function handleCellClick(event) {
         // If trying to select another piece of the same player
         if (currentPlayer === 'attacker' && cell.innerText === 'A') {
             removeHighlights(boardElement); // Remove any move highlights
+            deselectAll(boardElement);
+            cell.classList.add('selected');  // Add the 'selected' class
             highlightLegalMoves(cell, boardElement);
             selectedPiece = cell;
             return;
         } else if (currentPlayer === 'defender' && isDefender(cell.innerText)) {
             removeHighlights(boardElement); // Remove any move highlights
+            deselectAll(boardElement);
+            cell.classList.add('selected');  // Add the 'selected' class
             highlightLegalMoves(cell, boardElement);
             selectedPiece = cell;
             return;
@@ -375,6 +398,7 @@ function handleCellClick(event) {
             }
             movePiece(selectedPiece, cell);
             removeHighlights(boardElement); // Remove move highlights after moving
+            selectedPiece.classList.remove('selected');  // Remove the 'selected' class
             selectedPiece = null;
             return;
         }
@@ -384,9 +408,11 @@ function handleCellClick(event) {
     if (currentPlayer === 'attacker' && cell.innerText === 'A') {
         selectedPiece = cell; // Mark the piece as selected
         highlightLegalMoves(cell, boardElement);        
+        cell.classList.add('selected');  // Add the 'selected' class
     } else if (currentPlayer === 'defender' && isDefender(cell.innerText)) {
         highlightLegalMoves(cell, boardElement);    
         selectedPiece = cell; // Mark the piece as selected
+        cell.classList.add('selected');  // Add the 'selected' class
     }
 }
 
@@ -396,7 +422,7 @@ function removeHighlights(boardElement) {
     cells.forEach(cell => {
         // Adjust this depending on how you're indicating a legal move. 
         // Here, I'm assuming a CSS class "highlight" is added to show legal moves.
-        cell.classList.remove('highlight'); 
+        cell.classList.remove('legal-move'); 
     });
 }
 
@@ -452,15 +478,24 @@ document.addEventListener('DOMContentLoaded', function() {
         const tr = document.createElement('tr');
         for (let cell of row) {
             const td = document.createElement('td');
+            
+            // Add class based on piece type
             if (cell !== '0') {
                 td.innerText = cell;
+                td.classList.add(cell); // Add class to td (e.g., "A", "D", "K")
             }
 
             // Attach the click event to the cell
             td.addEventListener('click', handleCellClick);
+            
+            // Prevent text selection
+            td.addEventListener('mousedown', function(event) {
+                event.preventDefault();
+            });
 
             tr.appendChild(td);
         }
         boardElement.appendChild(tr);
     }
+    boardElement.className = "attacker";
 });
