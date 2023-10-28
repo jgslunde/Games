@@ -173,7 +173,8 @@ function getRandomLegalMove(boardElement, player) {
     };
 }
 
-function getAIBestMove(boardElement, player) {
+function getAIBestMove(boardElement, player_str) {
+    let player = player_str === 'attacker'? 1 : -1;
     let board_arr = [];
     for (let row of boardElement.rows) {
         for (let cell of row.cells) {
@@ -198,7 +199,7 @@ function getAIBestMove(boardElement, player) {
     board_dataHeap.set(board_arr);
 
     // Call the C++ function
-    Module._AI_web_get_move(ptr_movefrom_x, ptr_movefrom_y, ptr_moveto_x, ptr_moveto_y, board_ptr, -1, 4);
+    Module._AI_web_get_move(ptr_movefrom_x, ptr_movefrom_y, ptr_moveto_x, ptr_moveto_y, board_ptr, player, 4);
     let movefrom_x = new Int32Array(Module.HEAP32.buffer, ptr_movefrom_x, 1)[0];
     let movefrom_y = new Int32Array(Module.HEAP32.buffer, ptr_movefrom_y, 1)[0];
     let moveto_x = new Int32Array(Module.HEAP32.buffer, ptr_moveto_x, 1)[0];
