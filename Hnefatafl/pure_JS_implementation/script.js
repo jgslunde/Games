@@ -5,7 +5,7 @@ Module['onRuntimeInitialized'] = function() {
 
 
 function isDefender(piece) {
-    return ['D', 'K'].includes(piece);
+    return ['⚫', '⬛'].includes(piece);
 }
 
 function squaresBetweenAreEmpty(source, target, boardElement) {
@@ -39,7 +39,7 @@ function squaresBetweenAreEmpty(source, target, boardElement) {
 
 function isValidMove(source, target, boardElement) {
     // Check if moving onto another piece
-    if (['A', 'D', 'K'].includes(target.innerText)) {
+    if (['⚪', '⚫', '⬛'].includes(target.innerText)) {
         return false;
     }
 
@@ -62,7 +62,7 @@ function isValidMove(source, target, boardElement) {
 
     // Check for restricted corner squares
     const isCornerSquare = (row, col) => (row === 0 || row === 6) && (col === 0 || col === 6);
-    if (isCornerSquare(targetRow, targetCol) && source.innerText !== 'K') {
+    if (isCornerSquare(targetRow, targetCol) && source.innerText !== '⬛') {
         return false;
     }
 
@@ -96,11 +96,11 @@ function capturePieces(source, target, boardElement) {
         const enemyCell = boardElement.rows[enemyRow].cells[enemyCol];
         const allyCell = boardElement.rows[allyRow].cells[allyCol];
 
-        if (target.innerText === 'A' && enemyCell.innerText === 'D' && (allyCell.innerText === 'A' || isRestrictedSquare(allyRow, allyCol))) {
+        if (target.innerText === '⚪' && enemyCell.innerText === '⚫' && (allyCell.innerText === '⚪' || isRestrictedSquare(allyRow, allyCol))) {
             enemyCell.innerText = '';  // Capture the defender
-        } else if ((target.innerText === 'D' || target.innerText === 'K') && enemyCell.innerText === 'A' && (isDefender(allyCell.innerText) || isRestrictedSquare(allyRow, allyCol))) {
+        } else if ((target.innerText === '⚫' || target.innerText === '⬛') && enemyCell.innerText === '⚪' && (isDefender(allyCell.innerText) || isRestrictedSquare(allyRow, allyCol))) {
             enemyCell.innerText = '';  // Capture the attacker
-        } else if (target.innerText === 'A' && enemyCell.innerText === 'K' && (allyCell.innerText === 'A' || isRestrictedSquare(allyRow, allyCol))) {
+        } else if (target.innerText === '⚪' && enemyCell.innerText === '⬛' && (allyCell.innerText === '⚪' || isRestrictedSquare(allyRow, allyCol))) {
             enemyCell.innerText = '';  // Capture the king
         }
     }
@@ -114,7 +114,7 @@ function checkForVictory(boardElement) {
 
     for (let row of boardElement.rows) {
         for (let cell of row.cells) {
-            if (cell.textContent === 'K') {
+            if (cell.textContent === '⬛') {
                 kingPresent = true;
 
                 // Check if king is on a corner
@@ -126,7 +126,7 @@ function checkForVictory(boardElement) {
                     alert("Defenders Win! The king has reached a corner.");
                     return -1;
                 }
-            } else if (cell.textContent === 'A') {
+            } else if (cell.textContent === '⚪') {
                 attackerCount++;
             }
         }
@@ -149,8 +149,8 @@ function getRandomLegalMove(boardElement, player) {
     const pieces = [];
     for (let row of boardElement.rows) {
         for (let cell of row.cells) {
-            if ((player === 'attacker' && cell.innerText === 'A') || 
-                (player === 'defender' && (cell.innerText === 'D' || cell.innerText === 'K'))) {
+            if ((player === 'attacker' && cell.innerText === '⚪') || 
+                (player === 'defender' && (cell.innerText === '⚫' || cell.innerText === '⬛'))) {
                 pieces.push(cell);
             }
         }
@@ -178,11 +178,11 @@ function getAIBestMove(boardElement, player_str) {
     let board_arr = [];
     for (let row of boardElement.rows) {
         for (let cell of row.cells) {
-            if(cell.innerText === 'A')
+            if(cell.innerText === '⚪')
                 board_arr.push(1);
-            else if(cell.innerText === 'D')
+            else if(cell.innerText === '⚫')
                 board_arr.push(2);
-            else if(cell.innerText === 'K')
+            else if(cell.innerText === '⬛')
                 board_arr.push(3);
             else
                 board_arr.push(0);
@@ -248,13 +248,13 @@ function resetBoard() {
     boardElement.innerHTML = '';
 
     const initialSetup = [
-        ['0', '0', '0', 'A', '0', '0', '0'],
-        ['0', '0', '0', 'A', '0', '0', '0'],
-        ['0', '0', '0', 'D', '0', '0', '0'],
-        ['A', 'A', 'D', 'K', 'D', 'A', 'A'],
-        ['0', '0', '0', 'D', '0', '0', '0'],
-        ['0', '0', '0', 'A', '0', '0', '0'],
-        ['0', '0', '0', 'A', '0', '0', '0']
+        ['0', '0', '0', '⚪', '0', '0', '0'],
+        ['0', '0', '0', '⚪', '0', '0', '0'],
+        ['0', '0', '0', '⚫', '0', '0', '0'],
+        ['⚪', '⚪', '⚫', '⬛', '⚫', '⚪', '⚪'],
+        ['0', '0', '0', '⚫', '0', '0', '0'],
+        ['0', '0', '0', '⚪', '0', '0', '0'],
+        ['0', '0', '0', '⚪', '0', '0', '0']
     ];
 
     for (let row of initialSetup) {
@@ -263,8 +263,8 @@ function resetBoard() {
             const td = document.createElement('td');
             if (cell !== '0') {
                 td.innerText = cell;
+                td.classList.add(cell); // Add class to td (e.g., "A", "D", "K")
             }
-
             // Attach the click event to the cell
             td.addEventListener('click', handleCellClick);
 
@@ -375,7 +375,7 @@ function handleCellClick(event) {
         }
 
         // If trying to select another piece of the same player
-        if (currentPlayer === 'attacker' && cell.innerText === 'A') {
+        if (currentPlayer === 'attacker' && cell.innerText === '⚪') {
             removeHighlights(boardElement); // Remove any move highlights
             deselectAll(boardElement);
             cell.classList.add('selected');  // Add the 'selected' class
@@ -405,7 +405,7 @@ function handleCellClick(event) {
     }
 
     // If a piece is not selected and the clicked cell has a piece
-    if (currentPlayer === 'attacker' && cell.innerText === 'A') {
+    if (currentPlayer === 'attacker' && cell.innerText === '⚪') {
         selectedPiece = cell; // Mark the piece as selected
         highlightLegalMoves(cell, boardElement);        
         cell.classList.add('selected');  // Add the 'selected' class
@@ -426,8 +426,17 @@ function removeHighlights(boardElement) {
     });
 }
 
+function updatePlayerRoles(attackerType, defenderType) {
+    const attackerLabel = document.getElementById("attacker-label");
+    const defenderLabel = document.getElementById("defender-label");
+
+    attackerLabel.innerHTML = `Attacker:<br>${attackerType}`;
+    defenderLabel.innerHTML = `Defender:<br>${defenderType}`;
+}
+
 
 function resetGame() {
+    updatePlayerRoles(gameMode["attacker"], gameMode["defender"]);
     clearTimeout(aiMoveTimeout);
     resetBoard();
     currentPlayer = 'attacker';
@@ -465,13 +474,13 @@ const boardElement = document.getElementById('board');
 
 document.addEventListener('DOMContentLoaded', function() {
     const initialSetup = [
-        ['0', '0', '0', 'A', '0', '0', '0'],
-        ['0', '0', '0', 'A', '0', '0', '0'],
-        ['0', '0', '0', 'D', '0', '0', '0'],
-        ['A', 'A', 'D', 'K', 'D', 'A', 'A'],
-        ['0', '0', '0', 'D', '0', '0', '0'],
-        ['0', '0', '0', 'A', '0', '0', '0'],
-        ['0', '0', '0', 'A', '0', '0', '0']
+        ['0', '0', '0', '⚪', '0', '0', '0'],
+        ['0', '0', '0', '⚪', '0', '0', '0'],
+        ['0', '0', '0', '⚫', '0', '0', '0'],
+        ['⚪', '⚪', '⚫', '⬛', '⚫', '⚪', '⚪'],
+        ['0', '0', '0', '⚫', '0', '0', '0'],
+        ['0', '0', '0', '⚪', '0', '0', '0'],
+        ['0', '0', '0', '⚪', '0', '0', '0']
     ];
 
     for (let row of initialSetup) {
@@ -498,4 +507,5 @@ document.addEventListener('DOMContentLoaded', function() {
         boardElement.appendChild(tr);
     }
     boardElement.className = "attacker";
+    updatePlayerRoles(gameMode["attacker"], gameMode["defender"]);
 });
