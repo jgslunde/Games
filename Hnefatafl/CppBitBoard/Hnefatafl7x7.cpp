@@ -29,10 +29,11 @@ const uint64_t edge_bb = 0xff80808080808080;
 const uint64_t diag2corner_bb = 0x220000002200;
 const uint64_t fouredgesides_bb = 0x80022000800;
 
-vector<int> NUM_NODES(12);
+vector<uint64_t> NUM_NODES(12);
 map<uint64_t, int> board_counts;
 
 uint64_t ZOBRIST_NUM_TIMES_READ = 0;
+uint64_t ZOBRIST_NUM_TIMES_UPDATED = 0;
 uint64_t ZOBRIST_NUM_TIMES_WRITTEN = 0;
 uint64_t ZOBRIST_NUM_TIMES_MISSED = 0;
 const int BOARD_SIZE = 7;
@@ -82,14 +83,44 @@ uint64_t computeHash(const uint64_t atk_bb, const uint64_t def_bb, const uint64_
     return hash;
 }
 
-const size_t TABLE_SIZE = 1 << 25;
+
+uint64_t updateHash(uint64_t old_hash, const uint64_t atk_bb, const uint64_t def_bb, const uint64_t king_bb, uint64_t move_from, uint64_t move_to){
+    ZOBRIST_NUM_TIMES_UPDATED++;
+    uint64_t new_hash = old_hash;
+    int move_from_bit_loc = __builtin_ctzll(move_from);
+    int move_to_bit_loc = __builtin_ctzll(move_to);
+    int move_from_x = move_from_bit_loc%8;
+    int move_from_y = move_from_bit_loc/8;
+    int move_to_x = move_to_bit_loc%8;
+    int move_to_y = move_to_bit_loc/8;
+    if(move_to & atk_bb){
+        new_hash ^= zobristTable[move_from_y][move_from_x][0];
+        new_hash ^= zobristTable[move_to_y][move_to_x][0];
+    }
+    else if(move_to & def_bb){
+        new_hash ^= zobristTable[move_from_y][move_from_x][1];
+        new_hash ^= zobristTable[move_to_y][move_to_x][1];
+    }
+    else if(move_to & king_bb){
+        new_hash ^= zobristTable[move_from_y][move_from_x][2];
+        new_hash ^= zobristTable[move_to_y][move_to_x][2];
+    }
+    new_hash ^= zobristTurn;
+
+    return new_hash;
+}
+
+
+const size_t TABLE_SIZE = 1ULL << 20;
 struct TTEntry {
     uint64_t hash;
     double eval;  // example data
     uint64_t depth;
     // Add other game-related data as needed.
 };
-TTEntry transpositionTable[TABLE_SIZE];
+// TTEntry transpositionTable[TABLE_SIZE];
+TTEntry *transpositionTable = new TTEntry[TABLE_SIZE];
+
 
 void storeInTable(uint64_t hash, double eval, uint64_t depth){
     ZOBRIST_NUM_TIMES_WRITTEN++;
@@ -99,10 +130,10 @@ void storeInTable(uint64_t hash, double eval, uint64_t depth){
     transpositionTable[index].depth = depth;
 }
 
-double* retrieveFromTable(uint64_t hash) {
+double* retrieveFromTable(uint64_t hash, uint64_t search_depth_left) {
     size_t index = hash & (TABLE_SIZE - 1);
     // cout << hash << " " << transpositionTable[index].hash << endl;
-    if (transpositionTable[index].hash == hash) {
+    if ((transpositionTable[index].hash == hash) && (search_depth_left <= transpositionTable[index].depth)) {  // Depth of our stored eval >= depth left of current search.
         ZOBRIST_NUM_TIMES_READ++;
         return &transpositionTable[index].eval;
     } else {
@@ -361,7 +392,7 @@ uint64_t get_legal_moves_as_bb(uint64_t piece_bb, uint64_t blocker_bb, vector<ve
 }
 
 
-inline vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_bb){
+vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_bb){
     // 165 instructions??
     vector<uint64_t> legal_moves;
     legal_moves.reserve(12);
@@ -433,7 +464,7 @@ double board_heuristic_king_free_moves(uint64_t atk_bb, uint64_t def_bb, uint64_
     return score;
 }
 
-inline double board_heuristic_king_neighboring_enemies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+double board_heuristic_king_neighboring_enemies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return 0.3*(((king_bb<<1 & atk_bb) != 0)
                 + ((king_bb>>1 & atk_bb) != 0)
                 + ((king_bb<<8 & atk_bb) != 0)
@@ -441,29 +472,29 @@ inline double board_heuristic_king_neighboring_enemies(uint64_t atk_bb, uint64_t
 }
 
 
-inline double board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+double board_heuristic_v1(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
             - 2.0*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
             + 0.1*__builtin_popcountll(diag2corner_bb & atk_bb);
 }
 
 
-inline double board_heuristic_v2(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+double board_heuristic_v2(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return  board_heuristic_v1(atk_bb, def_bb, king_bb);
             + 0.05*__builtin_popcountll(fouredgesides_bb & atk_bb);
 }
 
-inline double board_heuristic_v3(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+double board_heuristic_v3(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return board_heuristic_v2(atk_bb, def_bb, king_bb) + board_heuristic_king_free_moves(atk_bb, def_bb, king_bb);
 }
 
 
-inline double board_heuristic_v4(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+double board_heuristic_v4(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return board_heuristic_v3(atk_bb, def_bb, king_bb) + board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb);
 }
 
 
-inline double board_heuristic_v5(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+double board_heuristic_v5(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
             - 1.5*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
             + 0.1*__builtin_popcountll(diag2corner_bb & atk_bb)
@@ -473,7 +504,7 @@ inline double board_heuristic_v5(uint64_t atk_bb, uint64_t def_bb, uint64_t king
 }
 
 
-inline double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     // 106 instructions.
     uint64_t king_hostile_bb = atk_bb | corner_bb;
     double score = 
@@ -485,7 +516,7 @@ inline double get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb
 }
 
 
-inline uint64_t perform_captures(uint64_t moved_piece_bb, uint64_t allied_pieces_bb, uint64_t enemy_pices_bb){
+uint64_t perform_captures(uint64_t moved_piece_bb, uint64_t allied_pieces_bb, uint64_t enemy_pices_bb){
     // 34 instructions.
     uint64_t potential_capture, captured;
     captured = 0;
@@ -510,28 +541,30 @@ inline uint64_t perform_captures(uint64_t moved_piece_bb, uint64_t allied_pieces
 }
 
 
-inline void make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, uint64_t move_from, uint64_t move_to){
+uint64_t make_move_on_board(uint64_t &atk_bb, uint64_t &def_bb, uint64_t &king_bb, uint64_t move_from, uint64_t move_to){
     // 95 instructions, including calls to "perform_captures".
+    uint64_t captures;
     if(atk_bb & move_from){
         atk_bb ^= (move_from | move_to);
-        uint64_t captures = perform_captures(move_to, atk_bb | corner_bb, def_bb | king_bb);
+        captures = perform_captures(move_to, atk_bb | corner_bb, def_bb | king_bb);
         def_bb &= ~captures;
         king_bb &= ~captures;
     }
     else if(def_bb & move_from){
         def_bb ^= (move_from | move_to);
-        uint64_t captures = perform_captures(move_to, def_bb | king_bb | corner_bb, atk_bb);
+        captures = perform_captures(move_to, def_bb | king_bb | corner_bb, atk_bb);
         atk_bb &= ~captures;
     }
     else if(king_bb & move_from){
         king_bb ^= (move_from | move_to);
-        uint64_t captures = perform_captures(move_to, def_bb | king_bb | corner_bb, atk_bb);
+        captures = perform_captures(move_to, def_bb | king_bb | corner_bb, atk_bb);
         atk_bb &= ~captures;
     }
+    return captures;
 }
 
 
-inline vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player){
+vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player){
     // 284 instructions, including calls to "get_legal_moves_as_vector".
     vector<uint64_t> legal_moves;
     legal_moves.reserve(100);
@@ -539,7 +572,7 @@ inline vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t 
     if(player == PLAYER_ATK){
         // Attacker moves.
         for(int imove=0; imove<64; imove++){
-            piece_bb = (uint64_t) 1 << imove;
+            piece_bb = 1ULL << imove;
             if(atk_bb & piece_bb){
                 vector<uint64_t> legal_moves_piece = get_legal_moves_as_vector(piece_bb, atk_bb | def_bb | king_bb | edge_bb | corner_bb);
                 for(int i=0; i<legal_moves_piece.size(); i++){
@@ -552,7 +585,7 @@ inline vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t 
     else{
         for(int imove=0; imove<64; imove++){
             // Defender moves.
-            piece_bb = (uint64_t) 1 << imove;
+            piece_bb = 1ULL << imove;
             if(def_bb & piece_bb){
                 vector<uint64_t> legal_moves_piece = get_legal_moves_as_vector(piece_bb, atk_bb | def_bb | king_bb | edge_bb | corner_bb);
                 for(int i=0; i<legal_moves_piece.size(); i++){
@@ -563,7 +596,7 @@ inline vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t 
         }
         for(int imove=0; imove<64; imove++){
             // King (defender) moves.
-            piece_bb = (uint64_t) 1 << imove;
+            piece_bb = 1ULL << imove;
             if(king_bb & piece_bb){
                 vector<uint64_t> legal_moves_piece = get_legal_moves_as_vector(piece_bb, atk_bb | def_bb | edge_bb);
                 for(int i=0; i<legal_moves_piece.size(); i++){
@@ -579,8 +612,73 @@ inline vector<uint64_t> get_all_legal_moves_as_vector(uint64_t atk_bb, uint64_t 
 }
 
 
+double get_board_score_by_width_search_zobrist(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, uint64_t hash, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+    // Width-search using zobrist hashing, without symmetries, meaning that only exact board configurations will be stored, but reduces number of hashes.
+    vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
+    int num_legal_moves = legal_moves.size()/2;
+    vector<double> move_scores(num_legal_moves);
+    NUM_NODES[depth] += num_legal_moves;
+    for(int imove=0; imove<num_legal_moves; imove++){
+        uint64_t atk_bb_new = atk_bb;
+        uint64_t def_bb_new = def_bb;
+        uint64_t king_bb_new = king_bb;
+        uint64_t captures = make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
 
-inline double get_board_score_by_width_search_zobrist(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+        // uint64_t new_hash = computeHash(atk_bb_new, def_bb_new, king_bb_new, (-player)==1);
+        uint64_t new_hash;
+        if(captures){
+            new_hash = computeHash(atk_bb_new, def_bb_new, king_bb_new, (-player)==1);
+        }else{
+            new_hash = updateHash(hash, atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
+        }
+        // if(new_hash != new_hash_2){
+        //     cout << depth << "  " << new_hash << " " << new_hash_2 << "  -  " << (new_hash_2==new_hash) << endl;
+        //     print_bitgame(atk_bb_new, def_bb_new, king_bb_new);
+        //     print_bitboard_move(legal_moves[2*imove], legal_moves[2*imove+1]);
+        // }
+        double* zobrist_score_ptr = retrieveFromTable(new_hash, max_depth-depth);
+        if(zobrist_score_ptr){  // If we didn't get a nullptr in return, the board position already exists in our table.
+            // We then therminate the entire rest of the search down this branch, and set the score:
+            // cout << "hello" << endl;
+            move_scores[imove] = *zobrist_score_ptr;
+        }
+        else{
+            // If not, we will have to calculate the board score:
+            double move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
+            if((depth >= max_depth) || abs(move_score) > 900){  // If we're at max depth, or someone has won, we terminate.
+                move_scores[imove] = (1 - 0.01*depth)*move_score;  // Encourage winning moves earlier rather than later.
+            }
+            else{  // If nobody has won and we're not at max depth, we continue down the tree:
+                move_scores[imove] = get_board_score_by_width_search_zobrist(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth, new_hash, heuristic_function);
+            }
+        storeInTable(new_hash, move_scores[imove], max_depth-depth);
+        }
+    }
+
+    // int best_board_score;
+    if(player == PLAYER_ATK){
+        double best_board_score = -999999;
+        for(int imove=0; imove<num_legal_moves; imove++){
+            if(move_scores[imove] > best_board_score){
+                best_board_score = move_scores[imove];
+            }
+        }
+    return best_board_score;
+    }
+    else{
+        double best_board_score = 999999;
+        for(int imove=0; imove<num_legal_moves; imove++){
+            if(move_scores[imove] < best_board_score){
+                best_board_score = move_scores[imove];
+            }
+        }
+    return best_board_score;
+    }
+}
+
+
+double get_board_score_by_width_search_sym_zobrist(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+    // Width-search using zobrist hashing with symmetries, meaning that all 8 board symmetries must be tracked, but allows for more hash table hits.
     NUM_NODES[depth] += 1;
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
@@ -599,7 +697,7 @@ inline double get_board_score_by_width_search_zobrist(uint64_t atk_bb, uint64_t 
             sym_hashes[i] = computeHash(all_sym_atk_bb[i], all_sym_def_bb[i], all_sym_king_bb[i], player==1);
         uint64_t hash = min(min(min(sym_hashes[0], sym_hashes[1]), min(sym_hashes[2], sym_hashes[3])), min(min(sym_hashes[4], sym_hashes[5]), min(sym_hashes[6], sym_hashes[7])));
         // uint64_t hash = computeHash(atk_bb_new, def_bb_new, king_bb_new, player==1);
-        double* zobrist_score_ptr = retrieveFromTable(hash);
+        double* zobrist_score_ptr = retrieveFromTable(hash, max_depth-depth);
         if(zobrist_score_ptr){  // If we didn't get a nullptr in return, the board position already exists in our table.
             // We then therminate the entire rest of the search down this branch, and set the score:
             // cout << "hello" << endl;
@@ -612,7 +710,7 @@ inline double get_board_score_by_width_search_zobrist(uint64_t atk_bb, uint64_t 
                 move_scores[imove] = (1 - 0.01*depth)*move_score;
             }
             else{  // If nobody has won and we're not at max depth, we continue down the tree:
-                move_scores[imove] = get_board_score_by_width_search_zobrist(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth, heuristic_function);
+                move_scores[imove] = get_board_score_by_width_search_sym_zobrist(atk_bb_new, def_bb_new, king_bb_new, -player, depth+1, max_depth, heuristic_function);
             }
         storeInTable(hash, move_scores[imove], max_depth-depth);
         }
@@ -640,11 +738,11 @@ inline double get_board_score_by_width_search_zobrist(uint64_t atk_bb, uint64_t 
 }
 
 
-inline double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
-    NUM_NODES[depth] += 1;
+double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int depth, int max_depth, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     vector<double> move_scores(num_legal_moves);
+    NUM_NODES[depth] += num_legal_moves;
     for(int imove=0; imove<num_legal_moves; imove++){
         uint64_t atk_bb_new = atk_bb;
         uint64_t def_bb_new = def_bb;
@@ -682,8 +780,7 @@ inline double get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, 
 }
 
 
-
-inline vector<uint64_t> AI_zobrist_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+vector<uint64_t> AI_zobrist_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     int preffered_move_idx = 0;
@@ -697,22 +794,16 @@ inline vector<uint64_t> AI_zobrist_get_move(uint64_t atk_bb, uint64_t def_bb, ui
         king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
         double move_score;
-        vector<uint64_t> all_sym_atk_bb = get_all_board_symetries(atk_bb_new);
-        vector<uint64_t> all_sym_def_bb = get_all_board_symetries(def_bb_new);
-        vector<uint64_t> all_sym_king_bb = get_all_board_symetries(king_bb_new);
-        vector<uint64_t> sym_hashes(8);
-        for(int i=0; i<8; i++)
-            sym_hashes[i] = computeHash(all_sym_atk_bb[i], all_sym_def_bb[i], all_sym_king_bb[i], player==1);
-        uint64_t hash = min(min(min(sym_hashes[0], sym_hashes[1]), min(sym_hashes[2], sym_hashes[3])), min(min(sym_hashes[4], sym_hashes[5]), min(sym_hashes[6], sym_hashes[7])));
-        double* zobrist_score_ptr = retrieveFromTable(hash);
+        uint64_t hash = computeHash(atk_bb, def_bb, king_bb, player==1);
+        double* zobrist_score_ptr = retrieveFromTable(hash, max_depth-1);
         if(zobrist_score_ptr){  // If we didn't get a nullptr in return, the board position already exists in our table.
             // We then therminate the entire rest of the search down this branch, and set the score:
             move_scores[imove] = *zobrist_score_ptr;
         }
         else{
-            move_score = get_board_score_by_width_search_zobrist(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth, heuristic_function);
+            move_score = get_board_score_by_width_search_zobrist(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth, hash, heuristic_function);
             move_scores[imove] = move_score;
-            storeInTable(hash, move_scores[imove], max_depth);
+            storeInTable(hash, move_scores[imove], max_depth-1);
         }
     }
 
@@ -739,7 +830,65 @@ inline vector<uint64_t> AI_zobrist_get_move(uint64_t atk_bb, uint64_t def_bb, ui
     return {legal_moves[2*chosen_move_index], legal_moves[2*chosen_move_index+1]};
 }
 
-inline vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+
+vector<uint64_t> AI_sym_zobrist_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+    vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
+    int num_legal_moves = legal_moves.size()/2;
+    int preffered_move_idx = 0;
+    vector<double> move_scores(num_legal_moves);
+
+    #pragma omp parallel for
+    for(int imove=0; imove<num_legal_moves; imove++){
+        uint64_t atk_bb_new, def_bb_new, king_bb_new;
+        atk_bb_new = atk_bb;
+        def_bb_new = def_bb;
+        king_bb_new = king_bb;
+        make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
+        double move_score;
+        vector<uint64_t> all_sym_atk_bb = get_all_board_symetries(atk_bb_new);
+        vector<uint64_t> all_sym_def_bb = get_all_board_symetries(def_bb_new);
+        vector<uint64_t> all_sym_king_bb = get_all_board_symetries(king_bb_new);
+        vector<uint64_t> sym_hashes(8);
+        for(int i=0; i<8; i++)
+            sym_hashes[i] = computeHash(all_sym_atk_bb[i], all_sym_def_bb[i], all_sym_king_bb[i], player==1);
+        uint64_t hash = min(min(min(sym_hashes[0], sym_hashes[1]), min(sym_hashes[2], sym_hashes[3])), min(min(sym_hashes[4], sym_hashes[5]), min(sym_hashes[6], sym_hashes[7])));
+        double* zobrist_score_ptr = retrieveFromTable(hash, max_depth-1);
+        if(zobrist_score_ptr){  // If we didn't get a nullptr in return, the board position already exists in our table.
+            // We then therminate the entire rest of the search down this branch, and set the score:
+            move_scores[imove] = *zobrist_score_ptr;
+        }
+        else{
+            move_score = get_board_score_by_width_search_sym_zobrist(atk_bb_new, def_bb_new, king_bb_new, -player, 2, max_depth, heuristic_function);
+            move_scores[imove] = move_score;
+            storeInTable(hash, move_scores[imove], max_depth-1);
+        }
+    }
+
+    // Finding the preffered (highest or lowest, depending on player) score among the options.
+    double best_move_score = -9999999.0*player;
+    for(int i=0; i<num_legal_moves; i++){
+        if(move_scores[i]*player > best_move_score*player){
+            best_move_score = move_scores[i];
+        }
+    }
+    // Finding all the moves with the preffered score.
+    vector<int> preffered_move_indices;
+    for(int i=0; i<num_legal_moves; i++){
+        if(move_scores[i] == best_move_score){
+            preffered_move_indices.push_back(i);
+        }
+    }
+    // Chosing a random among those.
+    uint64_t chosen_move_index = preffered_move_indices[thread_safe_rand()%preffered_move_indices.size()];
+
+    if(verbose){
+        cout << "Player: " << player << ". Board eval: " << best_move_score << endl;
+    }
+    return {legal_moves[2*chosen_move_index], legal_moves[2*chosen_move_index+1]};
+}
+
+
+vector<uint64_t> AI_1_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, int max_depth, bool verbose, double (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     int preffered_move_idx = 0;
@@ -801,7 +950,7 @@ extern "C" {
         uint64_t def_bb = board2bits(board_def);
         uint64_t king_bb = board2bits(board_king);
 
-        vector<uint64_t> chosen_move = AI_1_get_move(atk_bb, def_bb, king_bb, player, max_depth, false, board_heuristic_pieces_only);
+        vector<uint64_t> chosen_move = AI_1_get_move(atk_bb, def_bb, king_bb, player, max_depth, false, board_heuristic_v5);
         uint64_t move_from = chosen_move[0];
         uint64_t move_to = chosen_move[1];
         int move_from_bit_loc = __builtin_ctzll(move_from);
@@ -969,15 +1118,29 @@ int main(){
 
     initializeZobristTable();
 
-    // double score = get_board_score_by_width_search_zobrist(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 8, board_heuristic_pieces_only);
-    // cout << score << endl;
     // AI_zobrist_get_move(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 8, true, board_heuristic_pieces_only);
-    // for(int i=0; i<12; i++){
-    //     cout << i << " " << NUM_NODES[i] << endl;
-    // }
-    // cout << "Zobrist times read: " << ZOBRIST_NUM_TIMES_READ << endl;
-    // cout << "Zobrist times written: " << ZOBRIST_NUM_TIMES_WRITTEN << endl;
-    // cout << "Zobrist times missed: " << ZOBRIST_NUM_TIMES_MISSED << endl;
+
+    // uint64_t hash = computeHash(initial_atk_bb, initial_def_bb, initial_king_bb, true);
+    // uint64_t new_atk_bb, new_def_bb, new_king_bb;
+    // new_atk_bb = (initial_atk_bb ^ 1ULL << 3);
+    // new_atk_bb = (new_atk_bb ^ 1ULL << 4);
+    // new_def_bb = initial_def_bb;
+    // new_king_bb = initial_king_bb;
+    // uint64_t new_hash_1 = updateHash(hash, new_atk_bb, new_def_bb, new_king_bb, (1ULL << 3), (1ULL << 4));
+    // uint64_t new_hash_2 = computeHash(new_atk_bb, new_def_bb, new_king_bb, false);
+    // cout << hash << " " << new_hash_1 << " " << new_hash_2 << endl;
+
+    uint64_t hash = computeHash(initial_atk_bb, initial_def_bb, initial_king_bb, true);
+    double score = get_board_score_by_width_search_zobrist(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 6, hash, board_heuristic_pieces_only);
+    // double score = get_board_score_by_width_search(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 6, board_heuristic_pieces_only);
+    cout << score << endl;
+    for(int i=1; i<12; i++){
+        cout << i << " " << NUM_NODES[i] << endl;
+    }
+    cout << "Zobrist times read:    " << ZOBRIST_NUM_TIMES_READ << endl;
+    cout << "Zobrist times updated: " << ZOBRIST_NUM_TIMES_UPDATED << endl;
+    cout << "Zobrist times written: " << ZOBRIST_NUM_TIMES_WRITTEN << endl;
+    cout << "Zobrist times missed:  " << ZOBRIST_NUM_TIMES_MISSED << endl;
 
     // uint64_t flipped_bb;
     // print_bitboard(test_atk_bb);
