@@ -504,7 +504,7 @@ float board_heuristic_v5(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
 }
 
 
-float get_board_score(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+float get_board_wins(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     // 106 instructions.
     uint64_t king_hostile_bb = atk_bb | corner_bb;
     float score = 
@@ -644,7 +644,7 @@ float get_board_score_by_width_search_zobrist(uint64_t atk_bb, uint64_t def_bb, 
         }
         else{
             // If not, we will have to calculate the board score:
-            float move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
+            float move_score = get_board_wins(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
             if((depth >= max_depth) || abs(move_score) > 900){  // If we're at max depth, or someone has won, we terminate.
                 move_scores[imove] = (1 - 0.01*depth)*move_score;  // Encourage winning moves earlier rather than later.
             }
@@ -705,7 +705,7 @@ float get_board_score_by_width_search_sym_zobrist(uint64_t atk_bb, uint64_t def_
         }
         else{
             // If not, we will have to calculate the board score:
-            float move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
+            float move_score = get_board_wins(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
             if((depth >= max_depth) || abs(move_score) > 900){  // If we're at max depth, or someone has won, we terminate.
                 move_scores[imove] = (1 - 0.01*depth)*move_score;
             }
@@ -749,7 +749,7 @@ float get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t
         uint64_t king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove+1]);
         // If not, we will have to calculate the board score:
-        float move_score = get_board_score(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
+        float move_score = get_board_wins(atk_bb_new, def_bb_new, king_bb_new) + heuristic_function(atk_bb_new, def_bb_new, king_bb_new);
         if((depth >= max_depth) || abs(move_score) > 900){  // If we're at max depth, or someone has won, we terminate.
             move_scores[imove] = (1 - 0.01*depth)*move_score;
         }
@@ -758,7 +758,6 @@ float get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t
         }
     }
 
-    // int best_board_score;
     if(player == PLAYER_ATK){
         float best_board_score = -999999;
         for(int imove=0; imove<num_legal_moves; imove++){
@@ -776,6 +775,49 @@ float get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t
             }
         }
     return best_board_score;
+    }
+}
+
+float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int depth, unsigned short int max_depth, float alpha, float beta, float (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+    if((depth >= max_depth) || (get_board_wins(atk_bb, def_bb, king_bb) > 100)){ // Base case: terminal depth or leaf node
+        return heuristic_function(atk_bb, def_bb, king_bb)*(1 - 0.01*(depth-1));
+    }
+
+    vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
+    int num_legal_moves = legal_moves.size() / 2;
+    NUM_NODES[depth] += num_legal_moves;
+
+    if(player == PLAYER_ATK){
+        float best_score = -999999;
+        for(int imove = 0; imove < num_legal_moves; imove++){
+            uint64_t atk_bb_new = atk_bb;
+            uint64_t def_bb_new = def_bb;
+            uint64_t king_bb_new = king_bb;
+            make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove + 1]);
+            float score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth + 1, max_depth, alpha, beta, heuristic_function);
+            best_score = max(best_score, score);
+            alpha = max(alpha, best_score);
+            if(beta <= alpha){ // Beta cut-off
+                break;
+            }
+        }
+        return best_score;
+    }
+    else{
+        float best_score = 999999;
+        for(int imove = 0; imove < num_legal_moves; imove++){
+            uint64_t atk_bb_new = atk_bb;
+            uint64_t def_bb_new = def_bb;
+            uint64_t king_bb_new = king_bb;
+            make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove + 1]);
+            float score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth + 1, max_depth, alpha, beta, heuristic_function);
+            best_score = min(best_score, score);
+            beta = min(beta, best_score);
+            if(beta <= alpha){ // Alpha cut-off
+                break;
+            }
+        }
+        return best_score;
     }
 }
 
@@ -1023,7 +1065,7 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
             else
                 preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, AI_2_heuristic_function);
             make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
-            score = get_board_score(atk_bb, def_bb, king_bb) + board_heuristic_pieces_only(atk_bb, def_bb, king_bb);
+            score = get_board_wins(atk_bb, def_bb, king_bb) + board_heuristic_pieces_only(atk_bb, def_bb, king_bb);
             if(abs(score) > 800){
                 if(score < 0){
                     if(AI_1_playing_as == -1)
@@ -1080,22 +1122,22 @@ int main(){
     uint64_t initial_king_bb = 0x8000000;
 
     vector<vector<uint64_t>> test_atk_board = {
+        {0, 0, 0, 1, 0, 0, 0, 0},
+        {0, 1, 0, 1, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 1, 0},
+        {1, 0, 0, 0, 0, 1, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 1, 0, 0, 0, 0, 0},
         {0, 1, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 1, 0, 0, 0, 1, 0},
+        {0, 0, 0, 1, 0, 0, 1, 0},
         {0, 0, 0, 0, 0, 0, 0, 0}
     };
 
     vector<vector<uint64_t>> test_def_board = {
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 1, 0, 0, 0},
+        {0, 0, 1, 1, 0, 0, 0, 0},
+        {0, 0, 0, 1, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0}
@@ -1104,8 +1146,8 @@ int main(){
     vector<vector<uint64_t>> test_king_board = {
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 1, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
-        {0, 0, 1, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
         {0, 0, 0, 0, 0, 0, 0, 0},
@@ -1130,17 +1172,18 @@ int main(){
     // uint64_t new_hash_2 = computeHash(new_atk_bb, new_def_bb, new_king_bb, false);
     // cout << hash << " " << new_hash_1 << " " << new_hash_2 << endl;
 
-    uint64_t hash = computeHash(initial_atk_bb, initial_def_bb, initial_king_bb, true);
-    float score = get_board_score_by_width_search_zobrist(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 6, hash, board_heuristic_pieces_only);
-    // float score = get_board_score_by_width_search(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 1, 6, board_heuristic_pieces_only);
+    // uint64_t hash = computeHash(test_atk_bb, test_def_bb, test_king_bb, true);
+    // float score = get_board_score_by_width_search_zobrist(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, hash, board_heuristic_pieces_only);
+    // float score = get_board_score_by_width_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, board_heuristic_v5);
+    float score = get_board_score_by_alpha_beta_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6+1, -INFINITY, INFINITY, board_heuristic_v5);
     cout << score << endl;
     for(int i=1; i<12; i++){
         cout << i << " " << NUM_NODES[i] << endl;
     }
-    cout << "Zobrist times read:    " << ZOBRIST_NUM_TIMES_READ << endl;
-    cout << "Zobrist times updated: " << ZOBRIST_NUM_TIMES_UPDATED << endl;
-    cout << "Zobrist times written: " << ZOBRIST_NUM_TIMES_WRITTEN << endl;
-    cout << "Zobrist times missed:  " << ZOBRIST_NUM_TIMES_MISSED << endl;
+    // cout << "Zobrist times read:    " << ZOBRIST_NUM_TIMES_READ << endl;
+    // cout << "Zobrist times updated: " << ZOBRIST_NUM_TIMES_UPDATED << endl;
+    // cout << "Zobrist times written: " << ZOBRIST_NUM_TIMES_WRITTEN << endl;
+    // cout << "Zobrist times missed:  " << ZOBRIST_NUM_TIMES_MISSED << endl;
 
     // uint64_t flipped_bb;
     // print_bitboard(test_atk_bb);
