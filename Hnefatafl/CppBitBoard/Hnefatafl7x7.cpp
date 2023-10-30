@@ -779,9 +779,8 @@ float get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t
 }
 
 float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int depth, unsigned short int max_depth, float alpha, float beta, float (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
-    // SearchResult result;
     float board_wins = get_board_wins(atk_bb, def_bb, king_bb);
-    if((depth >= max_depth) || (board_wins > 100)){ // Base case: terminal depth or leaf node
+    if((depth >= max_depth) || abs((board_wins) > 100)){ // Base case: terminal depth or leaf node
         return (heuristic_function(atk_bb, def_bb, king_bb) + board_wins)*(1 - 0.01*(depth-1));
     }
 
@@ -1176,8 +1175,8 @@ int main(){
 
     // uint64_t hash = computeHash(test_atk_bb, test_def_bb, test_king_bb, true);
     // float score = get_board_score_by_width_search_zobrist(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, hash, board_heuristic_pieces_only);
-    // float score = get_board_score_by_width_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, board_heuristic_v5);
-    float score = get_board_score_by_alpha_beta_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6+1, -INFINITY, INFINITY, board_heuristic_v5);
+    // float score = get_board_score_by_width_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, board_heuristic_pieces_only);
+    float score = get_board_score_by_alpha_beta_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, -INFINITY, INFINITY, board_heuristic_pieces_only)
     cout << score << endl;
     for(int i=1; i<12; i++){
         cout << i << " " << NUM_NODES[i] << endl;
