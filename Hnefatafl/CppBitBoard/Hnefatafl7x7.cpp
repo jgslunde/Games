@@ -779,8 +779,10 @@ float get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t
 }
 
 float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int depth, unsigned short int max_depth, float alpha, float beta, float (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
-    if((depth >= max_depth) || (get_board_wins(atk_bb, def_bb, king_bb) > 100)){ // Base case: terminal depth or leaf node
-        return heuristic_function(atk_bb, def_bb, king_bb)*(1 - 0.01*(depth-1));
+    // SearchResult result;
+    float board_wins = get_board_wins(atk_bb, def_bb, king_bb);
+    if((depth >= max_depth) || (board_wins > 100)){ // Base case: terminal depth or leaf node
+        return (heuristic_function(atk_bb, def_bb, king_bb) + board_wins)*(1 - 0.01*(depth-1));
     }
 
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
