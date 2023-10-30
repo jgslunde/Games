@@ -823,6 +823,48 @@ float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uin
 }
 
 
+vector<uint64_t> AI_alpha_beta_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int max_depth, bool verbose, float (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+    vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
+    int num_legal_moves = legal_moves.size()/2;
+    int preffered_move_idx = 0;
+    vector<float> move_scores(num_legal_moves);
+
+    #pragma omp parallel for
+    for(int i=0; i<num_legal_moves; i++){
+        uint64_t atk_bb_new, def_bb_new, king_bb_new;
+        atk_bb_new = atk_bb;
+        def_bb_new = def_bb;
+        king_bb_new = king_bb;
+        make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*i], legal_moves[2*i+1]);
+        float move_score;
+        move_score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, 1, max_depth, -INFINITY, INFINITY, heuristic_function);
+        move_scores[i] = move_score;
+    }
+
+    // Finding the preffered (highest or lowest, depending on player) score among the options.
+    float best_move_score = -9999999.0*player;
+    for(int i=0; i<num_legal_moves; i++){
+        if(move_scores[i]*player > best_move_score*player){
+            best_move_score = move_scores[i];
+        }
+    }
+    // Finding all the moves with the preffered score.
+    vector<int> preffered_move_indices;
+    for(int i=0; i<num_legal_moves; i++){
+        if(move_scores[i] == best_move_score){
+            preffered_move_indices.push_back(i);
+        }
+    }
+    // Chosing a random among those.
+    uint64_t chosen_move_index = preffered_move_indices[thread_safe_rand()%preffered_move_indices.size()];
+
+    if(verbose){
+        cout << "Player: " << player << ". Board eval: " << best_move_score << endl;
+    }
+    return {legal_moves[2*chosen_move_index], legal_moves[2*chosen_move_index+1]};
+}
+
+
 vector<uint64_t> AI_zobrist_get_move(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int max_depth, bool verbose, float (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
@@ -1176,11 +1218,11 @@ int main(){
     // uint64_t hash = computeHash(test_atk_bb, test_def_bb, test_king_bb, true);
     // float score = get_board_score_by_width_search_zobrist(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, hash, board_heuristic_pieces_only);
     // float score = get_board_score_by_width_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, board_heuristic_pieces_only);
-    float score = get_board_score_by_alpha_beta_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, -INFINITY, INFINITY, board_heuristic_pieces_only)
-    cout << score << endl;
-    for(int i=1; i<12; i++){
-        cout << i << " " << NUM_NODES[i] << endl;
-    }
+    // float score = get_board_score_by_alpha_beta_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6+1, -INFINITY, INFINITY, board_heuristic_v5);
+    // cout << score << endl;
+    // for(int i=1; i<12; i++){
+    //     cout << i << " " << NUM_NODES[i] << endl;
+    // }
     // cout << "Zobrist times read:    " << ZOBRIST_NUM_TIMES_READ << endl;
     // cout << "Zobrist times updated: " << ZOBRIST_NUM_TIMES_UPDATED << endl;
     // cout << "Zobrist times written: " << ZOBRIST_NUM_TIMES_WRITTEN << endl;
@@ -1196,8 +1238,8 @@ int main(){
     //     print_bitboard(all_boards[i]);
     // }
 
-    // cout << "same heuristics" << endl;
-    // AI_vs_AI_tournament(1, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
+    cout << "same heuristics" << endl;
+    AI_vs_AI_tournament(1, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
 
     // cout << "v1" << endl;
     // AI_vs_AI_tournament(1000, board_heuristic_v1, board_heuristic_pieces_only, true);
