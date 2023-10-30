@@ -455,6 +455,40 @@ float board_heuristic_pieces_only(uint64_t atk_bb, uint64_t def_bb, uint64_t kin
 float board_heuristic_king_free_moves(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     uint64_t blocker_bb = atk_bb | def_bb | edge_bb;
     float score = 0;
+    for(int i=1; i<6; i++){
+        if((king_bb<<i) & (~blocker_bb)){
+            score -= 0.05;
+        }else{
+            break;
+        }
+    }
+    for(int i=1; i<6; i++){
+        if((king_bb>>i) & (~blocker_bb)){
+            score -= 0.05;
+        }else{
+            break;
+        }
+    }
+    for(int i=1; i<6; i++){
+        if((king_bb<<8*i) & (~blocker_bb)){
+            score -= 0.05;
+        }else{
+            break;
+        }
+    }
+    for(int i=1; i<6; i++){
+        if((king_bb>>8*i) & (~blocker_bb)){
+            score -= 0.05;
+        }else{
+            break;
+        }
+    }
+    return score;
+}
+
+float board_heuristic_king_free_moves_wrong(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    uint64_t blocker_bb = atk_bb | def_bb | edge_bb;
+    float score = 0;
     for(int i=0; i<6; i++){
         score -= (float) 0.01*(((king_bb<<i) & (~blocker_bb)) != 0)
                         + (((king_bb>>i) & (~blocker_bb))  != 0)
@@ -485,7 +519,7 @@ float board_heuristic_v2(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
 }
 
 float board_heuristic_v3(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return board_heuristic_v2(atk_bb, def_bb, king_bb) + board_heuristic_king_free_moves(atk_bb, def_bb, king_bb);
+    return board_heuristic_v2(atk_bb, def_bb, king_bb) + board_heuristic_king_free_moves_wrong(atk_bb, def_bb, king_bb);
 }
 
 
@@ -499,10 +533,18 @@ float board_heuristic_v5(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
             - 1.5*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
             + 0.1*__builtin_popcountll(diag2corner_bb & atk_bb)
             + 0.05*__builtin_popcountll(fouredgesides_bb & atk_bb)
-            + board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)
+            + board_heuristic_king_free_moves_wrong(atk_bb, def_bb, king_bb)
             + board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb);
 }
 
+float board_heuristic_v6(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return  __builtin_popcountll(atk_bb)   // Num of attacking pieces.
+            - 1.5*__builtin_popcountll(def_bb)   // Number of defending pieces times two (they are half as many).
+            + 0.1*__builtin_popcountll(diag2corner_bb & atk_bb)
+            + 0.05*__builtin_popcountll(fouredgesides_bb & atk_bb)
+            + board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)
+            + board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb);
+}
 
 float get_board_wins(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     // 106 instructions.
@@ -1035,7 +1077,7 @@ extern "C" {
         uint64_t def_bb = board2bits(board_def);
         uint64_t king_bb = board2bits(board_king);
 
-        vector<uint64_t> chosen_move = AI_alpha_beta_get_move(atk_bb, def_bb, king_bb, player, max_depth, false, board_heuristic_v5);
+        vector<uint64_t> chosen_move = AI_alpha_beta_get_move(atk_bb, def_bb, king_bb, player, max_depth, false, board_heuristic_v6);
         uint64_t move_from = chosen_move[0];
         uint64_t move_to = chosen_move[1];
         int move_from_bit_loc = __builtin_ctzll(move_from);
@@ -1098,9 +1140,9 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
         int iturn = 0;
         while (true){
             if(current_player == 1){
-                depth=7;
+                depth=4;
             }else{
-                depth=7;
+                depth=4;
             }
             vector<uint64_t> preffered_move;
             if(current_player*AI_1_playing_as == 1)
@@ -1201,7 +1243,13 @@ int main(){
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
-    initializeZobristTable();
+    print_bitgame(test_atk_bb, test_def_bb, test_king_bb);
+
+    cout << board_heuristic_pieces_only(test_atk_bb, test_def_bb, test_king_bb) << endl;
+    cout << board_heuristic_king_free_moves(test_atk_bb, test_def_bb, test_king_bb) << endl;
+    cout << board_heuristic_king_neighboring_enemies(test_atk_bb, test_def_bb, test_king_bb) << endl;
+
+    // initializeZobristTable();
 
     // AI_zobrist_get_move(initial_atk_bb, initial_def_bb, initial_king_bb, 1, 8, true, board_heuristic_pieces_only);
 
@@ -1238,7 +1286,7 @@ int main(){
     //     print_bitboard(all_boards[i]);
     // }
 
-    
+
 
     // cout << "same heuristics" << endl;
     // AI_vs_AI_tournament(100, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
@@ -1257,5 +1305,8 @@ int main(){
 
     // cout << "v5" << endl;
     // AI_vs_AI_tournament(1000, board_heuristic_v5, board_heuristic_pieces_only, true);
+
+    cout << "v6 vs v5" << endl;
+    AI_vs_AI_tournament(1000, board_heuristic_v6, board_heuristic_pieces_only, true);
 
 }
