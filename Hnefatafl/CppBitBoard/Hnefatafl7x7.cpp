@@ -780,7 +780,7 @@ float get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t
 
 float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int depth, unsigned short int max_depth, float alpha, float beta, float (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
     float board_wins = get_board_wins(atk_bb, def_bb, king_bb);
-    if((depth >= max_depth) || abs((board_wins) > 100)){ // Base case: terminal depth or leaf node
+    if((depth >= max_depth) || (abs(board_wins) > 100)){ // Base case: terminal depth or leaf node
         return (heuristic_function(atk_bb, def_bb, king_bb) + board_wins)*(1 - 0.01*(depth-1));
     }
 
@@ -1035,7 +1035,7 @@ extern "C" {
         uint64_t def_bb = board2bits(board_def);
         uint64_t king_bb = board2bits(board_king);
 
-        vector<uint64_t> chosen_move = AI_1_get_move(atk_bb, def_bb, king_bb, player, max_depth, false, board_heuristic_v5);
+        vector<uint64_t> chosen_move = AI_alpha_beta_get_move(atk_bb, def_bb, king_bb, player, max_depth, false, board_heuristic_v5);
         uint64_t move_from = chosen_move[0];
         uint64_t move_to = chosen_move[1];
         int move_from_bit_loc = __builtin_ctzll(move_from);
@@ -1098,15 +1098,15 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
         int iturn = 0;
         while (true){
             if(current_player == 1){
-                depth=4;
+                depth=7;
             }else{
-                depth=4;
+                depth=7;
             }
             vector<uint64_t> preffered_move;
             if(current_player*AI_1_playing_as == 1)
-                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, AI_1_heuristic_function);
+                preffered_move = AI_alpha_beta_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, AI_1_heuristic_function);
             else
-                preffered_move = AI_1_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, AI_2_heuristic_function);
+                preffered_move = AI_alpha_beta_get_move(atk_bb, def_bb, king_bb, current_player, depth, false, AI_2_heuristic_function);
             make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
             score = get_board_wins(atk_bb, def_bb, king_bb) + board_heuristic_pieces_only(atk_bb, def_bb, king_bb);
             if(abs(score) > 800){
@@ -1238,8 +1238,10 @@ int main(){
     //     print_bitboard(all_boards[i]);
     // }
 
-    cout << "same heuristics" << endl;
-    AI_vs_AI_tournament(1, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
+    
+
+    // cout << "same heuristics" << endl;
+    // AI_vs_AI_tournament(100, board_heuristic_pieces_only, board_heuristic_pieces_only, true);
 
     // cout << "v1" << endl;
     // AI_vs_AI_tournament(1000, board_heuristic_v1, board_heuristic_pieces_only, true);
