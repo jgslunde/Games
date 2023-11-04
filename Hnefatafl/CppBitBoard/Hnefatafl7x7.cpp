@@ -5,7 +5,7 @@
 #include <random>
 #include <thread>
 #include <map>
-#include <random>
+#include <fstream>
 
 using namespace std;
 
@@ -458,32 +458,32 @@ float board_heuristic_pieces_only(uint64_t atk_bb, uint64_t def_bb, uint64_t kin
 
 
 float board_heuristic_king_free_moves(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    uint64_t blocker_bb = atk_bb | def_bb | edge_bb;
-    float score = 0.2;
+    uint64_t blocker_bb = atk_bb | edge_bb;
+    float score = 0.0;
     for(int i=1; i<6; i++){
         if((king_bb<<i) & (~blocker_bb)){
-            score -= 0.05;
+            score -= 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
         if((king_bb>>i) & (~blocker_bb)){
-            score -= 0.05;
+            score -= 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
         if((king_bb<<8*i) & (~blocker_bb)){
-            score -= 0.05;
+            score -= 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
         if((king_bb>>8*i) & (~blocker_bb)){
-            score -= 0.05;
+            score -= 1.0;
         }else{
             break;
         }
@@ -504,17 +504,24 @@ float board_heuristic_king_free_moves_wrong(uint64_t atk_bb, uint64_t def_bb, ui
 }
 
 float board_heuristic_king_neighboring_enemies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return -0.4 + 0.2*(((king_bb<<1 & atk_bb) != 0)
-                     + ((king_bb>>1 & atk_bb) != 0)
-                     + ((king_bb<<8 & atk_bb) != 0)
-                     + ((king_bb>>8 & atk_bb) != 0));
+    return  (float) ((king_bb<<1 & atk_bb) != 0)
+          + (float) ((king_bb>>1 & atk_bb) != 0)
+          + (float) ((king_bb<<8 & atk_bb) != 0)
+          + (float) ((king_bb>>8 & atk_bb) != 0);
+}
+
+float board_heuristic_king_neighboring_allies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+    return  (float) ((king_bb<<1 & atk_bb) != 0)
+          + (float) ((king_bb>>1 & atk_bb) != 0)
+          + (float) ((king_bb<<8 & atk_bb) != 0)
+          + (float) ((king_bb>>8 & atk_bb) != 0);
 }
 
 float board_heuristic_attacker_on_edges(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return    0.06* (float) ((right_sideedge_bb & atk_bb) != 0)
-            + 0.06* (float) ((left_sideedge_bb & atk_bb) != 0)
-            + 0.06* (float) ((top_sideedge_bb & atk_bb) != 0)
-            + 0.06* (float) ((bottom_sideedge_bb & atk_bb) != 0);
+    return    (float) ((right_sideedge_bb & atk_bb) != 0)
+            + (float) ((left_sideedge_bb & atk_bb) != 0)
+            + (float) ((top_sideedge_bb & atk_bb) != 0)
+            + (float) ((bottom_sideedge_bb & atk_bb) != 0);
 }
 
 float board_heuristic_attacker_on_corners(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
@@ -586,6 +593,34 @@ float board_heuristic_v8(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
     + board_heuristic_atk_next_to_corners(atk_bb, def_bb, king_bb)
     + board_heuristic_def_next_to_corners(atk_bb, def_bb, king_bb);
 }
+
+
+struct HeuristicsConfig {
+    float def_pieces_weight = 1.0;
+    float atk_pieces_weight = 1.0;
+    float king_free_moves_weight = 1.0;
+    float king_neighboring_enemies_weight = 1.0;
+    float king_neighboring_allies_weight = 1.0;
+    float atk_pieces_on_edges_weight = 1.0;
+    float atk_pieces_diag_to_corners_weight = 1.0;
+    float atk_pieces_next_to_corners_weight = 1.0;
+    float def_pieces_next_to_corners_weight = 1.0;
+};
+
+
+float combined_board_heuristics(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, HeuristicsConfig *config){
+    return   - 1.5*config->def_pieces_weight * __builtin_popcountll(def_bb)
+            + 1.5*config->atk_pieces_weight * __builtin_popcountll(atk_bb)
+            - 0.05*config->king_free_moves_weight * board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)
+            + 0.2*config->king_neighboring_enemies_weight * board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb)
+            + 0.08*config->king_neighboring_allies_weight * board_heuristic_king_neighboring_allies(atk_bb, def_bb, king_bb)
+            + 0.06*config->atk_pieces_on_edges_weight * board_heuristic_attacker_on_edges(atk_bb, def_bb, king_bb)
+            + 0.1*config->atk_pieces_diag_to_corners_weight * __builtin_popcountll(diag2corner_bb & atk_bb)
+            - 0.15*config->atk_pieces_next_to_corners_weight *  __builtin_popcountll(corner_neighbors_bb & atk_bb)
+            + 0.15*config->def_pieces_next_to_corners_weight *  __builtin_popcountll(corner_neighbors_bb & def_bb);
+}
+
+
 
 
 float get_board_wins(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
@@ -862,10 +897,10 @@ float get_board_score_by_width_search(uint64_t atk_bb, uint64_t def_bb, uint64_t
     }
 }
 
-float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int depth, unsigned short int max_depth, float alpha, float beta, float (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int depth, unsigned short int max_depth, float alpha, float beta, HeuristicsConfig *config){
     float board_wins = get_board_wins(atk_bb, def_bb, king_bb);
     if((depth >= max_depth) || (abs(board_wins) > 100)){ // Base case: terminal depth or leaf node
-        return (heuristic_function(atk_bb, def_bb, king_bb) + board_wins)*(1 - 0.01*(depth-1));
+        return (combined_board_heuristics(atk_bb, def_bb, king_bb, config) + board_wins)*(1 - 0.01*(depth-1));
     }
 
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
@@ -882,7 +917,7 @@ float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uin
             uint64_t def_bb_new = def_bb;
             uint64_t king_bb_new = king_bb;
             make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove + 1]);
-            float score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth + 1, max_depth, alpha, beta, heuristic_function);
+            float score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth + 1, max_depth, alpha, beta, config);
             best_score = max(best_score, score);
             alpha = max(alpha, best_score);
             if(beta <= alpha){ // Beta cut-off
@@ -898,7 +933,7 @@ float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uin
             uint64_t def_bb_new = def_bb;
             uint64_t king_bb_new = king_bb;
             make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*imove], legal_moves[2*imove + 1]);
-            float score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth + 1, max_depth, alpha, beta, heuristic_function);
+            float score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, depth + 1, max_depth, alpha, beta, config);
             best_score = min(best_score, score);
             beta = min(beta, best_score);
             if(beta <= alpha){ // Alpha cut-off
@@ -910,7 +945,7 @@ float get_board_score_by_alpha_beta_search(uint64_t atk_bb, uint64_t def_bb, uin
 }
 
 
-vector<uint64_t> AI_alpha_beta_get_move(float *eval, uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int max_depth, bool verbose, float (*heuristic_function)(uint64_t, uint64_t, uint64_t)){
+vector<uint64_t> AI_alpha_beta_get_move(float *eval, uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, int player, unsigned short int max_depth, bool verbose, HeuristicsConfig *config){
     vector<uint64_t> legal_moves = get_all_legal_moves_as_vector(atk_bb, def_bb, king_bb, player);
     int num_legal_moves = legal_moves.size()/2;
     if(num_legal_moves == 0){
@@ -918,6 +953,8 @@ vector<uint64_t> AI_alpha_beta_get_move(float *eval, uint64_t atk_bb, uint64_t d
     }
     int preffered_move_idx = 0;
     vector<float> move_scores(num_legal_moves);
+
+    NUM_NODES[0] = num_legal_moves;
 
     #pragma omp parallel for
     for(int i=0; i<num_legal_moves; i++){
@@ -927,7 +964,7 @@ vector<uint64_t> AI_alpha_beta_get_move(float *eval, uint64_t atk_bb, uint64_t d
         king_bb_new = king_bb;
         make_move_on_board(atk_bb_new, def_bb_new, king_bb_new, legal_moves[2*i], legal_moves[2*i+1]);
         float move_score;
-        move_score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, 1, max_depth, -INFINITY, INFINITY, heuristic_function);
+        move_score = get_board_score_by_alpha_beta_search(atk_bb_new, def_bb_new, king_bb_new, -player, 1, max_depth, -INFINITY, INFINITY, config);
         move_scores[i] = move_score;
     }
 
@@ -1126,7 +1163,9 @@ extern "C" {
         uint64_t def_bb = board2bits(board_def);
         uint64_t king_bb = board2bits(board_king);
 
-        vector<uint64_t> chosen_move = AI_alpha_beta_get_move(eval, atk_bb, def_bb, king_bb, player, max_depth, false, board_heuristic_v7);
+        HeuristicsConfig config;
+
+        vector<uint64_t> chosen_move = AI_alpha_beta_get_move(eval, atk_bb, def_bb, king_bb, player, max_depth, false, &config);
         uint64_t move_from = chosen_move[0];
         uint64_t move_to = chosen_move[1];
         int move_from_bit_loc = __builtin_ctzll(move_from);
@@ -1164,7 +1203,7 @@ void compare_bbs_to_expected(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb,
 }
 
 
-void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_t, uint64_t, uint64_t), float (*AI_2_heuristic_function)(uint64_t, uint64_t, uint64_t), bool verbose){
+float AI_vs_AI_tournament(int num_games, int depth1, int depth2, HeuristicsConfig *config1, HeuristicsConfig *config2, bool verbose, bool vverbose){
     uint64_t initial_atk_bb = 0x8080063000808;
     uint64_t initial_def_bb = 0x814080000;
     uint64_t initial_king_bb = 0x8000000;
@@ -1178,7 +1217,7 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
     int num_ties = 0;
     int AI_1_playing_as = 1;
     for(int game=0; game<num_games; game++){
-        if(verbose)
+        if(vverbose)
             cout << "Game: " << game << endl;
         uint64_t atk_bb = initial_atk_bb;
         uint64_t def_bb = initial_def_bb;
@@ -1189,16 +1228,16 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
         int iturn = 0;
         while (true){
             if(current_player == 1){
-                depth=4;
+                depth=depth1;
             }else{
-                depth=4;
+                depth=depth2;
             }
             vector<uint64_t> preffered_move;
             float eval;
             if(current_player*AI_1_playing_as == 1)
-                preffered_move = AI_alpha_beta_get_move(&eval, atk_bb, def_bb, king_bb, current_player, depth, false, AI_1_heuristic_function);
+                preffered_move = AI_alpha_beta_get_move(&eval, atk_bb, def_bb, king_bb, current_player, depth, false, config1);
             else
-                preffered_move = AI_alpha_beta_get_move(&eval, atk_bb, def_bb, king_bb, current_player, depth, false, AI_2_heuristic_function);
+                preffered_move = AI_alpha_beta_get_move(&eval, atk_bb, def_bb, king_bb, current_player, depth, false, config2);
             if((preffered_move[0] != 0) && (preffered_move[1] != 0)){
                 make_move_on_board(atk_bb, def_bb, king_bb, preffered_move[0], preffered_move[1]);
                 score = get_board_wins(atk_bb, def_bb, king_bb) + board_heuristic_pieces_only(atk_bb, def_bb, king_bb);
@@ -1213,7 +1252,7 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
                         num_AI_1_wins_def++;
                     else
                         num_AI_2_wins_def++;
-                    if(verbose){
+                    if(vverbose){
                         cout << "DEFENDER WINS" << endl;
                         print_bitgame(atk_bb, def_bb, king_bb);
                     }
@@ -1222,7 +1261,7 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
                         num_AI_1_wins_atk++;
                     else
                         num_AI_2_wins_atk++;
-                    if(verbose){
+                    if(vverbose){
                         cout << "ATTACKER WINS" << endl;
                         print_bitgame(atk_bb, def_bb, king_bb);
                     }
@@ -1236,7 +1275,7 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
                     num_AI_1_ties_atk++;
                 else
                     num_AI_1_ties_def++;
-                if(verbose){
+                if(vverbose){
                     cout << "100 TURNS REACHED" << endl;
                     print_bitgame(atk_bb, def_bb, king_bb);
                 }
@@ -1245,14 +1284,143 @@ void AI_vs_AI_tournament(int num_games, float (*AI_1_heuristic_function)(uint64_
         }
         AI_1_playing_as *= -1;
     }
-    cout << "Total number of atk wins for AI_1: " << num_AI_1_wins_atk << endl;
-    cout << "Total number of atk wins for AI_2: " << num_AI_2_wins_atk << endl;
-    cout << "Total number of def wins for AI_1: " << num_AI_1_wins_def << endl;
-    cout << "Total number of def wins for AI_2: " << num_AI_2_wins_def << endl;
-    cout << "Total number of draws with AI_1 as atk: " << num_AI_1_ties_atk << endl;
-    cout << "Total number of draws with AI_1 as def: " << num_AI_1_ties_def << endl;
-    cout << "AI_1/AI_2 win ratio as atk: " << (float) num_AI_1_wins_atk / (float)num_AI_2_wins_atk << endl;
-    cout << "AI_1/AI_2 win ratio as def: " << (float) num_AI_1_wins_def / (float)num_AI_2_wins_def << endl;
+    if(verbose){
+        cout << "Total number of atk wins for AI_1: " << num_AI_1_wins_atk << endl;
+        cout << "Total number of atk wins for AI_2: " << num_AI_2_wins_atk << endl;
+        cout << "Total number of def wins for AI_1: " << num_AI_1_wins_def << endl;
+        cout << "Total number of def wins for AI_2: " << num_AI_2_wins_def << endl;
+        cout << "Total number of draws with AI_1 as atk: " << num_AI_1_ties_atk << endl;
+        cout << "Total number of draws with AI_1 as def: " << num_AI_1_ties_def << endl;
+        cout << "AI_1/AI_2 win ratio as atk: " << (float) num_AI_1_wins_atk / (float)num_AI_2_wins_atk << endl;
+        cout << "AI_1/AI_2 win ratio as def: " << (float) num_AI_1_wins_def / (float)num_AI_2_wins_def << endl;
+    }
+
+
+    float AI_1_score = (float) ((num_AI_1_wins_atk + num_AI_1_wins_def) - (num_AI_2_wins_atk + num_AI_2_wins_def))/(float) num_games;
+    return AI_1_score;
+}
+
+
+void SPSA_update_parameters(HeuristicsConfig &current_config, double alpha, double sigma){
+    cout << "alpha = " << alpha << endl;
+    cout << "sigma = " << sigma << endl;
+    unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    std::default_random_engine generator(seed);
+    std::normal_distribution<float> distribution(0.0, sigma);
+    HeuristicsConfig delta_weights = {
+        distribution(generator),
+        distribution(generator),
+        distribution(generator),
+        distribution(generator),
+        distribution(generator),
+        distribution(generator),
+        distribution(generator),
+        distribution(generator),
+    };
+
+
+    HeuristicsConfig config_plus{
+        current_config.def_pieces_weight + delta_weights.def_pieces_weight,
+        current_config.atk_pieces_weight + delta_weights.atk_pieces_weight,
+        current_config.king_free_moves_weight + delta_weights.king_free_moves_weight,
+        current_config.king_neighboring_enemies_weight + delta_weights.king_neighboring_enemies_weight,
+        current_config.king_neighboring_allies_weight + delta_weights.king_neighboring_allies_weight,
+        current_config.atk_pieces_on_edges_weight + delta_weights.atk_pieces_on_edges_weight,
+        current_config.atk_pieces_diag_to_corners_weight + delta_weights.atk_pieces_diag_to_corners_weight,
+        current_config.atk_pieces_next_to_corners_weight + delta_weights.atk_pieces_next_to_corners_weight,
+        current_config.def_pieces_next_to_corners_weight + delta_weights.def_pieces_next_to_corners_weight,
+    };
+
+    HeuristicsConfig config_minus{
+        current_config.def_pieces_weight - delta_weights.def_pieces_weight,
+        current_config.atk_pieces_weight - delta_weights.atk_pieces_weight,
+        current_config.king_free_moves_weight - delta_weights.king_free_moves_weight,
+        current_config.king_neighboring_enemies_weight - delta_weights.king_neighboring_enemies_weight,
+        current_config.king_neighboring_allies_weight - delta_weights.king_neighboring_allies_weight,
+        current_config.atk_pieces_on_edges_weight - delta_weights.atk_pieces_on_edges_weight,
+        current_config.atk_pieces_diag_to_corners_weight - delta_weights.atk_pieces_diag_to_corners_weight,
+        current_config.atk_pieces_next_to_corners_weight - delta_weights.atk_pieces_next_to_corners_weight,
+        current_config.def_pieces_next_to_corners_weight - delta_weights.def_pieces_next_to_corners_weight,
+    };
+
+    float AI_plus_score = AI_vs_AI_tournament(1000, 4, 4, &config_plus, &config_minus, false, false);
+    cout << "AI win rate score = " << AI_plus_score << endl;
+
+    current_config.def_pieces_weight += alpha*AI_plus_score*delta_weights.def_pieces_weight;
+    current_config.atk_pieces_weight += alpha*AI_plus_score*delta_weights.atk_pieces_weight;
+    current_config.king_free_moves_weight += alpha*AI_plus_score*delta_weights.king_free_moves_weight;
+    current_config.king_neighboring_enemies_weight += alpha*AI_plus_score*delta_weights.king_neighboring_enemies_weight;
+    current_config.king_neighboring_allies_weight += alpha*AI_plus_score*delta_weights.king_neighboring_allies_weight;
+    current_config.atk_pieces_on_edges_weight += alpha*AI_plus_score*delta_weights.atk_pieces_on_edges_weight;
+    current_config.atk_pieces_diag_to_corners_weight += alpha*AI_plus_score*delta_weights.atk_pieces_diag_to_corners_weight;
+    current_config.atk_pieces_next_to_corners_weight += alpha*AI_plus_score*delta_weights.atk_pieces_next_to_corners_weight;
+    current_config.def_pieces_next_to_corners_weight += alpha*AI_plus_score*delta_weights.def_pieces_next_to_corners_weight;
+
+}
+
+
+void SPSA_optimization(){
+    HeuristicsConfig current_config;
+    ofstream myfile;
+    myfile.open("data/SPSA_results_i1000_d4.txt");
+    double alpha, sigma;
+    for(int i=0; i<1000; i++){
+        cout << i << " / " << "1000" << endl;
+        if(i < 600){
+            alpha = 10.0 - i/67.0;
+            sigma = 0.2 - i/3158.0;
+        }
+        else{
+            alpha = 1.0;
+            sigma = 0.01;
+        }
+        SPSA_update_parameters(current_config, alpha, sigma);
+        // cout << "def_pieces_weight:                 " << current_config.def_pieces_weight << endl;
+        // cout << "atk_pieces_weight:                 " << current_config.atk_pieces_weight << endl;
+        // cout << "king_free_moves_weight:            " << current_config.king_free_moves_weight << endl;
+        // cout << "king_neighboring_enemies_weight:   " << current_config.king_neighboring_enemies_weight << endl;
+        // cout << "atk_pieces_on_edges_weight:        " << current_config.atk_pieces_on_edges_weight << endl;
+        // cout << "atk_pieces_diag_to_corners_weight: " << current_config.atk_pieces_diag_to_corners_weight << endl;
+        // cout << "atk_pieces_next_to_corners_weight: " << current_config.atk_pieces_next_to_corners_weight << endl;
+        // cout << "def_pieces_next_to_corners_weight: " << current_config.def_pieces_next_to_corners_weight << endl;
+        myfile << current_config.def_pieces_weight << " ";
+        myfile << current_config.atk_pieces_weight << " ";
+        myfile << current_config.king_free_moves_weight << " ";
+        myfile << current_config.king_neighboring_enemies_weight << " ";
+        myfile << current_config.atk_pieces_on_edges_weight << " ";
+        myfile << current_config.atk_pieces_diag_to_corners_weight << " ";
+        myfile << current_config.atk_pieces_next_to_corners_weight << " ";
+        myfile << current_config.def_pieces_next_to_corners_weight << " ";
+        myfile << endl;
+    }
+    myfile.close();
+
+
+
+    HeuristicsConfig initial_config;
+    HeuristicsConfig pieces_only_config;
+    pieces_only_config.atk_pieces_weight = 1.0;
+    pieces_only_config.def_pieces_weight = 4.0/3.0;
+    pieces_only_config.king_free_moves_weight = 0.0;
+    pieces_only_config.king_neighboring_enemies_weight = 0.0;
+    pieces_only_config.king_neighboring_allies_weight = 0.0;
+    pieces_only_config.atk_pieces_on_edges_weight = 0.0;
+    pieces_only_config.atk_pieces_diag_to_corners_weight = 0.0;
+    pieces_only_config.atk_pieces_next_to_corners_weight = 0.0;
+    pieces_only_config.def_pieces_next_to_corners_weight = 0.0;
+    
+    cout << "Depth 2 vs initial:" << endl;
+    AI_vs_AI_tournament(1000, 2, 2, &current_config, &initial_config, true, false);
+    cout << "Depth 2 vs naive:" << endl;
+    AI_vs_AI_tournament(1000, 2, 2, &current_config, &pieces_only_config, true, false);
+    cout << "Depth 3 vs initial:" << endl;
+    AI_vs_AI_tournament(1000, 3, 3, &current_config, &initial_config, true, false);
+    cout << "Depth 3 vs naive:" << endl;
+    AI_vs_AI_tournament(1000, 3, 3, &current_config, &pieces_only_config, true, false);
+    cout << "Depth 4 vs initial:" << endl;
+    AI_vs_AI_tournament(1000, 4, 4, &current_config, &initial_config, true, false);
+    cout << "Depth 4 vs naive:" << endl;
+    AI_vs_AI_tournament(1000, 4, 4, &current_config, &pieces_only_config, true, false);
 }
 
 
@@ -1299,19 +1467,22 @@ int main(){
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
-    print_bitgame(test_atk_bb, test_def_bb, test_king_bb);
-    cout << "Pieces:         " << board_heuristic_pieces_only(test_atk_bb, test_def_bb, test_king_bb) << endl;
-    cout << "King freedom:   " << board_heuristic_king_free_moves(test_atk_bb, test_def_bb, test_king_bb) << endl;
-    cout << "King neighbors: " << board_heuristic_king_neighboring_enemies(test_atk_bb, test_def_bb, test_king_bb) << endl;
-    cout << "Atk on corners: " << board_heuristic_attacker_on_corners(test_atk_bb, test_def_bb, test_king_bb) << endl;
-    cout << "Atk on edges:   " << board_heuristic_attacker_on_edges(test_atk_bb, test_def_bb, test_king_bb) << endl;
 
-    print_bitgame(initial_atk_bb, initial_def_bb, initial_king_bb);
-    cout << "Pieces:         " <<  board_heuristic_pieces_only(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
-    cout << "King freedom:   " <<  board_heuristic_king_free_moves(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
-    cout << "King neighbors: " <<  board_heuristic_king_neighboring_enemies(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
-    cout << "Atk on corners: " <<  board_heuristic_attacker_on_corners(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
-    cout << "Atk on edges:   " <<  board_heuristic_attacker_on_edges(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
+    SPSA_optimization();
+
+    // print_bitgame(test_atk_bb, test_def_bb, test_king_bb);
+    // cout << "Pieces:         " << board_heuristic_pieces_only(test_atk_bb, test_def_bb, test_king_bb) << endl;
+    // cout << "King freedom:   " << board_heuristic_king_free_moves(test_atk_bb, test_def_bb, test_king_bb) << endl;
+    // cout << "King neighbors: " << board_heuristic_king_neighboring_enemies(test_atk_bb, test_def_bb, test_king_bb) << endl;
+    // cout << "Atk on corners: " << board_heuristic_attacker_on_corners(test_atk_bb, test_def_bb, test_king_bb) << endl;
+    // cout << "Atk on edges:   " << board_heuristic_attacker_on_edges(test_atk_bb, test_def_bb, test_king_bb) << endl;
+
+    // print_bitgame(initial_atk_bb, initial_def_bb, initial_king_bb);
+    // cout << "Pieces:         " <<  board_heuristic_pieces_only(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
+    // cout << "King freedom:   " <<  board_heuristic_king_free_moves(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
+    // cout << "King neighbors: " <<  board_heuristic_king_neighboring_enemies(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
+    // cout << "Atk on corners: " <<  board_heuristic_attacker_on_corners(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
+    // cout << "Atk on edges:   " <<  board_heuristic_attacker_on_edges(initial_atk_bb, initial_def_bb, initial_king_bb) << endl;
 
     // initializeZobristTable();
     // float score = 0;
@@ -1332,9 +1503,7 @@ int main(){
     // float score = get_board_score_by_width_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6, board_heuristic_pieces_only);
     // float score = get_board_score_by_alpha_beta_search(test_atk_bb, test_def_bb, test_king_bb, 1, 1, 6+1, -INFINITY, INFINITY, board_heuristic_v5);
     // cout << score << endl;
-    // for(int i=1; i<12; i++){
-    //     cout << i << " " << NUM_NODES[i] << endl;
-    // }
+
     // cout << "Zobrist times read:    " << ZOBRIST_NUM_TIMES_READ << endl;
     // cout << "Zobrist times updated: " << ZOBRIST_NUM_TIMES_UPDATED << endl;
     // cout << "Zobrist times written: " << ZOBRIST_NUM_TIMES_WRITTEN << endl;
@@ -1371,6 +1540,19 @@ int main(){
     // AI_vs_AI_tournament(1000, board_heuristic_v5, board_heuristic_pieces_only, true);
 
     // cout << "v6 vs v5" << endl;
-    AI_vs_AI_tournament(100, board_heuristic_v8, board_heuristic_v7, true);
+    // AI_vs_AI_tournament(100, board_heuristic_v8, board_heuristic_v7, true);
 
+    // HeuristicsConfig config;
+
+
+    // float score = get_board_score_by_alpha_beta_search(test_atk_bb, test_def_bb, test_king_bb, 1, 0, 6, -INFINITY, INFINITY, &config);
+    // cout << score << endl;
+
+    // float eval;
+    // vector<uint64_t> move = AI_alpha_beta_get_move(&eval, test_atk_bb, test_def_bb, test_king_bb, 1, 6, true, combined_board_heuristics, &config);
+    // cout << eval << endl;
+
+    // for(int i=0; i<12; i++){
+    //     cout << i << " " << NUM_NODES[i] << endl;
+    // }
 }
