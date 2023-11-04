@@ -462,28 +462,28 @@ float board_heuristic_king_free_moves(uint64_t atk_bb, uint64_t def_bb, uint64_t
     float score = 0.0;
     for(int i=1; i<6; i++){
         if((king_bb<<i) & (~blocker_bb)){
-            score -= 1.0;
+            score += 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
         if((king_bb>>i) & (~blocker_bb)){
-            score -= 1.0;
+            score += 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
         if((king_bb<<8*i) & (~blocker_bb)){
-            score -= 1.0;
+            score += 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
         if((king_bb>>8*i) & (~blocker_bb)){
-            score -= 1.0;
+            score += 1.0;
         }else{
             break;
         }
