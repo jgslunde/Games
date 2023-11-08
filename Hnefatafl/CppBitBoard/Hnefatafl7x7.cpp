@@ -1455,28 +1455,28 @@ void SPSA_update_parameters(HeuristicsConfig &current_config, vector<HeuristicsC
         distribution(generator),
     };
 
+    cout << "Proposal step from " << current_config.def_pieces_weight << "  " << current_config.king_free_moves_weight << endl;
+    cout << "Step size " << delta_weights.def_pieces_weight << "  " << delta_weights.king_free_moves_weight << endl;
 
     HeuristicsConfig config_plus = current_config;
-    config_plus.atk_pieces_weight;
     config_plus.def_pieces_weight += delta_weights.def_pieces_weight;
     config_plus.king_free_moves_weight += delta_weights.king_free_moves_weight;
-    config_plus.king_neighboring_enemies_weight; // += delta_weights.king_neighboring_enemies_weight;
-    config_plus.king_neighboring_allies_weight; // += delta_weights.king_neighboring_allies_weight;
-    config_plus.atk_pieces_on_edges_weight; // += delta_weights.atk_pieces_on_edges_weight;
-    config_plus.atk_pieces_diag_to_corners_weight; // += delta_weights.atk_pieces_diag_to_corners_weight;
-    config_plus.atk_pieces_next_to_corners_weight; // += delta_weights.atk_pieces_next_to_corners_weight;
-    config_plus.def_pieces_next_to_corners_weight; // += delta_weights.def_pieces_next_to_corners_weight;
+    // config_plus.king_neighboring_enemies_weight += delta_weights.king_neighboring_enemies_weight;
+    // config_plus.king_neighboring_allies_weight += delta_weights.king_neighboring_allies_weight;
+    // config_plus.atk_pieces_on_edges_weight += delta_weights.atk_pieces_on_edges_weight;
+    // config_plus.atk_pieces_diag_to_corners_weight += delta_weights.atk_pieces_diag_to_corners_weight;
+    // config_plus.atk_pieces_next_to_corners_weight += delta_weights.atk_pieces_next_to_corners_weight;
+    // config_plus.def_pieces_next_to_corners_weight += delta_weights.def_pieces_next_to_corners_weight;
 
     HeuristicsConfig config_minus = current_config;
-    config_minus.atk_pieces_weight;
-    config_minus.def_pieces_weight - delta_weights.def_pieces_weight;
-    config_minus.king_free_moves_weight - delta_weights.king_free_moves_weight;
-    config_minus.king_neighboring_enemies_weight; // - delta_weights.king_neighboring_enemies_weight;
-    config_minus.king_neighboring_allies_weight; // - delta_weights.king_neighboring_allies_weight;
-    config_minus.atk_pieces_on_edges_weight; // - delta_weights.atk_pieces_on_edges_weight;
-    config_minus.atk_pieces_diag_to_corners_weight; // - delta_weights.atk_pieces_diag_to_corners_weight;
-    config_minus.atk_pieces_next_to_corners_weight; // - delta_weights.atk_pieces_next_to_corners_weight;
-    config_minus.def_pieces_next_to_corners_weight; // - delta_weights.def_pieces_next_to_corners_weight;
+    config_minus.def_pieces_weight -= delta_weights.def_pieces_weight;
+    config_minus.king_free_moves_weight -= delta_weights.king_free_moves_weight;
+    // config_minus.king_neighboring_enemies_weight - delta_weights.king_neighboring_enemies_weight;
+    // config_minus.king_neighboring_allies_weight - delta_weights.king_neighboring_allies_weight;
+    // config_minus.atk_pieces_on_edges_weight - delta_weights.atk_pieces_on_edges_weight;
+    // config_minus.atk_pieces_diag_to_corners_weight - delta_weights.atk_pieces_diag_to_corners_weight;
+    // config_minus.atk_pieces_next_to_corners_weight - delta_weights.atk_pieces_next_to_corners_weight;
+    // config_minus.def_pieces_next_to_corners_weight - delta_weights.def_pieces_next_to_corners_weight;
 
     float AI_plus_score = 0;  // The win performance score of the "plus delta" AI. Number between -1 and 1.
     // float AI_minus_score = 0;  // The win performance score of the "plus delta" AI. Number between -1 and 1.
@@ -1498,6 +1498,7 @@ void SPSA_update_parameters(HeuristicsConfig &current_config, vector<HeuristicsC
     // AI_plus_score /= 12;  // We've played a total of 12 tournaments, each with a score from -1 to 1, so we shrink the range back to -1 to 1.
 
     cout << "AI plus win rate score = " << AI_plus_score << endl;
+    cout << "Step size = " << alpha*AI_plus_score << endl;
 
     // current_config.atk_pieces_weight += alpha*AI_plus_score*delta_weights.atk_pieces_weight;
     current_config.def_pieces_weight += alpha*AI_plus_score*delta_weights.def_pieces_weight;
@@ -1512,25 +1513,27 @@ void SPSA_update_parameters(HeuristicsConfig &current_config, vector<HeuristicsC
 
 
 void SPSA_optimization(){
-    int Niter = 10000;
+    int Niter = 500;
     HeuristicsConfig current_config;
     HeuristicsConfig initial_config;
     vector<HeuristicsConfig> all_configs;
     all_configs.reserve(Niter+1);
     all_configs.push_back(current_config);
     ofstream myfile;
-    myfile.open("data/SPSA_results_i1000_d2_fixed_2params.txt");
+    myfile.open("data/SPSA_results_i400_d2_fixed_2params.txt");
     double alpha, sigma;
     for(int i=0; i<Niter; i++){
-        cout << i << " / " << "1000" << endl;
-        if(i < 900){
-            alpha = 10.0 - i/125.0;
-            sigma = 0.1 - i/11250.0;
-        }
-        else{
-            alpha = 2.0;
-            sigma = 0.02;
-        }
+        cout << i << " / " << "1500" << endl;
+        alpha = 10.0;
+        sigma = 0.1;
+        // if(i < 900){
+        //     alpha = 10.0 - i/125.0;
+        //     sigma = 0.1 - i/11250.0;
+        // }
+        // else{
+        //     alpha = 2.0;
+        //     sigma = 0.02;
+        // }
         SPSA_update_parameters(current_config, all_configs, alpha, sigma);
         all_configs.push_back(current_config);
         // cout << "def_pieces_weight:                 " << current_config.def_pieces_weight << endl;
@@ -1605,23 +1608,30 @@ void SPSA_optimization(){
 
 
 void grid_search_optimization(){
+    int N1 = 30;
+    int N2 = 50;
     HeuristicsConfig initial_config;
-    vector<HeuristicsConfig> all_configs;
-    vector<float> AI_scores;
-
+    vector<HeuristicsConfig> all_configs(N1*N2);
+    vector<float> AI_scores(N1*N2);
+    #pragma omp parallel for
+    for(int idx=0; idx<N1; idx++){
+        int i = idx/N1;
+        int j = idx%N1;
+        cout << idx << " " << i << " " << j << endl;
+        HeuristicsConfig current_config;
+        current_config.def_pieces_weight = 0.0 + i*0.1;
+        current_config.king_free_moves_weight = 0.0 + j*0.1;
+        all_configs[idx] = current_config;
+        float AI_score = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
+        AI_scores[idx] = AI_score;
+}
     ofstream myfile;
-    myfile.open("data/grid_results_20x20.txt");
-    for(int i=0; i<20; i++){
-        for(int j=0; j<20; j++){
-            cout << i << " " << j << endl;
-            HeuristicsConfig current_config;
-            current_config.def_pieces_weight = 0.0 + i*0.1;
-            current_config.king_free_moves_weight = 0.0 + j*0.1;
-            all_configs.push_back(current_config);
-    
-            float AI_score = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
-            AI_scores.push_back(AI_score);
-
+    myfile.open("data/grid_results_30x50.txt");
+    for(int i=0; i<N1; i++){
+        for(int j=0; j<N2; j++){
+            int idx = i*N1 + j;
+            float AI_score = AI_scores[idx];
+            HeuristicsConfig current_config = all_configs[idx];
             myfile << AI_score << " ";
             myfile << current_config.atk_pieces_weight << " ";
             myfile << current_config.def_pieces_weight << " ";
@@ -1635,6 +1645,8 @@ void grid_search_optimization(){
             myfile << endl;
         }
     }
+
+
 }
 
 
@@ -1681,8 +1693,8 @@ int main(){
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
-    // SPSA_optimization();
-    grid_search_optimization();
+    SPSA_optimization();
+    // grid_search_optimization();
 
     // print_bitgame(test_atk_bb, test_def_bb, test_king_bb);
     // cout << "Pieces:         " << board_heuristic_pieces_only(test_atk_bb, test_def_bb, test_king_bb) << endl;
