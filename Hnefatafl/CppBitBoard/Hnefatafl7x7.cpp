@@ -1613,9 +1613,10 @@ void grid_search_optimization(){
     myfile.open("data/grid_results_20x20.txt");
     for(int i=0; i<20; i++){
         for(int j=0; j<20; j++){
+            cout << i << " " << j << endl;
             HeuristicsConfig current_config;
             current_config.def_pieces_weight = 0.0 + i*0.1;
-            current_config.king_free_moves_weight = 0.0 + i*0.1;
+            current_config.king_free_moves_weight = 0.0 + j*0.1;
             all_configs.push_back(current_config);
     
             float AI_score = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
