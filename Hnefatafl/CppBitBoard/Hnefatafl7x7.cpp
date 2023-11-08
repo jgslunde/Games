@@ -1292,6 +1292,7 @@ float AI_vs_AI_tournament(int num_games, int depth1, int depth2, HeuristicsConfi
         }
         AI_1_playing_as *= -1;
     }
+    float AI_1_score = (float) ((num_AI_1_wins_atk + num_AI_1_wins_def) - (num_AI_2_wins_atk + num_AI_2_wins_def))/(float) num_games;
     if(verbose){
         cout << "Total number of atk wins for AI_1: " << num_AI_1_wins_atk << endl;
         cout << "Total number of atk wins for AI_2: " << num_AI_2_wins_atk << endl;
@@ -1301,10 +1302,10 @@ float AI_vs_AI_tournament(int num_games, int depth1, int depth2, HeuristicsConfi
         cout << "Total number of draws with AI_1 as def: " << num_AI_1_ties_def << endl;
         cout << "AI_1/AI_2 win ratio as atk: " << (float) num_AI_1_wins_atk / (float)num_AI_2_wins_atk << endl;
         cout << "AI_1/AI_2 win ratio as def: " << (float) num_AI_1_wins_def / (float)num_AI_2_wins_def << endl;
+        cout << "AI_1_score: " << AI_1_score << endl;
     }
 
 
-    float AI_1_score = (float) ((num_AI_1_wins_atk + num_AI_1_wins_def) - (num_AI_2_wins_atk + num_AI_2_wins_def))/(float) num_games;
     return AI_1_score;
 }
 
@@ -1419,6 +1420,7 @@ float modified_AI_vs_AI_tournament(int num_games, int depth1, int depth2, Heuris
         }
         AI_1_playing_as *= -1;
     }
+    float AI_1_score = (float) ((num_AI_1_wins_atk + num_AI_1_wins_def) - (num_AI_2_wins_atk + num_AI_2_wins_def))/(float) num_games;
     if(verbose){
         cout << "Total number of atk wins for AI_1: " << num_AI_1_wins_atk << endl;
         cout << "Total number of atk wins for AI_2: " << num_AI_2_wins_atk << endl;
@@ -1428,15 +1430,14 @@ float modified_AI_vs_AI_tournament(int num_games, int depth1, int depth2, Heuris
         cout << "Total number of draws with AI_1 as def: " << num_AI_1_ties_def << endl;
         cout << "AI_1/AI_2 win ratio as atk: " << (float) num_AI_1_wins_atk / (float)num_AI_2_wins_atk << endl;
         cout << "AI_1/AI_2 win ratio as def: " << (float) num_AI_1_wins_def / (float)num_AI_2_wins_def << endl;
+        cout << "AI_1_score: " << AI_1_score << endl;
     }
 
-
-    float AI_1_score = (float) ((num_AI_1_wins_atk + num_AI_1_wins_def) - (num_AI_2_wins_atk + num_AI_2_wins_def))/(float) num_games;
     return AI_1_score;
 }
 
 
-void SPSA_update_parameters(HeuristicsConfig &current_config, double alpha, double sigma){
+void SPSA_update_parameters(HeuristicsConfig &current_config, vector<HeuristicsConfig>all_configs, double alpha, double sigma){
     cout << "alpha = " << alpha << endl;
     cout << "sigma = " << sigma << endl;
     unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
@@ -1451,35 +1452,52 @@ void SPSA_update_parameters(HeuristicsConfig &current_config, double alpha, doub
         distribution(generator),
         distribution(generator),
         distribution(generator),
+        distribution(generator),
     };
 
 
-    HeuristicsConfig config_plus{
-        // current_config.atk_pieces_weight + delta_weights.atk_pieces_weight,
-        current_config.def_pieces_weight + delta_weights.def_pieces_weight,
-        current_config.king_free_moves_weight + delta_weights.king_free_moves_weight,
-        current_config.king_neighboring_enemies_weight + delta_weights.king_neighboring_enemies_weight,
-        current_config.king_neighboring_allies_weight + delta_weights.king_neighboring_allies_weight,
-        current_config.atk_pieces_on_edges_weight + delta_weights.atk_pieces_on_edges_weight,
-        current_config.atk_pieces_diag_to_corners_weight + delta_weights.atk_pieces_diag_to_corners_weight,
-        current_config.atk_pieces_next_to_corners_weight + delta_weights.atk_pieces_next_to_corners_weight,
-        current_config.def_pieces_next_to_corners_weight + delta_weights.def_pieces_next_to_corners_weight,
-    };
+    HeuristicsConfig config_plus = current_config;
+    config_plus.atk_pieces_weight;
+    config_plus.def_pieces_weight += delta_weights.def_pieces_weight;
+    config_plus.king_free_moves_weight += delta_weights.king_free_moves_weight;
+    config_plus.king_neighboring_enemies_weight += delta_weights.king_neighboring_enemies_weight;
+    config_plus.king_neighboring_allies_weight += delta_weights.king_neighboring_allies_weight;
+    config_plus.atk_pieces_on_edges_weight += delta_weights.atk_pieces_on_edges_weight;
+    config_plus.atk_pieces_diag_to_corners_weight += delta_weights.atk_pieces_diag_to_corners_weight;
+    config_plus.atk_pieces_next_to_corners_weight += delta_weights.atk_pieces_next_to_corners_weight;
+    config_plus.def_pieces_next_to_corners_weight += delta_weights.def_pieces_next_to_corners_weight;
 
-    HeuristicsConfig config_minus{
-        // current_config.atk_pieces_weight - delta_weights.atk_pieces_weight,
-        current_config.def_pieces_weight - delta_weights.def_pieces_weight,
-        current_config.king_free_moves_weight - delta_weights.king_free_moves_weight,
-        current_config.king_neighboring_enemies_weight - delta_weights.king_neighboring_enemies_weight,
-        current_config.king_neighboring_allies_weight - delta_weights.king_neighboring_allies_weight,
-        current_config.atk_pieces_on_edges_weight - delta_weights.atk_pieces_on_edges_weight,
-        current_config.atk_pieces_diag_to_corners_weight - delta_weights.atk_pieces_diag_to_corners_weight,
-        current_config.atk_pieces_next_to_corners_weight - delta_weights.atk_pieces_next_to_corners_weight,
-        current_config.def_pieces_next_to_corners_weight - delta_weights.def_pieces_next_to_corners_weight,
-    };
+    HeuristicsConfig config_minus = current_config;
+    config_minus.atk_pieces_weight;
+    config_minus.def_pieces_weight - delta_weights.def_pieces_weight;
+    config_minus.king_free_moves_weight - delta_weights.king_free_moves_weight;
+    config_minus.king_neighboring_enemies_weight - delta_weights.king_neighboring_enemies_weight;
+    config_minus.king_neighboring_allies_weight - delta_weights.king_neighboring_allies_weight;
+    config_minus.atk_pieces_on_edges_weight - delta_weights.atk_pieces_on_edges_weight;
+    config_minus.atk_pieces_diag_to_corners_weight - delta_weights.atk_pieces_diag_to_corners_weight;
+    config_minus.atk_pieces_next_to_corners_weight - delta_weights.atk_pieces_next_to_corners_weight;
+    config_minus.def_pieces_next_to_corners_weight - delta_weights.def_pieces_next_to_corners_weight;
 
-    float AI_plus_score = modified_AI_vs_AI_tournament(400, 2, 2, &config_plus, &config_minus, false, false);
-    cout << "AI win rate score = " << AI_plus_score << endl;
+    float AI_plus_score = 0;  // The win performance score of the "plus delta" AI. Number between -1 and 1.
+    // float AI_minus_score = 0;  // The win performance score of the "plus delta" AI. Number between -1 and 1.
+    // First, play once the "plus AI" vs the "minus AI".
+    AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &config_minus, false, false);
+    AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &config_minus, false, false);
+    
+    // // Then they both play against the initial AI. The plus AI lose points if the minus AI wins against the initial AI.
+    AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &all_configs[0], false, false);
+    AI_plus_score -= modified_AI_vs_AI_tournament(200, 2, 2, &config_minus, &all_configs[0], false, false);
+
+    for(int i=0; i<4; i++){  // 4 random previous configs to play against.
+        unsigned int rnd_config_idx = thread_safe_rand()%all_configs.size();
+        HeuristicsConfig rnd_config = all_configs[rnd_config_idx];
+        // Both AIs play against the previous AI.
+        AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &rnd_config, false, false);
+        AI_plus_score -= modified_AI_vs_AI_tournament(200, 2, 2, &config_minus, &rnd_config, false, false);
+    }
+    AI_plus_score /= 12;  // We've played a total of 12 tournaments, each with a score from -1 to 1, so we shrink the range back to -1 to 1.
+
+    cout << "AI plus win rate score = " << AI_plus_score << endl;
 
     // current_config.atk_pieces_weight += alpha*AI_plus_score*delta_weights.atk_pieces_weight;
     current_config.def_pieces_weight += alpha*AI_plus_score*delta_weights.def_pieces_weight;
@@ -1494,21 +1512,27 @@ void SPSA_update_parameters(HeuristicsConfig &current_config, double alpha, doub
 
 
 void SPSA_optimization(){
+    int Niter = 10000;
     HeuristicsConfig current_config;
+    HeuristicsConfig initial_config;
+    vector<HeuristicsConfig> all_configs;
+    all_configs.reserve(Niter+1);
+    all_configs.push_back(current_config);
     ofstream myfile;
-    myfile.open("data/SPSA_results_i400_d2_new.txt");
+    myfile.open("data/SPSA_results_i10000_d2_fixed.txt");
     double alpha, sigma;
-    for(int i=0; i<400; i++){
-        cout << i << " / " << "400" << endl;
-        if(i < 200){
-            alpha = 1.0;
-            sigma = 0.1 - i/2500.0;
+    for(int i=0; i<Niter; i++){
+        cout << i << " / " << "10000" << endl;
+        if(i < 9000){
+            alpha = 30.0 - i/333.0;
+            sigma = 0.1 - i/112500.0;
         }
         else{
-            alpha = 1.0;
+            alpha = 2.0;
             sigma = 0.02;
         }
-        SPSA_update_parameters(current_config, alpha, sigma);
+        SPSA_update_parameters(current_config, all_configs, alpha, sigma);
+        all_configs.push_back(current_config);
         // cout << "def_pieces_weight:                 " << current_config.def_pieces_weight << endl;
         // cout << "atk_pieces_weight:                 " << current_config.atk_pieces_weight << endl;
         // cout << "king_free_moves_weight:            " << current_config.king_free_moves_weight << endl;
@@ -1527,12 +1551,13 @@ void SPSA_optimization(){
         myfile << current_config.atk_pieces_next_to_corners_weight << " ";
         myfile << current_config.def_pieces_next_to_corners_weight << " ";
         myfile << endl;
+
+        // modified_AI_vs_AI_tournament(1000, 2, 2, &current_config, &initial_config, true, false);
     }
     myfile.close();
 
 
 
-    HeuristicsConfig initial_config;
     HeuristicsConfig pieces_only_config;
     pieces_only_config.atk_pieces_weight = 1.0;
     pieces_only_config.def_pieces_weight = 1.0;
@@ -1548,10 +1573,30 @@ void SPSA_optimization(){
     AI_vs_AI_tournament(1000, 2, 2, &current_config, &initial_config, true, false);
     cout << "Depth 2 vs naive:" << endl;
     AI_vs_AI_tournament(1000, 2, 2, &current_config, &pieces_only_config, true, false);
+    cout << "Depth 2 init vs naive:" << endl;
+    AI_vs_AI_tournament(1000, 2, 2, &initial_config, &pieces_only_config, true, false);
+
+    cout << "(mod) Depth 2 vs initial:" << endl;
+    modified_AI_vs_AI_tournament(1000, 2, 2, &current_config, &initial_config, true, false);
+    cout << "(mod) Depth 2 vs naive:" << endl;
+    modified_AI_vs_AI_tournament(1000, 2, 2, &current_config, &pieces_only_config, true, false);
+    cout << "(mod) Depth 2 init vs naive:" << endl;
+    modified_AI_vs_AI_tournament(1000, 2, 2, &initial_config, &pieces_only_config, true, false);
+
     cout << "Depth 3 vs initial:" << endl;
     AI_vs_AI_tournament(1000, 3, 3, &current_config, &initial_config, true, false);
     cout << "Depth 3 vs naive:" << endl;
     AI_vs_AI_tournament(1000, 3, 3, &current_config, &pieces_only_config, true, false);
+    cout << "Depth 3 init vs naive:" << endl;
+    AI_vs_AI_tournament(1000, 3, 3, &initial_config, &pieces_only_config, true, false);
+
+    cout << "(mod) Depth 3 vs initial:" << endl;
+    modified_AI_vs_AI_tournament(1000, 3, 3, &current_config, &initial_config, true, false);
+    cout << "(mod) Depth 3 vs naive:" << endl;
+    modified_AI_vs_AI_tournament(1000, 3, 3, &current_config, &pieces_only_config, true, false);
+    cout << "(mod) Depth 3 init vs naive:" << endl;
+    modified_AI_vs_AI_tournament(1000, 3, 3, &initial_config, &pieces_only_config, true, false);
+
     // cout << "Depth 4 vs initial:" << endl;
     // AI_vs_AI_tournament(1000, 4, 4, &current_config, &initial_config, true, false);
     // cout << "Depth 4 vs naive:" << endl;
@@ -1601,7 +1646,6 @@ int main(){
     uint64_t test_atk_bb = board2bits(test_atk_board);
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
-
 
     SPSA_optimization();
 
