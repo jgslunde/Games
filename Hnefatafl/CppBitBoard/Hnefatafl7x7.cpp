@@ -618,8 +618,8 @@ struct HeuristicsConfig {
 
 float combined_board_heuristics(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb, HeuristicsConfig *config){
     return  1.0*config->atk_pieces_weight * __builtin_popcountll(atk_bb)
-            - 2.0*config->def_pieces_weight * __builtin_popcountll(def_bb)
-            - 0.05*config->king_free_moves_weight * board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)
+            - 0.3*config->def_pieces_weight * __builtin_popcountll(def_bb) // 2.0
+            - 0.105*config->king_free_moves_weight * board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)  // 0.05
             + 0.2*config->king_neighboring_enemies_weight * board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb)
             + 0.08*config->king_neighboring_allies_weight * board_heuristic_king_neighboring_allies(atk_bb, def_bb, king_bb)
             + 0.06*config->atk_pieces_on_edges_weight * board_heuristic_attacker_on_edges(atk_bb, def_bb, king_bb)
@@ -964,7 +964,7 @@ vector<uint64_t> AI_alpha_beta_get_move(float *eval, uint64_t atk_bb, uint64_t d
 
     NUM_NODES[0] = num_legal_moves;
 
-    #pragma omp parallel for
+    // #pragma omp parallel for
     for(int i=0; i<num_legal_moves; i++){
         uint64_t atk_bb_new, def_bb_new, king_bb_new;
         atk_bb_new = atk_bb;
@@ -1608,18 +1608,18 @@ void SPSA_optimization(){
 
 
 void grid_search_optimization(){
-    int N1 = 30;
-    int N2 = 50;
+    int N1 = 33;
+    int N2 = 31;
     HeuristicsConfig initial_config;
     vector<HeuristicsConfig> all_configs(N1*N2);
     vector<float> AI_scores(N1*N2);
 
-    for(int idx=0; idx<N1; idx++){
+    for(int idx=0; idx<N1*N2; idx++){
         int i = idx/N2;
         int j = idx%N2;
         HeuristicsConfig current_config;
-        current_config.def_pieces_weight = 0.0 + i*0.1;
-        current_config.king_free_moves_weight = 0.0 + j*0.1;
+        current_config.atk_pieces_diag_to_corners_weight = -1.0 + i*0.1;
+        current_config.atk_pieces_on_edges_weight = -1.0 + j*0.1;
         all_configs[idx] = current_config;
     }
 
@@ -1631,32 +1631,31 @@ void grid_search_optimization(){
         HeuristicsConfig current_config;
         current_config = all_configs[idx];
         float AI_score = 0;
-        // for(int idx2=0; idx2<N1*N2; idx2++){
-        //     HeuristicsConfig opponent_config = all_configs[idx2];
-        //     AI_score += modified_AI_vs_AI_tournament(10, 2, 2, &current_config, &opponent_config, false, false);
-        // }
-        // AI_scores[idx] = AI_score;
-        AI_scores[idx] = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
+        for(int idx2=0; idx2<N1*N2; idx2++){
+            HeuristicsConfig opponent_config = all_configs[idx2];
+            AI_score += modified_AI_vs_AI_tournament(10, 2, 2, &current_config, &opponent_config, false, false);
+        }
+        AI_scores[idx] = AI_score;
+        // AI_scores[idx] = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
     }
     ofstream myfile;
-    myfile.open("data/grid_results_30x50.txt");
-    for(int i=0; i<N1; i++){
-        for(int j=0; j<N2; j++){
-            int idx = i*N2 + j;
-            float AI_score = AI_scores[idx];
-            HeuristicsConfig current_config = all_configs[idx];
-            myfile << AI_score << " ";
-            myfile << current_config.atk_pieces_weight << " ";
-            myfile << current_config.def_pieces_weight << " ";
-            myfile << current_config.king_free_moves_weight << " ";
-            myfile << current_config.king_neighboring_enemies_weight << " ";
-            myfile << current_config.king_neighboring_allies_weight << " ";
-            myfile << current_config.atk_pieces_on_edges_weight << " ";
-            myfile << current_config.atk_pieces_diag_to_corners_weight << " ";
-            myfile << current_config.atk_pieces_next_to_corners_weight << " ";
-            myfile << current_config.def_pieces_next_to_corners_weight << " ";
-            myfile << endl;
-        }
+    myfile.open("data/grid_results_33x31_atk_corners_edges_free4all.txt");
+    for(int idx=0; idx<N1*N2; idx++){
+        int i = idx/N2;
+        int j = idx%N2;
+        float AI_score = AI_scores[idx];
+        HeuristicsConfig current_config = all_configs[idx];
+        myfile << AI_score << " ";
+        myfile << current_config.atk_pieces_weight << " ";
+        myfile << current_config.def_pieces_weight << " ";
+        myfile << current_config.king_free_moves_weight << " ";
+        myfile << current_config.king_neighboring_enemies_weight << " ";
+        myfile << current_config.king_neighboring_allies_weight << " ";
+        myfile << current_config.atk_pieces_on_edges_weight << " ";
+        myfile << current_config.atk_pieces_diag_to_corners_weight << " ";
+        myfile << current_config.atk_pieces_next_to_corners_weight << " ";
+        myfile << current_config.def_pieces_next_to_corners_weight << " ";
+        myfile << endl;
     }
 }
 
@@ -1704,8 +1703,8 @@ int main(){
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
-    SPSA_optimization();
-    // grid_search_optimization();
+    // SPSA_optimization();
+    grid_search_optimization();
 
     // print_bitgame(test_atk_bb, test_def_bb, test_king_bb);
     // cout << "Pieces:         " << board_heuristic_pieces_only(test_atk_bb, test_def_bb, test_king_bb) << endl;
