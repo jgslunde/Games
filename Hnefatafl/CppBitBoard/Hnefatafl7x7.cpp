@@ -1613,20 +1613,32 @@ void grid_search_optimization(){
     HeuristicsConfig initial_config;
     vector<HeuristicsConfig> all_configs(N1*N2);
     vector<float> AI_scores(N1*N2);
-    #pragma omp parallel for
+
     for(int idx=0; idx<N1; idx++){
         int i = idx/N1;
         int j = idx%N1;
-        cout << idx << " " << i << " " << j << endl;
         HeuristicsConfig current_config;
         current_config.def_pieces_weight = 0.0 + i*0.1;
         current_config.king_free_moves_weight = 0.0 + j*0.1;
         all_configs[idx] = current_config;
-        float AI_score = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
+    }
+
+    #pragma omp parallel for
+    for(int idx=0; idx<N1*N2; idx++){
+        int i = idx/N1;
+        int j = idx%N1;
+        cout << idx << " " << i << " " << j << endl;
+        HeuristicsConfig current_config;
+        current_config = all_configs[idx];
+        float AI_score = 0;
+        for(int idx2=0; idx2<N1*N2; idx2++){
+            HeuristicsConfig opponent_config = all_configs[idx];
+            AI_score += modified_AI_vs_AI_tournament(10, 2, 2, &current_config, &opponent_config, false, false);
+        }
         AI_scores[idx] = AI_score;
 }
     ofstream myfile;
-    myfile.open("data/grid_results_30x50.txt");
+    myfile.open("data/grid_results_30x50_free4all.txt");
     for(int i=0; i<N1; i++){
         for(int j=0; j<N2; j++){
             int idx = i*N1 + j;
