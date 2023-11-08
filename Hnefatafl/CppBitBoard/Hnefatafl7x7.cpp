@@ -1460,54 +1460,54 @@ void SPSA_update_parameters(HeuristicsConfig &current_config, vector<HeuristicsC
     config_plus.atk_pieces_weight;
     config_plus.def_pieces_weight += delta_weights.def_pieces_weight;
     config_plus.king_free_moves_weight += delta_weights.king_free_moves_weight;
-    config_plus.king_neighboring_enemies_weight += delta_weights.king_neighboring_enemies_weight;
-    config_plus.king_neighboring_allies_weight += delta_weights.king_neighboring_allies_weight;
-    config_plus.atk_pieces_on_edges_weight += delta_weights.atk_pieces_on_edges_weight;
-    config_plus.atk_pieces_diag_to_corners_weight += delta_weights.atk_pieces_diag_to_corners_weight;
-    config_plus.atk_pieces_next_to_corners_weight += delta_weights.atk_pieces_next_to_corners_weight;
-    config_plus.def_pieces_next_to_corners_weight += delta_weights.def_pieces_next_to_corners_weight;
+    config_plus.king_neighboring_enemies_weight; // += delta_weights.king_neighboring_enemies_weight;
+    config_plus.king_neighboring_allies_weight; // += delta_weights.king_neighboring_allies_weight;
+    config_plus.atk_pieces_on_edges_weight; // += delta_weights.atk_pieces_on_edges_weight;
+    config_plus.atk_pieces_diag_to_corners_weight; // += delta_weights.atk_pieces_diag_to_corners_weight;
+    config_plus.atk_pieces_next_to_corners_weight; // += delta_weights.atk_pieces_next_to_corners_weight;
+    config_plus.def_pieces_next_to_corners_weight; // += delta_weights.def_pieces_next_to_corners_weight;
 
     HeuristicsConfig config_minus = current_config;
     config_minus.atk_pieces_weight;
     config_minus.def_pieces_weight - delta_weights.def_pieces_weight;
     config_minus.king_free_moves_weight - delta_weights.king_free_moves_weight;
-    config_minus.king_neighboring_enemies_weight - delta_weights.king_neighboring_enemies_weight;
-    config_minus.king_neighboring_allies_weight - delta_weights.king_neighboring_allies_weight;
-    config_minus.atk_pieces_on_edges_weight - delta_weights.atk_pieces_on_edges_weight;
-    config_minus.atk_pieces_diag_to_corners_weight - delta_weights.atk_pieces_diag_to_corners_weight;
-    config_minus.atk_pieces_next_to_corners_weight - delta_weights.atk_pieces_next_to_corners_weight;
-    config_minus.def_pieces_next_to_corners_weight - delta_weights.def_pieces_next_to_corners_weight;
+    config_minus.king_neighboring_enemies_weight; // - delta_weights.king_neighboring_enemies_weight;
+    config_minus.king_neighboring_allies_weight; // - delta_weights.king_neighboring_allies_weight;
+    config_minus.atk_pieces_on_edges_weight; // - delta_weights.atk_pieces_on_edges_weight;
+    config_minus.atk_pieces_diag_to_corners_weight; // - delta_weights.atk_pieces_diag_to_corners_weight;
+    config_minus.atk_pieces_next_to_corners_weight; // - delta_weights.atk_pieces_next_to_corners_weight;
+    config_minus.def_pieces_next_to_corners_weight; // - delta_weights.def_pieces_next_to_corners_weight;
 
     float AI_plus_score = 0;  // The win performance score of the "plus delta" AI. Number between -1 and 1.
     // float AI_minus_score = 0;  // The win performance score of the "plus delta" AI. Number between -1 and 1.
     // First, play once the "plus AI" vs the "minus AI".
-    AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &config_minus, false, false);
-    AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &config_minus, false, false);
+    // AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &config_minus, false, false);
+    // AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &config_minus, false, false);
     
     // // Then they both play against the initial AI. The plus AI lose points if the minus AI wins against the initial AI.
-    AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &all_configs[0], false, false);
-    AI_plus_score -= modified_AI_vs_AI_tournament(200, 2, 2, &config_minus, &all_configs[0], false, false);
+    AI_plus_score += modified_AI_vs_AI_tournament(1000, 2, 2, &config_plus, &all_configs[0], false, false);
+    AI_plus_score -= modified_AI_vs_AI_tournament(1000, 2, 2, &config_minus, &all_configs[0], false, false);
 
-    for(int i=0; i<4; i++){  // 4 random previous configs to play against.
-        unsigned int rnd_config_idx = thread_safe_rand()%all_configs.size();
-        HeuristicsConfig rnd_config = all_configs[rnd_config_idx];
-        // Both AIs play against the previous AI.
-        AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &rnd_config, false, false);
-        AI_plus_score -= modified_AI_vs_AI_tournament(200, 2, 2, &config_minus, &rnd_config, false, false);
-    }
-    AI_plus_score /= 12;  // We've played a total of 12 tournaments, each with a score from -1 to 1, so we shrink the range back to -1 to 1.
+    // for(int i=0; i<4; i++){  // 4 random previous configs to play against.
+    //     unsigned int rnd_config_idx = thread_safe_rand()%all_configs.size();
+    //     HeuristicsConfig rnd_config = all_configs[rnd_config_idx];
+    //     // Both AIs play against the previous AI.
+    //     AI_plus_score += modified_AI_vs_AI_tournament(200, 2, 2, &config_plus, &rnd_config, false, false);
+    //     AI_plus_score -= modified_AI_vs_AI_tournament(200, 2, 2, &config_minus, &rnd_config, false, false);
+    // }
+    // AI_plus_score /= 12;  // We've played a total of 12 tournaments, each with a score from -1 to 1, so we shrink the range back to -1 to 1.
 
     cout << "AI plus win rate score = " << AI_plus_score << endl;
 
     // current_config.atk_pieces_weight += alpha*AI_plus_score*delta_weights.atk_pieces_weight;
     current_config.def_pieces_weight += alpha*AI_plus_score*delta_weights.def_pieces_weight;
     current_config.king_free_moves_weight += alpha*AI_plus_score*delta_weights.king_free_moves_weight;
-    current_config.king_neighboring_enemies_weight += alpha*AI_plus_score*delta_weights.king_neighboring_enemies_weight;
-    current_config.king_neighboring_allies_weight += alpha*AI_plus_score*delta_weights.king_neighboring_allies_weight;
-    current_config.atk_pieces_on_edges_weight += alpha*AI_plus_score*delta_weights.atk_pieces_on_edges_weight;
-    current_config.atk_pieces_diag_to_corners_weight += alpha*AI_plus_score*delta_weights.atk_pieces_diag_to_corners_weight;
-    current_config.atk_pieces_next_to_corners_weight += alpha*AI_plus_score*delta_weights.atk_pieces_next_to_corners_weight;
-    current_config.def_pieces_next_to_corners_weight += alpha*AI_plus_score*delta_weights.def_pieces_next_to_corners_weight;
+    //current_config.king_neighboring_enemies_weight += alpha*AI_plus_score*delta_weights.king_neighboring_enemies_weight;
+    //current_config.king_neighboring_allies_weight += alpha*AI_plus_score*delta_weights.king_neighboring_allies_weight;
+    //current_config.atk_pieces_on_edges_weight += alpha*AI_plus_score*delta_weights.atk_pieces_on_edges_weight;
+    //current_config.atk_pieces_diag_to_corners_weight += alpha*AI_plus_score*delta_weights.atk_pieces_diag_to_corners_weight;
+    //current_config.atk_pieces_next_to_corners_weight += alpha*AI_plus_score*delta_weights.atk_pieces_next_to_corners_weight;
+    //current_config.def_pieces_next_to_corners_weight += alpha*AI_plus_score*delta_weights.def_pieces_next_to_corners_weight;
 }
 
 
@@ -1519,13 +1519,13 @@ void SPSA_optimization(){
     all_configs.reserve(Niter+1);
     all_configs.push_back(current_config);
     ofstream myfile;
-    myfile.open("data/SPSA_results_i10000_d2_fixed.txt");
+    myfile.open("data/SPSA_results_i1000_d2_fixed_2params.txt");
     double alpha, sigma;
     for(int i=0; i<Niter; i++){
-        cout << i << " / " << "10000" << endl;
-        if(i < 9000){
-            alpha = 30.0 - i/333.0;
-            sigma = 0.1 - i/112500.0;
+        cout << i << " / " << "1000" << endl;
+        if(i < 900){
+            alpha = 10.0 - i/125.0;
+            sigma = 0.1 - i/11250.0;
         }
         else{
             alpha = 2.0;
@@ -1604,6 +1604,39 @@ void SPSA_optimization(){
 }
 
 
+void grid_search_optimization(){
+    HeuristicsConfig initial_config;
+    vector<HeuristicsConfig> all_configs;
+    vector<float> AI_scores;
+
+    ofstream myfile;
+    myfile.open("data/grid_results_20x20.txt");
+    for(int i=0; i<20; i++){
+        for(int j=0; j<20; j++){
+            HeuristicsConfig current_config;
+            current_config.def_pieces_weight = 0.0 + i*0.1;
+            current_config.king_free_moves_weight = 0.0 + i*0.1;
+            all_configs.push_back(current_config);
+    
+            float AI_score = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
+            AI_scores.push_back(AI_score);
+
+            myfile << AI_score << " ";
+            myfile << current_config.atk_pieces_weight << " ";
+            myfile << current_config.def_pieces_weight << " ";
+            myfile << current_config.king_free_moves_weight << " ";
+            myfile << current_config.king_neighboring_enemies_weight << " ";
+            myfile << current_config.king_neighboring_allies_weight << " ";
+            myfile << current_config.atk_pieces_on_edges_weight << " ";
+            myfile << current_config.atk_pieces_diag_to_corners_weight << " ";
+            myfile << current_config.atk_pieces_next_to_corners_weight << " ";
+            myfile << current_config.def_pieces_next_to_corners_weight << " ";
+            myfile << endl;
+        }
+    }
+}
+
+
 
 int main(){
     uint64_t initial_atk_bb = 0x8080063000808;
@@ -1647,7 +1680,8 @@ int main(){
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
-    SPSA_optimization();
+    // SPSA_optimization();
+    grid_search_optimization();
 
     // print_bitgame(test_atk_bb, test_def_bb, test_king_bb);
     // cout << "Pieces:         " << board_heuristic_pieces_only(test_atk_bb, test_def_bb, test_king_bb) << endl;
