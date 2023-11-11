@@ -1703,8 +1703,20 @@ int main(){
     uint64_t test_def_bb = board2bits(test_def_board);
     uint64_t test_king_bb = board2bits(test_king_board);
 
+    HeuristicsConfig config;
+
+    float eval = 0;
+    vector<uint64_t> move = AI_alpha_beta_get_move(&eval, initial_atk_bb, initial_def_bb, initial_king_bb, 1, 7, true, &config);
+    make_move_on_board(initial_atk_bb, initial_def_bb, initial_king_bb, move[0], move[1]);
+    cout << eval << endl;
+    print_bitgame(initial_atk_bb, initial_def_bb, initial_king_bb);
+    
+    for(int i=0; i<12; i++){
+        cout << i << " " << NUM_NODES[i] << endl;
+    }
+
     // SPSA_optimization();
-    grid_search_optimization();
+    // grid_search_optimization();
 
     // print_bitgame(test_atk_bb, test_def_bb, test_king_bb);
     // cout << "Pieces:         " << board_heuristic_pieces_only(test_atk_bb, test_def_bb, test_king_bb) << endl;
@@ -1787,8 +1799,4 @@ int main(){
     // float eval;
     // vector<uint64_t> move = AI_alpha_beta_get_move(&eval, test_atk_bb, test_def_bb, test_king_bb, 1, 6, true, combined_board_heuristics, &config);
     // cout << eval << endl;
-
-    // for(int i=0; i<12; i++){
-    //     cout << i << " " << NUM_NODES[i] << endl;
-    // }
 }
