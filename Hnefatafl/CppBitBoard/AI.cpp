@@ -33,7 +33,7 @@ Move AI::get_preffered_move(Board board, ushort max_depth){
 
     NUM_NODES[0] = num_legal_moves;
 
-    // #pragma omp parallel for
+    #pragma omp parallel for
     for(int i=0; i<num_legal_moves; i++){
         uint64_t atk_bb_new, def_bb_new, king_bb_new;
         // atk_bb_new = atk_bb;
@@ -162,6 +162,7 @@ TournamentResults AI_vs_AI_tournament(int num_games, int max_premoves, int depth
             // starting_king_bb = initial_king_bb;
             uint64_t move_from, move_to, move_idx;
             vector<uint64_t> legal_moves;
+            starting_board.reset_board();
             for(int ipremove=0; ipremove<num_premoves; ipremove++){
                 // Attacker move.
                 legal_moves = starting_board.get_all_legal_moves();
