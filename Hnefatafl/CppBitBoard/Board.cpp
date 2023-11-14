@@ -18,6 +18,9 @@ using uchar = unsigned char;
 using ushort = unsigned short;
 
 
+Board::Board(){
+    reset_board();
+}
 
 void Board::reset_board(){
     atk_bb = 0x8080063000808;

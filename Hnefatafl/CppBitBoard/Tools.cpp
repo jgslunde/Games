@@ -10,9 +10,14 @@ using namespace std;
 
 thread_local mt19937 generator(hash<thread::id>{}(this_thread::get_id()));
 
-
 int thread_safe_rand() {
     return generator();
+}
+
+float thread_safe_rand_float(float min, float max) {
+    thread_local std::mt19937 generator(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    std::uniform_real_distribution<float> distribution(min, max);
+    return distribution(generator);
 }
 
 uint64_t board2bits(vector<vector<uint64_t>> board){

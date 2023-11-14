@@ -119,9 +119,8 @@ uint64_t updateHash(uint64_t old_hash, const uint64_t atk_bb, const uint64_t def
 const size_t TABLE_SIZE = 1ULL << 24;
 struct TTEntry {
     uint64_t hash;
-    float eval;  // example data
+    float eval;
     unsigned short int depth;
-    // Add other game-related data as needed.
 };
 TTEntry transpositionTable[TABLE_SIZE];
 // TTEntry *transpositionTable = new TTEntry[TABLE_SIZE];

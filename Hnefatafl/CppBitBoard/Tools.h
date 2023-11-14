@@ -22,5 +22,6 @@ const char PLAYER_DEF = -1;
 
 
 int thread_safe_rand();
+float thread_safe_rand_float(float min, float max);
 void print_bitgame(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb);
 vector<uint64_t> get_legal_moves_as_vector(uint64_t piece_bb, uint64_t blocker_bb);

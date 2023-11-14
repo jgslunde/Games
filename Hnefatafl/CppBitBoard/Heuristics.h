@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Board.h"
+
 struct HeuristicsConfig {
     float atk_pieces_weight = 1.0;
     float def_pieces_weight = 1.0;

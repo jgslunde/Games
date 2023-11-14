@@ -17,6 +17,7 @@ class Board{
         uint64_t atk_bb, def_bb, king_bb;
         unsigned short turn;
         int current_player;
+        Board();
         void reset_board();
         vector<uint64_t> get_all_legal_moves();
         void make_move(uint64_t &move_from, uint64_t &move_to);
