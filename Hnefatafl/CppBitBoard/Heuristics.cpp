@@ -55,10 +55,10 @@ inline float board_heuristic_king_neighboring_allies(Board &board){
 }
 
 inline float board_heuristic_attacker_on_edges(Board &board){
-    return    (float) ((right_sideedge_bb & board.atk_bb) != 0)
-            + (float) ((left_sideedge_bb & board.atk_bb) != 0)
-            + (float) ((top_sideedge_bb & board.atk_bb) != 0)
-            + (float) ((bottom_sideedge_bb & board.atk_bb) != 0);
+    return    (float) ((right_smalledge_bb & board.atk_bb) != 0)
+            + (float) ((left_smalledge_bb & board.atk_bb) != 0)
+            + (float) ((top_smalledge_bb & board.atk_bb) != 0)
+            + (float) ((bottom_smalledge_bb & board.atk_bb) != 0);
 }
 
 inline float board_heuristic_atk_diag_to_corners(Board &board){
@@ -82,6 +82,9 @@ inline float board_heuristic_defender_pieces(Board &board){
     return __builtin_popcountll(board.def_bb);
 }
 
+// inline float board_heuristic_king_on_open_edge(Board &board){
+//     return (float) (board.king_bb & right_smalledge) && 
+// }
 
 
 float combined_board_heuristics(Board &board, HeuristicsConfig *config){
