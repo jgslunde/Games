@@ -19,13 +19,14 @@ void grid_search(vector<HeuristicsConfig> search_config_arr, vector<HeuristicsCo
         cout << idx << "/" << Nconfigs << endl;
         HeuristicsConfig current_config;
         current_config = search_config_arr[idx];
-        float AI_score = 0;
-        for(int idx2=0; idx2<Nopponentconfigs; idx2++){
-            HeuristicsConfig opponent_config = opponent_config_arr[idx2];
-            TournamentResults results = AI_vs_AI_tournament(num_battles, 2, 2, 2, &current_config, &opponent_config);
-            AI_score += results.AI_1_score;
-        }
-        AI_scores[idx] = AI_score;
+        // float AI_score = 0;
+        // for(int idx2=0; idx2<Nopponentconfigs; idx2++){
+        //     HeuristicsConfig opponent_config = opponent_config_arr[idx2];
+        //     TournamentResults results = AI_vs_AI_tournament(num_battles, 2, 2, 2, &current_config, &opponent_config);
+        //     AI_score += results.AI_1_score;
+        // }
+        TournamentResults results = one_vs_many_tournament(num_battles, 2, 2, current_config, opponent_config_arr);
+        AI_scores[idx] = results.AI_1_score;
         // AI_scores[idx] = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
     }
     ofstream myfile;

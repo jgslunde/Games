@@ -26,4 +26,6 @@ struct TournamentResults{
     float AI_1_score = 0.0;
 };
 
+int AI_vs_AI_game(Board board, int depth1, int depth2, HeuristicsConfig *config1, HeuristicsConfig *config2);
+TournamentResults one_vs_many_tournament(int num_games, int depth1, int depth2, HeuristicsConfig config, vector<HeuristicsConfig> configs_opponent_arr);
 TournamentResults AI_vs_AI_tournament(int num_games, int max_premoves, int depth1, int depth2, HeuristicsConfig *config1, HeuristicsConfig *config2);

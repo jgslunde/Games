@@ -5,6 +5,8 @@
 #include <random>
 #include <thread>
 #include <map>
+#include <fstream>
+#include <sstream>
 #include "Tools.h"
 #include "Board.h"
 #include "Heuristics.h"
@@ -21,7 +23,7 @@ AI::AI(HeuristicsConfig config){
 };
 
 
-Move AI::get_preffered_move(Board board, unsigned short max_depth){
+Move AI::get_preffered_move(Board board, ushort max_depth){
     int player = board.get_current_player();
     vector<uint64_t> legal_moves = board.get_all_legal_moves();
     int num_legal_moves = legal_moves.size()/2;
@@ -127,6 +129,87 @@ float AI::get_board_score_by_alpha_beta_search(Board board, unsigned short int d
         }
         return best_score;
     }
+}
+
+
+int AI_vs_AI_game(Board board, int depth1, int depth2, HeuristicsConfig *config1, HeuristicsConfig *config2){
+    // Given a starting board, two AI configs, and two AI depths, play a game between the two AIs and return who won (1=atk, 0=tie, -1=def).
+    AI AI1(*config1);
+    AI AI2(*config2);
+    for(int iturn=0; iturn<100; iturn++){
+        int current_player = 1;
+        int score = 0;
+        Move preffered_move;
+        if(current_player == 1)
+            preffered_move = AI1.get_preffered_move(board, depth1);
+        else
+            preffered_move = AI2.get_preffered_move(board, depth2);
+        if((preffered_move.move_from != 0) && (preffered_move.move_to != 0)){
+            board.make_move(preffered_move.move_from, preffered_move.move_to);
+            score = board.get_board_wins();
+        }
+        else{
+            return -current_player;
+        }
+        if(score > 800){
+            return 1;
+        }
+        else if(score < -800){
+            return -1;
+        }
+    }
+    return 0;
+}
+
+
+TournamentResults one_vs_many_tournament(int num_games, int depth1, int depth2, HeuristicsConfig config, vector<HeuristicsConfig> configs_opponent_arr){
+    TournamentResults results;
+
+    // Reading in 2 move and 4 move boards from file.
+    vector<Board> move2_boards;
+    vector<Board> move4_boards;
+    ifstream myfile;
+    string line;
+    myfile.open("openings/openings_even_2.txt");
+    while(getline(myfile, line)){
+        istringstream iss(line);
+        Board board;
+        iss >> board.atk_bb >> board.def_bb >> board.king_bb;
+        move2_boards.push_back(board);
+    }
+    myfile.close();
+    myfile.open("openings/openings_even_4.txt");
+    while(getline(myfile, line)){
+        istringstream iss(line);
+        Board board;
+        iss >> board.atk_bb >> board.def_bb >> board.king_bb;
+        move4_boards.push_back(board);
+    }
+    myfile.close();
+
+    for(int iopponent=0; iopponent<configs_opponent_arr.size(); iopponent++){  // Looping over all given opponents.
+        for(int igame=0; igame<num_games; igame++){  // Looping over number of games for each opponent.
+            Board starting_board;  // The default is a normal starting board (1/3 of games).
+            if(igame%3 == 1){  // 1/3 of the games played with 2 random premoves.
+                starting_board = move2_boards[thread_safe_rand()%move2_boards.size()];
+            }
+            else if(igame%3 == 2){  // 1/3 of the games played with 4 random premoves.
+                starting_board = move4_boards[thread_safe_rand()%move4_boards.size()];
+            }
+
+        int won_as_atk = AI_vs_AI_game(starting_board, depth1, depth2, &config, &configs_opponent_arr[iopponent]);  // Playing as attacker.
+        int won_as_def = AI_vs_AI_game(starting_board, depth2, depth1, &configs_opponent_arr[iopponent], &config);  // Playing as defender.
+        results.AI_1_wins_atk += won_as_atk == 1;
+        results.AI_1_wins_def += won_as_def == 1;
+        results.AI_2_wins_atk += won_as_atk == -1;
+        results.AI_2_wins_def += won_as_def == -1;
+        results.AI_1_ties_atk += won_as_atk == 0;
+        results.AI_1_ties_def += won_as_def == 0;
+        }
+    }
+    results.num_games = 2*num_games*configs_opponent_arr.size();  // Both black and white, games per opponent, and num of opponents.
+    results.AI_1_score = (float) ((results.AI_1_wins_atk + results.AI_1_wins_def) - (results.AI_2_wins_atk + results.AI_2_wins_def))/(float) results.num_games;
+    return results;
 }
 
 
