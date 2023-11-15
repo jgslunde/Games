@@ -80,15 +80,13 @@ float combined_board_heuristics(Board &board, HeuristicsConfig *config){
     uint64_t atk_bb = board.atk_bb;
     uint64_t def_bb = board.def_bb;
     uint64_t king_bb = board.king_bb;
-    return  1.0*config->atk_pieces_weight * __builtin_popcountll(atk_bb)
-            // - 2.0*config->def_pieces_weight * __builtin_popcountll(def_bb) // 2.0
-            - 2.0*config->def_pieces_weight * __builtin_popcountll(def_bb) // 2.0
-            // - 0.05*config->king_free_moves_weight * board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)  // 0.05
-            - 0.1*config->king_free_moves_weight * board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)  // 0.05
-            + 0.2*config->king_neighboring_enemies_weight * board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb)
-            + 0.08*config->king_neighboring_allies_weight * board_heuristic_king_neighboring_allies(atk_bb, def_bb, king_bb)
-            + 0.06*config->atk_pieces_on_edges_weight * board_heuristic_attacker_on_edges(atk_bb, def_bb, king_bb)
-            + 0.1*config->atk_pieces_diag_to_corners_weight * __builtin_popcountll(diag2corner_bb & atk_bb)
-            - 0.15*config->atk_pieces_next_to_corners_weight *  __builtin_popcountll(corner_neighbors_bb & atk_bb)
-            + 0.15*config->def_pieces_next_to_corners_weight *  __builtin_popcountll(corner_neighbors_bb & def_bb);
+    return (float ) config->atk_pieces_weight * __builtin_popcountll(atk_bb)
+                  + config->def_pieces_weight * __builtin_popcountll(def_bb)
+                  + config->king_free_moves_weight * board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)
+                  + config->king_neighboring_enemies_weight * board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb)
+                  + config->king_neighboring_allies_weight * board_heuristic_king_neighboring_allies(atk_bb, def_bb, king_bb)
+                  + config->atk_pieces_on_edges_weight * board_heuristic_attacker_on_edges(atk_bb, def_bb, king_bb)
+                  + config->atk_pieces_diag_to_corners_weight * __builtin_popcountll(diag2corner_bb & atk_bb)
+                  + config->atk_pieces_next_to_corners_weight *  __builtin_popcountll(corner_neighbors_bb & atk_bb)
+                  + config->def_pieces_next_to_corners_weight *  __builtin_popcountll(corner_neighbors_bb & def_bb);
 }
