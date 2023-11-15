@@ -6,32 +6,32 @@
 #include "Heuristics.h"
 
 
-inline float board_heuristic_king_free_moves(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    uint64_t blocker_bb = atk_bb | edge_bb;
+inline float board_heuristic_king_free_moves(Board &board){
+    uint64_t blocker_bb = board.atk_bb | edge_bb;
     float score = 0.0;
     for(int i=1; i<6; i++){
-        if((king_bb<<i) & (~blocker_bb)){
+        if((board.king_bb<<i) & (~blocker_bb)){
             score += 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
-        if((king_bb>>i) & (~blocker_bb)){
+        if((board.king_bb>>i) & (~blocker_bb)){
             score += 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
-        if((king_bb<<8*i) & (~blocker_bb)){
+        if((board.king_bb<<8*i) & (~blocker_bb)){
             score += 1.0;
         }else{
             break;
         }
     }
     for(int i=1; i<6; i++){
-        if((king_bb>>8*i) & (~blocker_bb)){
+        if((board.king_bb>>8*i) & (~blocker_bb)){
             score += 1.0;
         }else{
             break;
@@ -40,53 +40,58 @@ inline float board_heuristic_king_free_moves(uint64_t atk_bb, uint64_t def_bb, u
     return score;
 }
 
-inline float board_heuristic_king_neighboring_enemies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return  (float) ((king_bb<<1 & atk_bb) != 0)
-          + (float) ((king_bb>>1 & atk_bb) != 0)
-          + (float) ((king_bb<<8 & atk_bb) != 0)
-          + (float) ((king_bb>>8 & atk_bb) != 0);
+inline float board_heuristic_king_neighboring_enemies(Board &board){
+    return  (float) ((board.king_bb<<1 & board.atk_bb) != 0)
+          + (float) ((board.king_bb>>1 & board.atk_bb) != 0)
+          + (float) ((board.king_bb<<8 & board.atk_bb) != 0)
+          + (float) ((board.king_bb>>8 & board.atk_bb) != 0);
 }
 
-inline float board_heuristic_king_neighboring_allies(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return  (float) ((king_bb<<1 & atk_bb) != 0)
-          + (float) ((king_bb>>1 & atk_bb) != 0)
-          + (float) ((king_bb<<8 & atk_bb) != 0)
-          + (float) ((king_bb>>8 & atk_bb) != 0);
+inline float board_heuristic_king_neighboring_allies(Board &board){
+    return  (float) ((board.king_bb<<1 & board.atk_bb) != 0)
+          + (float) ((board.king_bb>>1 & board.atk_bb) != 0)
+          + (float) ((board.king_bb<<8 & board.atk_bb) != 0)
+          + (float) ((board.king_bb>>8 & board.atk_bb) != 0);
 }
 
-inline float board_heuristic_attacker_on_edges(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return    (float) ((right_sideedge_bb & atk_bb) != 0)
-            + (float) ((left_sideedge_bb & atk_bb) != 0)
-            + (float) ((top_sideedge_bb & atk_bb) != 0)
-            + (float) ((bottom_sideedge_bb & atk_bb) != 0);
+inline float board_heuristic_attacker_on_edges(Board &board){
+    return    (float) ((right_sideedge_bb & board.atk_bb) != 0)
+            + (float) ((left_sideedge_bb & board.atk_bb) != 0)
+            + (float) ((top_sideedge_bb & board.atk_bb) != 0)
+            + (float) ((bottom_sideedge_bb & board.atk_bb) != 0);
 }
 
-inline float board_heuristic_attacker_on_corners(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
-    return 0.1*__builtin_popcountll(diag2corner_bb & atk_bb);
+inline float board_heuristic_atk_diag_to_corners(Board &board){
+    return __builtin_popcountll(diag2corner_bb & board.atk_bb);
 }
 
-inline float board_heuristic_atk_next_to_corners(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+inline float board_heuristic_atk_next_to_corners(Board &board){
     // Standing next to the corners is often a bad idea, as you're easy to capture.
-    return - 0.1 * (float) __builtin_popcountll(corner_neighbors_bb & atk_bb);
+    return (float) __builtin_popcountll(corner_neighbors_bb & board.atk_bb);
 }
-inline float board_heuristic_def_next_to_corners(uint64_t atk_bb, uint64_t def_bb, uint64_t king_bb){
+inline float board_heuristic_def_next_to_corners(Board &board){
     // Standing next to the corners is often a bad idea, as you're easy to capture.
-    return 0.1 * (float) __builtin_popcountll(corner_neighbors_bb & def_bb);
+    return (float) __builtin_popcountll(corner_neighbors_bb & board.def_bb);
+}
+
+inline float board_heuristic_attacker_pieces(Board &board){
+    return __builtin_popcountll(board.atk_bb);
+}
+
+inline float board_heuristic_defender_pieces(Board &board){
+    return __builtin_popcountll(board.def_bb);
 }
 
 
 
 float combined_board_heuristics(Board &board, HeuristicsConfig *config){
-    uint64_t atk_bb = board.atk_bb;
-    uint64_t def_bb = board.def_bb;
-    uint64_t king_bb = board.king_bb;
-    return (float ) config->atk_pieces_weight * __builtin_popcountll(atk_bb)
-                  + config->def_pieces_weight * __builtin_popcountll(def_bb)
-                  + config->king_free_moves_weight * board_heuristic_king_free_moves(atk_bb, def_bb, king_bb)
-                  + config->king_neighboring_enemies_weight * board_heuristic_king_neighboring_enemies(atk_bb, def_bb, king_bb)
-                  + config->king_neighboring_allies_weight * board_heuristic_king_neighboring_allies(atk_bb, def_bb, king_bb)
-                  + config->atk_pieces_on_edges_weight * board_heuristic_attacker_on_edges(atk_bb, def_bb, king_bb)
-                  + config->atk_pieces_diag_to_corners_weight * __builtin_popcountll(diag2corner_bb & atk_bb)
-                  + config->atk_pieces_next_to_corners_weight *  __builtin_popcountll(corner_neighbors_bb & atk_bb)
-                  + config->def_pieces_next_to_corners_weight *  __builtin_popcountll(corner_neighbors_bb & def_bb);
+    return (float)  config->atk_pieces_weight                 * board_heuristic_attacker_pieces(board)
+                  + config->def_pieces_weight                 * board_heuristic_defender_pieces(board)
+                  + config->king_free_moves_weight            * board_heuristic_king_free_moves(board)
+                  + config->king_neighboring_enemies_weight   * board_heuristic_king_neighboring_enemies(board)
+                  + config->king_neighboring_allies_weight    * board_heuristic_king_neighboring_allies(board)
+                  + config->atk_pieces_on_edges_weight        * board_heuristic_attacker_on_edges(board)
+                  + config->atk_pieces_diag_to_corners_weight * board_heuristic_atk_diag_to_corners(board)
+                  + config->atk_pieces_next_to_corners_weight * board_heuristic_atk_next_to_corners(board)
+                  + config->def_pieces_next_to_corners_weight * board_heuristic_def_next_to_corners(board);
 }

@@ -111,6 +111,7 @@ void SPSA_optimization(HeuristicsConfig initial_config, vector<HeuristicsConfig>
 
         cout << "AI plus win rate score = " << AI_plus_score << endl;
         cout << "Step size = " << alpha*AI_plus_score << endl;
+        cout << "Approx total step = " << sigma*alpha*AI_plus_score << endl;
 
         // current_config.atk_pieces_weight += alpha*AI_plus_score*delta_weights.atk_pieces_weight;
         current_config.def_pieces_weight += alpha*AI_plus_score*delta_weights.def_pieces_weight;
