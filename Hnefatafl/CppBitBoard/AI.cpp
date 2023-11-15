@@ -21,7 +21,7 @@ AI::AI(HeuristicsConfig config){
 };
 
 
-Move AI::get_preffered_move(Board board, ushort max_depth){
+Move AI::get_preffered_move(Board board, unsigned short max_depth){
     int player = board.get_current_player();
     vector<uint64_t> legal_moves = board.get_all_legal_moves();
     int num_legal_moves = legal_moves.size()/2;

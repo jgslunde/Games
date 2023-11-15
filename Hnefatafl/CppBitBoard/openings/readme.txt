@@ -1,0 +1,1 @@
+These are board states (atk_bb, def_bb, king_bb) at different number of moves from start of game, which has been evaluated to contain no forced capture or wins at depth 4 into the future. They can be used for a more variable game startup phase, instead of the usual starting board (although it's maybe best to stick to 2,4,6 etc, so that the attacker starts).

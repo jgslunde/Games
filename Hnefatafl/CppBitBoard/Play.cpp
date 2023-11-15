@@ -65,5 +65,5 @@ int main(){
 
     // grid_search(config_arr, random_opponents_arr, 4, "data_new/grid_31x41_atk_diagcorners_onedges.txt");
     HeuristicsConfig config;
-    SPSA_optimization(config, random_opponents_arr, 20.0, 0.1, 1000, 4, "data_new/SPSA_1000_alpha20_sigma01.txt");
+    SPSA_optimization(config, random_opponents_arr, 20.0, 0.1, 2000, 4, "data_new/SPSA_2000_alpha20_sigma01.txt");
 }
