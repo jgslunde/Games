@@ -35,7 +35,7 @@ Move AI::get_preffered_move(Board board, ushort max_depth){
 
     NUM_NODES[0] = num_legal_moves;
 
-    #pragma omp parallel for
+    // #pragma omp parallel for
     for(int i=0; i<num_legal_moves; i++){
         uint64_t atk_bb_new, def_bb_new, king_bb_new;
         // atk_bb_new = atk_bb;
@@ -187,6 +187,7 @@ TournamentResults one_vs_many_tournament(int num_games, int depth1, int depth2, 
     }
     myfile.close();
 
+    #pragma omp parallel for
     for(int iopponent=0; iopponent<configs_opponent_arr.size(); iopponent++){  // Looping over all given opponents.
         for(int igame=0; igame<num_games; igame++){  // Looping over number of games for each opponent.
             Board starting_board;  // The default is a normal starting board (1/3 of games).

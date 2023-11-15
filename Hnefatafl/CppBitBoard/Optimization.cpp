@@ -99,13 +99,15 @@ void SPSA_optimization(HeuristicsConfig initial_config, vector<HeuristicsConfig>
         float AI_plus_score = 0;  // The win performance score of the "plus delta" AI. Number between -1 and 1.
         
         // Then they both play against the random AIs. The plus AI lose points if the minus AI wins.
-        for(int idx2=0; idx2<opponent_config_arr.size(); idx2++){    
-            TournamentResults result_plus = AI_vs_AI_tournament(num_battles, 2, 2, 2, &config_plus, &opponent_config_arr[idx2]);
-            TournamentResults result_minus = AI_vs_AI_tournament(num_battles, 2, 2, 2, &config_minus, &opponent_config_arr[idx2]);
-            AI_plus_score += result_plus.AI_1_score;
-            AI_plus_score -= result_minus.AI_1_score;
-        }
-        AI_plus_score /= opponent_config_arr.size();
+        // for(int idx2=0; idx2<opponent_config_arr.size(); idx2++){
+            // TournamentResults result_plus = AI_vs_AI_tournament(num_battles, 2, 2, 2, &config_plus, &opponent_config_arr[idx2]);
+            // TournamentResults result_minus = AI_vs_AI_tournament(num_battles, 2, 2, 2, &config_minus, &opponent_config_arr[idx2]);
+        // }
+        TournamentResults result_plus = one_vs_many_tournament(num_battles, 2, 2, config_plus, opponent_config_arr);
+        TournamentResults result_minus = one_vs_many_tournament(num_battles, 2, 2, config_minus, opponent_config_arr);
+        AI_plus_score += result_plus.AI_1_score;
+        AI_plus_score -= result_minus.AI_1_score;
+        // AI_plus_score /= opponent_config_arr.size();
 
         cout << "AI plus win rate score = " << AI_plus_score << endl;
         cout << "Step size = " << alpha*AI_plus_score << endl;
