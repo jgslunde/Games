@@ -279,3 +279,10 @@ TournamentResults AI_vs_AI_tournament(int num_games, int depth1, int depth2, Heu
     results.AI_1_rel_elo = -400.0*log10(1.0/(P_win + 0.5*P_draw) - 1.0);
     return results;
 }
+
+
+
+void print_tournament_results(TournamentResults results){
+    printf("ELO diff     W/D/L (as atk)   W/D/L (as def)\n");
+    printf("%6.1f       %.0f%%/%.0f%%/%.0f%%       %.0f%%/%.0f%%/%.0f%%\n", results.AI_1_rel_elo, 100.0*results.AI_1_wins_atk/(0.5*results.num_games), 100.0*results.AI_1_ties_atk/(0.5*results.num_games), 100.0*results.AI_2_wins_def/(0.5*results.num_games), 100.0*results.AI_1_wins_def/(0.5*results.num_games), 100.0*results.AI_1_ties_def/(0.5*results.num_games), 100.0*results.AI_2_wins_atk/(0.5*results.num_games));
+}

@@ -8,7 +8,7 @@
 
 using namespace std;
 
-void grid_search(vector<HeuristicsConfig> search_config_arr, vector<HeuristicsConfig> opponent_config_arr, int num_battles, string outfile){
+void grid_search(vector<HeuristicsConfig> search_config_arr, vector<HeuristicsConfig> opponent_config_arr, int num_battles, int depth, string outfile){
     int Nconfigs = search_config_arr.size();
     int Nopponentconfigs = search_config_arr.size();
     vector<float> AI_scores(Nconfigs);
@@ -25,7 +25,7 @@ void grid_search(vector<HeuristicsConfig> search_config_arr, vector<HeuristicsCo
         //     TournamentResults results = AI_vs_AI_tournament(num_battles, 2, 2, 2, &current_config, &opponent_config);
         //     AI_score += results.AI_1_score;
         // }
-        TournamentResults results = one_vs_many_tournament(num_battles, 2, 2, current_config, opponent_config_arr);
+        TournamentResults results = one_vs_many_tournament(num_battles, depth, depth, current_config, opponent_config_arr);
         AI_scores[idx] = results.AI_1_score;
         // AI_scores[idx] = modified_AI_vs_AI_tournament(4000, 2, 2, &current_config, &initial_config, false, false);
     }
@@ -49,7 +49,7 @@ void grid_search(vector<HeuristicsConfig> search_config_arr, vector<HeuristicsCo
 }
 
 
-void SPSA_optimization(HeuristicsConfig initial_config, vector<HeuristicsConfig> opponent_config_arr, double alpha, double sigma, int num_iter, int num_battles, string outfile){
+void SPSA_optimization(HeuristicsConfig initial_config, vector<HeuristicsConfig> opponent_config_arr, double alpha, double sigma, int num_iter, int num_battles, int depth, string outfile){
     vector<HeuristicsConfig> all_configs;
     HeuristicsConfig current_config = initial_config;
     all_configs.reserve(num_iter+1);
@@ -103,8 +103,8 @@ void SPSA_optimization(HeuristicsConfig initial_config, vector<HeuristicsConfig>
             // TournamentResults result_plus = AI_vs_AI_tournament(num_battles, 2, 2, 2, &config_plus, &opponent_config_arr[idx2]);
             // TournamentResults result_minus = AI_vs_AI_tournament(num_battles, 2, 2, 2, &config_minus, &opponent_config_arr[idx2]);
         // }
-        TournamentResults result_plus = one_vs_many_tournament(num_battles, 2, 2, config_plus, opponent_config_arr);
-        TournamentResults result_minus = one_vs_many_tournament(num_battles, 2, 2, config_minus, opponent_config_arr);
+        TournamentResults result_plus = one_vs_many_tournament(num_battles, depth, depth, config_plus, opponent_config_arr);
+        TournamentResults result_minus = one_vs_many_tournament(num_battles, depth, depth, config_minus, opponent_config_arr);
         AI_plus_score += result_plus.AI_1_score;
         AI_plus_score -= result_minus.AI_1_score;
         // AI_plus_score /= opponent_config_arr.size();

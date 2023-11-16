@@ -28,6 +28,7 @@ struct TournamentResults{
     // float AI_1_atk_rel_elo = 0.0;
     // float AI_1_def_rel_elo = 0.0;
 };
+void print_tournament_results(TournamentResults results);
 
 int AI_vs_AI_game(Board board, int depth1, int depth2, HeuristicsConfig *config1, HeuristicsConfig *config2);
 TournamentResults one_vs_many_tournament(int num_games, int depth1, int depth2, HeuristicsConfig config, vector<HeuristicsConfig> configs_opponent_arr);
