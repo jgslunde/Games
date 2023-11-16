@@ -172,9 +172,8 @@ void perform_SPSA_optimization(){
 
 int main(){
 
-    perform_SPSA_optimization();
+    // perform_SPSA_optimization();
 
-    // HeuristicsConfig config;
     // AI ai(config);
     
     // Board board;
@@ -186,5 +185,17 @@ int main(){
 
     // print_bitgame(board.atk_bb, board.def_bb, board.king_bb);
 
-    // AI_vs_AI_tournament(2, 0, 2, 2, &config, &config);
-}
+    HeuristicsConfig config1;
+    HeuristicsConfig config2;
+    // config1.king_on_open_edge_weight = -99.0;
+    TournamentResults results = AI_vs_AI_tournament(1000, 2, 2, config1, config2);
+    cout << results.AI_1_score << endl;
+    cout << results.AI_1_rel_elo << endl;
+
+    cout << results.AI_1_wins_atk << endl;
+    cout << results.AI_1_wins_def << endl;
+    cout << results.AI_2_wins_atk << endl;
+    cout << results.AI_2_wins_def << endl;
+    cout << results.AI_1_ties_atk << endl;
+    cout << results.AI_1_ties_def << endl;
+    }

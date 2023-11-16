@@ -11,7 +11,7 @@ using namespace std;
 const uint64_t corner_bb = 0x41000000000041;
 const uint64_t edge_bb = 0xff80808080808080;
 const uint64_t diag2corner_bb = 0x220000002200;
-const uint64_t right_eedge_bb = 0x404040404000;
+const uint64_t right_edge_bb = 0x404040404000;
 const uint64_t bottom_edge_bb = 0x3e;
 const uint64_t left_edge_bb = 0x10101010100;
 const uint64_t top_edge_bb = 0x3e000000000000;

@@ -82,9 +82,16 @@ inline float board_heuristic_defender_pieces(Board &board){
     return __builtin_popcountll(board.def_bb);
 }
 
-// inline float board_heuristic_king_on_open_edge(Board &board){
-//     return (float) (board.king_bb & right_smalledge) && 
-// }
+inline float board_heuristic_king_on_open_edge(Board &board){
+    // Returns 1.0 if the king is on a "small" edge (defined as the three central squares of the edge),
+    // and there are no blocking pieces on that edge. This should result in a win.
+    // The reason for not including the two outer squares of the edge is that a capture of the king is then possible.
+    uint64_t blocker_bb = board.atk_bb | board.def_bb;
+    return (float) ((board.king_bb & right_smalledge_bb) && !(blocker_bb & right_edge_bb))
+         + (float) ((board.king_bb & top_smalledge_bb) && !(blocker_bb & top_edge_bb))
+         + (float) ((board.king_bb & left_smalledge_bb) && !(blocker_bb & left_edge_bb))
+         + (float) ((board.king_bb & bottom_smalledge_bb) && !(blocker_bb & bottom_edge_bb));
+}
 
 
 float combined_board_heuristics(Board &board, HeuristicsConfig *config){
@@ -96,5 +103,7 @@ float combined_board_heuristics(Board &board, HeuristicsConfig *config){
                   + config->atk_pieces_on_edges_weight        * board_heuristic_attacker_on_edges(board)
                   + config->atk_pieces_diag_to_corners_weight * board_heuristic_atk_diag_to_corners(board)
                   + config->atk_pieces_next_to_corners_weight * board_heuristic_atk_next_to_corners(board)
-                  + config->def_pieces_next_to_corners_weight * board_heuristic_def_next_to_corners(board);
+                  + config->def_pieces_next_to_corners_weight * board_heuristic_def_next_to_corners(board)
+                  + config->king_on_open_edge_weight          * board_heuristic_king_on_open_edge(board)
+                  ;
 }

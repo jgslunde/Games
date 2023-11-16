@@ -12,6 +12,7 @@ struct HeuristicsConfig {
     float atk_pieces_diag_to_corners_weight =  0.1;
     float atk_pieces_next_to_corners_weight = -0.15;
     float def_pieces_next_to_corners_weight =  0.14;
+    float king_on_open_edge_weight          =  0.0;
 };
 
 float combined_board_heuristics(Board &board, HeuristicsConfig *config);

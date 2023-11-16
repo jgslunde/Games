@@ -7,6 +7,7 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include <cmath>
 #include "Tools.h"
 #include "Board.h"
 #include "Heuristics.h"
@@ -198,14 +199,17 @@ TournamentResults one_vs_many_tournament(int num_games, int depth1, int depth2, 
                 starting_board = move4_boards[thread_safe_rand()%move4_boards.size()];
             }
 
-        int won_as_atk = AI_vs_AI_game(starting_board, depth1, depth2, &config, &configs_opponent_arr[iopponent]);  // Playing as attacker.
-        int won_as_def = AI_vs_AI_game(starting_board, depth2, depth1, &configs_opponent_arr[iopponent], &config);  // Playing as defender.
-        results.AI_1_wins_atk += won_as_atk == 1;
-        results.AI_1_wins_def += won_as_def == 1;
-        results.AI_2_wins_atk += won_as_atk == -1;
-        results.AI_2_wins_def += won_as_def == -1;
-        results.AI_1_ties_atk += won_as_atk == 0;
-        results.AI_1_ties_def += won_as_def == 0;
+            int AI_1_won_as_atk = AI_vs_AI_game(starting_board, depth1, depth2, &config, &configs_opponent_arr[iopponent]);  // Playing as attacker.
+            int AI_2_won_as_atk = AI_vs_AI_game(starting_board, depth2, depth1, &configs_opponent_arr[iopponent], &config);  // Playing as defender.
+            #pragma omp critical
+            {
+                results.AI_1_wins_atk += AI_1_won_as_atk == 1;
+                results.AI_1_wins_def += AI_2_won_as_atk == -1;
+                results.AI_2_wins_atk += AI_2_won_as_atk == 1;
+                results.AI_2_wins_def += AI_1_won_as_atk == -1;
+                results.AI_1_ties_atk += AI_1_won_as_atk == 0;
+                results.AI_1_ties_def += AI_2_won_as_atk == 0;
+            }
         }
     }
     results.num_games = 2*num_games*configs_opponent_arr.size();  // Both black and white, games per opponent, and num of opponents.
@@ -214,132 +218,64 @@ TournamentResults one_vs_many_tournament(int num_games, int depth1, int depth2, 
 }
 
 
-TournamentResults AI_vs_AI_tournament(int num_games, int max_premoves, int depth1, int depth2, HeuristicsConfig *config1, HeuristicsConfig *config2){
+TournamentResults AI_vs_AI_tournament(int num_games, int depth1, int depth2, HeuristicsConfig config1, HeuristicsConfig config2){
     TournamentResults results;
-    results.num_games = num_games;
-    // uint64_t initial_atk_bb = 0x8080063000808;
-    // uint64_t initial_def_bb = 0x814080000;
-    // uint64_t initial_king_bb = 0x8000000;
 
-    // int num_AI_1_wins_atk = 0;
-    // int num_AI_1_wins_def = 0;
-    // int num_AI_1_ties_atk = 0;
-    // int num_AI_1_ties_def = 0;
-    // int num_AI_2_wins_atk = 0;
-    // int num_AI_2_wins_def = 0;
-    // int num_ties = 0;
-    int AI_1_playing_as = 1;
-    // uint64_t starting_atk_bb = initial_atk_bb;
-    // uint64_t starting_def_bb = initial_def_bb;
-    // uint64_t starting_king_bb = initial_king_bb;
-    AI ai_1(*config1);
-    AI ai_2(*config2);
-    Board starting_board;
-    for(int game=0; game<num_games; game++){
-        if(AI_1_playing_as == 1){  // Only create new board after both players had a chance to play both sides.
-            int num_premoves = (max_premoves*game)/num_games;
-            // if(vverbose){
-            // cout << "Num premoves: " << num_premoves << endl;
-            // }
-            // starting_atk_bb = initial_atk_bb;
-            // starting_def_bb = initial_def_bb;
-            // starting_king_bb = initial_king_bb;
-            uint64_t move_from, move_to, move_idx;
-            vector<uint64_t> legal_moves;
-            starting_board.reset_board();
-            for(int ipremove=0; ipremove<num_premoves; ipremove++){
-                // Attacker move.
-                legal_moves = starting_board.get_all_legal_moves();
-                move_idx = thread_safe_rand()%(legal_moves.size()/2);
-                move_from = legal_moves[2*move_idx];
-                move_to = legal_moves[2*move_idx+1];
-                starting_board.make_move(move_from, move_to);
-                // Defender move.
-                legal_moves = starting_board.get_all_legal_moves();
-                move_idx = thread_safe_rand()%(legal_moves.size()/2);
-                move_from = legal_moves[2*move_idx];
-                move_to = legal_moves[2*move_idx+1];
-                starting_board.make_move(move_from, move_to);
-            }
-        }
-        Board board = starting_board;
-        // if(vverbose)
-        // cout << "Game: " << game << endl;
-        int current_player = 1;
-        int score = 0;
-        unsigned short int depth = 4;
-        int iturn = 0;
-        while (true){
-            if(current_player == 1){
-                depth=depth1;
-            }else{
-                depth=depth2;
-            }
-            Move preffered_move;
-            if(current_player*AI_1_playing_as == 1)
-                preffered_move = ai_1.get_preffered_move(board, depth);
-            else
-                preffered_move = ai_2.get_preffered_move(board, depth);
-            // cout << preffered_move.move_from << " " << preffered_move.move_to << endl;
-            if((preffered_move.move_from != 0) && (preffered_move.move_to != 0)){
-                board.make_move(preffered_move.move_from, preffered_move.move_to);
-                score = board.get_board_wins();
-            }
-            else{ // No legal moves.
-                score = -1000*current_player;
-            }
-            // print_bitgame(board.atk_bb, board.def_bb, board.king_bb);
-            if(abs(score) > 800){
-                if(score < 0){
-                    if(AI_1_playing_as == -1)
-                        results.AI_1_wins_def++;
-                    else
-                        results.AI_2_wins_def++;
-                    // if(vverbose){
-                    //     cout << "DEFENDER WINS" << endl;
-                    //     print_bitgame(atk_bb, def_bb, king_bb);
-                    // }
-                }else{
-                    if(AI_1_playing_as == 1)
-                        results.AI_1_wins_atk++;
-                    else
-                        results.AI_2_wins_atk++;
-                    // if(vverbose){
-                    //     cout << "ATTACKER WINS" << endl;
-                    //     print_bitgame(atk_bb, def_bb, king_bb);
-                    // }
-                }
-                break;
-            }
-            current_player *= -1;
-            iturn++;
-            if(iturn >= 100){
-                if(AI_1_playing_as == 1)
-                    results.AI_1_ties_atk++;
-                else
-                    results.AI_1_ties_def++;
-                // if(vverbose){
-                //     cout << "100 TURNS REACHED" << endl;
-                //     print_bitgame(atk_bb, def_bb, king_bb);
-                // }
-                break;
-            }
-        }
-        AI_1_playing_as *= -1;
+    // Reading in 2 move and 4 move boards from file.
+    vector<Board> move2_boards;
+    vector<Board> move4_boards;
+    ifstream myfile;
+    string line;
+    myfile.open("openings/openings_even_2.txt");
+    while(getline(myfile, line)){
+        istringstream iss(line);
+        Board board;
+        iss >> board.atk_bb >> board.def_bb >> board.king_bb;
+        move2_boards.push_back(board);
     }
-    // if(verbose){
-    //     cout << "Total number of atk wins for AI_1: " << num_AI_1_wins_atk << endl;
-    //     cout << "Total number of atk wins for AI_2: " << num_AI_2_wins_atk << endl;
-    //     cout << "Total number of def wins for AI_1: " << num_AI_1_wins_def << endl;
-    //     cout << "Total number of def wins for AI_2: " << num_AI_2_wins_def << endl;
-    //     cout << "Total number of draws with AI_1 as atk: " << num_AI_1_ties_atk << endl;
-    //     cout << "Total number of draws with AI_1 as def: " << num_AI_1_ties_def << endl;
-    //     cout << "AI_1/AI_2 win ratio as atk: " << (float) num_AI_1_wins_atk / (float)num_AI_2_wins_atk << endl;
-    //     cout << "AI_1/AI_2 win ratio as def: " << (float) num_AI_1_wins_def / (float)num_AI_2_wins_def << endl;
-    //     cout << "AI_1_score: " << AI_1_score << endl;
-    // }
+    myfile.close();
+    myfile.open("openings/openings_even_4.txt");
+    while(getline(myfile, line)){
+        istringstream iss(line);
+        Board board;
+        iss >> board.atk_bb >> board.def_bb >> board.king_bb;
+        move4_boards.push_back(board);
+    }
+    myfile.close();
 
-    results.AI_1_score = (float) ((results.AI_1_wins_atk + results.AI_1_wins_def) - (results.AI_2_wins_atk + results.AI_2_wins_def))/(float) num_games;
+    #pragma omp parallel for
+    for(int igame=0; igame<num_games; igame++){  // Looping over number of games for each opponent.
+        Board starting_board;  // The default is a normal starting board (1/3 of games).
+        // if(igame%3 == 1){  // 1/3 of the games played with 2 random premoves.
+        //     starting_board = move2_boards[thread_safe_rand()%move2_boards.size()];
+        // }
+        // else if(igame%3 == 2){  // 1/3 of the games played with 4 random premoves.
+        //     starting_board = move4_boards[thread_safe_rand()%move4_boards.size()];
+        // }
 
+        int AI_1_won_as_atk = AI_vs_AI_game(starting_board, depth1, depth2, &config1, &config2);  // Playing as attacker.
+        int AI_2_won_as_atk = AI_vs_AI_game(starting_board, depth2, depth1, &config2, &config1);  // Playing as defender.
+        #pragma omp critical
+        {
+            results.AI_1_wins_atk += AI_1_won_as_atk == 1;
+            results.AI_1_wins_def += AI_2_won_as_atk == -1;
+            results.AI_2_wins_atk += AI_2_won_as_atk == 1;
+            results.AI_2_wins_def += AI_1_won_as_atk == -1;
+            results.AI_1_ties_atk += AI_1_won_as_atk == 0;
+            results.AI_1_ties_def += AI_2_won_as_atk == 0;
+        }
+    }
+    results.num_games = 2*num_games;  // Both black and white, games per opponent, and num of opponents.
+    results.AI_1_score = (float) ((results.AI_1_wins_atk + results.AI_1_wins_def) - (results.AI_2_wins_atk + results.AI_2_wins_def))/(float) results.num_games;
+
+    // float P_win_atk = 2.0*results.AI_1_wins_atk/(float) results.num_games;
+    // float P_win_def = 2.0*results.AI_1_wins_def/(float) results.num_games;
+    float P_win = (results.AI_1_wins_atk + results.AI_1_wins_def)/(float) results.num_games;
+    // float P_draw_atk = 2.0*results.AI_1_ties_atk/(float) results.num_games;
+    // float P_draw_def = 2.0*results.AI_1_ties_def/(float) results.num_games;
+    float P_draw = (results.AI_1_ties_atk + results.AI_1_ties_def)/(float) results.num_games;
+    // results.AI_1_atk_rel_elo = 400.0 * log10(1.0/(P_win_atk + 0.5*P_draw_atk) - 1.0);
+    // results.AI_1_def_rel_elo = 400.0 * log10(1.0/(P_win_def + 0.5*P_draw_def) - 1.0);
+    results.AI_1_rel_elo = -400.0*log10(1.0/(P_win + 0.5*P_draw) - 1.0);
     return results;
 }
