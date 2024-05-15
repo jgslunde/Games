@@ -68,28 +68,28 @@ class Board:
                     if (player == ATTACKER and board[x,y] == ATTACKER) or (player == DEFENDER and (board[x,y] == DEFENDER or board[x,y] == KING)):
                         for x_new in range(x+1, N, 1):
                             if board[x_new, y] == EMPTY:
-                                if x_new != 3 or y != 3:  # Throne can never be moved to, but can be passed through.
+                                if x_new != 3 or y != 3 or piece == KING:  # Throne can never be moved to, but can be passed through.
                                     if [x_new, y] not in corners or piece == KING:  # Only king can move to the corners
                                         self._legal_moves.append([[x,y],[x_new,y]])
                             else:
                                 break
                         for x_new in range(x-1, -1, -1):
                             if board[x_new, y] == EMPTY:
-                                if x_new != 3 or y != 3:
+                                if x_new != 3 or y != 3 or piece == KING:
                                     if [x_new, y] not in corners or piece == KING:
                                         self._legal_moves.append([[x,y],[x_new,y]])
                             else:
                                 break
                         for y_new in range(y+1, N, 1):
                             if board[x, y_new] == EMPTY:
-                                if x != 3 or y_new != 3:
+                                if x != 3 or y_new != 3 or piece == KING:
                                     if [x, y_new] not in corners or piece == KING:
                                         self._legal_moves.append([[x,y],[x,y_new]])
                             else:
                                 break
                         for y_new in range(y-1, -1, -1):
                             if board[x, y_new] == EMPTY:
-                                if x != 3 or y_new != 3:
+                                if x != 3 or y_new != 3 or piece == KING:
                                     if [x, y_new] not in corners or piece == KING:
                                         self._legal_moves.append([[x,y],[x,y_new]])
                             else:
@@ -117,7 +117,8 @@ class Board:
                     double_neighbor_y = move_to[1]+offset[1]*2
                     # Check if that square is "hostile", aka either: inside the board and has allied piece, or a corner square. 
                     if (0 <= double_neighbor_x <= N-1 and 0 <= double_neighbor_y <= N-1 and board[double_neighbor_x,double_neighbor_y]*player > 0)\
-                        or (double_neighbor_x in [0, N-1] and double_neighbor_y in [0,N-1]):
+                        or (double_neighbor_x in [0, N-1] and double_neighbor_y in [0,N-1])\
+                        or ((double_neighbor_x == 3 and double_neighbor_y == 3) and (player == DEFENDER or board[3,3] == 0)):  # Can capture against throne if you're defender, or if you're attacker and throne is empty.
                         capture_x, capture_y = move_to[0]+offset[0], move_to[1]+offset[1]
                         if verbose:
                             print(f"##### Piece captured on {capture_x}, {capture_y}. #####")
