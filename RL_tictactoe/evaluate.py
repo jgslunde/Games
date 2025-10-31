@@ -1,4 +1,5 @@
 import numpy as np
+import multiprocessing as mp
 from TicTacToe import TicTacToeGame
 from MCTS import MCTS
 
@@ -60,6 +61,31 @@ class MCTSPlayer:
         return action
 
 
+# --- Parallel evaluation helpers ---
+def _eval_single_game_worker(network_state_dict, num_simulations, start_as_x, temperature):
+    """
+    Worker function to evaluate a single game in a separate process.
+    Reconstructs the network from state_dict to avoid CUDA/IPC issues.
+    """
+    from TTTnet import TicTacToeNet  # local import for multiprocessing safety
+
+    # Reconstruct network and players
+    net = TicTacToeNet()
+    net.load_state_dict(network_state_dict)
+    net.eval()
+
+    player_net = MCTSPlayer(net, num_simulations=num_simulations, temperature=temperature)
+    random_player = RandomPlayer()
+
+    # Play one game
+    if start_as_x:
+        winner = play_game(player_net, random_player, verbose=False)
+    else:
+        winner = play_game(random_player, player_net, verbose=False)
+
+    return winner
+
+
 def play_game(player1, player2, verbose=False):
     """
     Play a single game between two players.
@@ -101,7 +127,7 @@ def play_game(player1, player2, verbose=False):
     return winner
 
 
-def evaluate_against_random(network, num_games=100, num_mcts_sims=50, verbose=True):
+def evaluate_against_random(network, num_games=100, num_mcts_sims=50, verbose=True, temperature=0, num_workers=None):
     """
     Evaluate a network against a random player.
     
@@ -110,62 +136,92 @@ def evaluate_against_random(network, num_games=100, num_mcts_sims=50, verbose=Tr
         num_games: Number of games to play
         num_mcts_sims: Number of MCTS simulations per move
         verbose: Whether to print progress
+        temperature: Move selection temperature for MCTSPlayer (0 = greedy)
+        num_workers: Number of parallel workers (None or 1 = sequential)
         
     Returns:
         results: Dictionary with win/loss/draw statistics
     """
     network.eval()  # Set to evaluation mode
-    
-    mcts_player = MCTSPlayer(network, num_simulations=num_mcts_sims, temperature=0)
-    random_player = RandomPlayer()
-    
+
+    # Prepare results container
     results = {
         'wins': 0,
         'losses': 0,
         'draws': 0,
-        'games_as_X': 0,
-        'games_as_O': 0,
+        'games_as_X': num_games // 2 + (num_games % 2),
+        'games_as_O': num_games // 2,
         'wins_as_X': 0,
         'wins_as_O': 0
     }
-    
+
     if verbose:
         print(f"Evaluating against random player ({num_games} games)...")
-    
-    for i in range(num_games):
-        # Alternate who plays first
-        if i % 2 == 0:
-            # Network plays as X (first)
-            winner = play_game(mcts_player, random_player, verbose=False)
-            results['games_as_X'] += 1
-            if winner == 1:
-                results['wins'] += 1
-                results['wins_as_X'] += 1
-            elif winner == -1:
-                results['losses'] += 1
+
+    # Parallel path
+    if num_workers is not None and num_workers != 1:
+        # Snapshot model weights for workers
+        state_dict = network.state_dict()
+        # Build task list alternating starting player
+        tasks = [(state_dict, num_mcts_sims, (i % 2 == 0), temperature) for i in range(num_games)]
+
+        with mp.Pool(processes=(mp.cpu_count() if num_workers is None else num_workers)) as pool:
+            winners = pool.starmap(_eval_single_game_worker, tasks)
+
+        # Aggregate
+        for i, winner in enumerate(winners):
+            if i % 2 == 0:
+                # network played as X
+                if winner == 1:
+                    results['wins'] += 1
+                    results['wins_as_X'] += 1
+                elif winner == -1:
+                    results['losses'] += 1
+                else:
+                    results['draws'] += 1
             else:
-                results['draws'] += 1
-        else:
-            # Network plays as O (second)
-            winner = play_game(random_player, mcts_player, verbose=False)
-            results['games_as_O'] += 1
-            if winner == -1:
-                results['wins'] += 1
-                results['wins_as_O'] += 1
-            elif winner == 1:
-                results['losses'] += 1
+                # network played as O
+                if winner == -1:
+                    results['wins'] += 1
+                    results['wins_as_O'] += 1
+                elif winner == 1:
+                    results['losses'] += 1
+                else:
+                    results['draws'] += 1
+    else:
+        # Sequential fallback (with progress updates)
+        mcts_player = MCTSPlayer(network, num_simulations=num_mcts_sims, temperature=temperature)
+        random_player = RandomPlayer()
+
+        for i in range(num_games):
+            if i % 2 == 0:
+                winner = play_game(mcts_player, random_player, verbose=False)
+                if winner == 1:
+                    results['wins'] += 1
+                    results['wins_as_X'] += 1
+                elif winner == -1:
+                    results['losses'] += 1
+                else:
+                    results['draws'] += 1
             else:
-                results['draws'] += 1
-        
-        if verbose and (i + 1) % 20 == 0:
-            win_rate = results['wins'] / (i + 1) * 100
-            print(f"  Progress: {i+1}/{num_games} games, Win rate: {win_rate:.1f}%")
-    
-    # Calculate statistics
+                winner = play_game(random_player, mcts_player, verbose=False)
+                if winner == -1:
+                    results['wins'] += 1
+                    results['wins_as_O'] += 1
+                elif winner == 1:
+                    results['losses'] += 1
+                else:
+                    results['draws'] += 1
+
+            if verbose and (i + 1) % 20 == 0:
+                win_rate = results['wins'] / (i + 1) * 100
+                print(f"  Progress: {i+1}/{num_games} games, Win rate: {win_rate:.1f}%")
+
+    # Final rates
     results['win_rate'] = results['wins'] / num_games
     results['loss_rate'] = results['losses'] / num_games
     results['draw_rate'] = results['draws'] / num_games
-    
+
     if verbose:
         print("\nEvaluation Results:")
         print(f"  Wins:   {results['wins']}/{num_games} ({results['win_rate']*100:.1f}%)")
@@ -173,7 +229,7 @@ def evaluate_against_random(network, num_games=100, num_mcts_sims=50, verbose=Tr
         print(f"  Draws:  {results['draws']}/{num_games} ({results['draw_rate']*100:.1f}%)")
         print(f"  As X: {results['wins_as_X']}/{results['games_as_X']} wins")
         print(f"  As O: {results['wins_as_O']}/{results['games_as_O']} wins")
-    
+
     return results
 
 
