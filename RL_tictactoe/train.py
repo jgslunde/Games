@@ -417,13 +417,15 @@ def train_loop(
             f"checkpoint_iter{iteration+1:03d}_{timestamp}.pt"
         )
         
-        # 4. Evaluate against random player
+        # 4. Evaluate against random player (ensure parallel evaluation)
         print("\n[4/4] Evaluating against random player...")
+        eval_workers = os.cpu_count() if (num_workers is None or num_workers == 0) else num_workers
         eval_results = evaluate_against_random(
             network,
             num_games=eval_games,
             num_mcts_sims=eval_mcts_sims,
-            verbose=True
+            verbose=True,
+            num_workers=eval_workers
         )
         
         # Calculate and display ELO
