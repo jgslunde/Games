@@ -36,8 +36,8 @@ class Trainer:
             self.optimizer,
             mode='min',
             factor=0.5,      # Reduce LR by 50% when plateau detected
-            patience=3,      # Wait 3 iterations before reducing
-            min_lr=1e-5      # Don't go below this
+            patience=5,      # Wait 5 iterations before reducing (was 3)
+            min_lr=1e-6      # Lower minimum to allow finer tuning (was 1e-5)
         )
         
         # Loss functions
@@ -372,6 +372,7 @@ def train_loop(
         training_data, game_stats = self_play.generate_training_data(
             num_games=games_per_iteration,
             verbose=True,
+            use_augmentation=True,  # Keep augmentation - it's genuinely helpful
             random_opponent_fraction=random_opponent_fraction,
             num_workers=num_workers
         )
@@ -408,6 +409,8 @@ def train_loop(
         trainer.step_scheduler(best_val_loss)
         current_lr = trainer.optimizer.param_groups[0]['lr']
         print(f"Current learning rate: {current_lr:.6f}")
+        if current_lr <= 1e-5:
+            print("⚠️  Learning rate at minimum - may need higher min_lr or different scheduler")
         
         # 3. Save checkpoint
         print("\n[3/4] Saving checkpoint...")
@@ -474,29 +477,29 @@ if __name__ == "__main__":
     NUM_ITERATIONS = 50          # More iterations for convergence
     GAMES_PER_ITERATION = 400    # More games = better data quality
     NUM_MCTS_SIMS = 400          # MUCH stronger signal (was 200) - more computation but better targets
-    EPOCHS_PER_ITERATION = 10    # Reduced from 20 (was overfitting)
+    EPOCHS_PER_ITERATION = 15    # More epochs to learn from augmented data
     BATCH_SIZE = 64              # Larger batch for stable gradients (was 32)
-    LEARNING_RATE = 0.001        # Conservative initial LR with scheduler (was 0.002)
+    LEARNING_RATE = 0.001        # Back to conservative LR - quick learning suggests good gradient signal
     REPLAY_BUFFER_SIZE = 0       # DISABLED - train only on current iteration
-    RANDOM_OPPONENT_FRACTION = 1.0  # 100% of games against random opponent
+    RANDOM_OPPONENT_FRACTION = 1.0  # 100% random - correct approach for beating random
     NUM_WORKERS = None           # None = use all CPU cores
     
     # Check for GPU
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     print("\nTraining Configuration:")
-    print("  Network: 3-layer (128 hidden units each) + 2-layer policy head")
+    print("  Network: 2-layer (256 hidden units) + direct policy head")
     print("  Replay buffer: DISABLED (training on current iteration only)")
-    print("  Data augmentation: DISABLED") 
+    print("  Data augmentation: ENABLED (8x symmetries)") 
     print(f"  Games/iteration: {GAMES_PER_ITERATION}")
     print(f"  MCTS simulations: {NUM_MCTS_SIMS}")
     print(f"  Epochs per iteration: {EPOCHS_PER_ITERATION}")
     print(f"  Batch size: {BATCH_SIZE}")
     print(f"  Initial learning rate: {LEARNING_RATE} (with adaptive scheduler)")
-    print("  LR reduction: 0.5x when validation plateaus (patience=3)")
+    print("  LR reduction: 0.5x when validation plateaus (patience=5, min_lr=1e-6)")
     print(f"  Random opponent: {RANDOM_OPPONENT_FRACTION*100:.0f}% of games")
     print(f"  Parallel workers: {NUM_WORKERS if NUM_WORKERS else 'auto (all cores)'}")
-    print("\nGoal: >99% win rate against random player")
+    print("\nGoal: X >99%, O 80-90% win rate against random player")
     
     # Run training
     network, trainer, elo_history = train_loop(
