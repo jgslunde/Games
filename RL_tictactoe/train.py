@@ -359,26 +359,7 @@ def train_loop(
     # Experience replay buffer (stores training data from multiple iterations)
     replay_buffer = []
     
-    # Initial evaluation (before any training)
-    print(f"\n{'='*60}")
-    print("INITIAL EVALUATION (Untrained Network)")
-    print(f"{'='*60}")
-    print("\nEvaluating untrained network against random player...")
-    initial_results = evaluate_against_random(
-        network,
-        num_games=eval_games,
-        num_mcts_sims=eval_mcts_sims,
-        verbose=True
-    )
-    initial_elo = print_elo_report(initial_results, opponent_elo=1000)
-    elo_history.append({
-        'iteration': 0,
-        'elo': initial_elo,
-        'win_rate': initial_results['win_rate'],
-        'results': initial_results
-    })
-    print(f"\nBaseline ELO: {initial_elo:.0f}")
-    print("Starting training to improve from this baseline...\n")
+    # Initial evaluation removed (baseline is consistently ~50% vs random)
     
     # Training loop
     for iteration in range(num_iterations):
