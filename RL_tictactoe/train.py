@@ -174,13 +174,13 @@ class Trainer:
         )
         
         if verbose:
-            print(f"\nTraining with early stopping (stops on first validation loss increase, max {num_epochs} epochs)...")
-            print(f"Training on {n_train} examples, validating on {n_val} examples")
+            print(f"\nTraining on {n_train} examples, validating on {n_val} examples, {num_epochs} epochs...")
         
         best_val_loss = float('inf')
-        epoch = 0
+        best_epoch = 0
+        best_model_state = None
         
-        while epoch < num_epochs:
+        for epoch in range(num_epochs):
             # Training
             avg_train_total, avg_train_policy, avg_train_value = self.train_epoch(
                 train_dataloader,
@@ -195,32 +195,26 @@ class Trainer:
                 value_weight=value_weight
             )
             
-            # Check for improvement
+            # Check for improvement and save best model
             if avg_val_total < best_val_loss:
                 best_val_loss = avg_val_total
+                best_epoch = epoch + 1
+                best_model_state = {k: v.cpu().clone() for k, v in self.network.state_dict().items()}
                 improvement_indicator = " ✓ NEW BEST"
             else:
-                # Validation loss increased - stop training
-                if verbose:
-                    print(f"Epoch {epoch+1} - "
-                          f"Train Loss: {avg_train_total:.4f} | "
-                          f"Val Loss: {avg_val_total:.4f} ⚠️ INCREASED")
-                    print(f"Early stopping: validation loss increased (best was {best_val_loss:.4f})")
-                break
+                improvement_indicator = ""
             
             if verbose:
-                print(f"Epoch {epoch+1} - "
+                print(f"Epoch {epoch+1}/{num_epochs} - "
                       f"Train Loss: {avg_train_total:.4f} | "
                       f"Val Loss: {avg_val_total:.4f}"
                       f"{improvement_indicator}")
-            
-            epoch += 1
         
-        # Summary
-        if verbose:
-            if epoch >= num_epochs:
-                print(f"Training completed: reached maximum {num_epochs} epochs")
-            print(f"Best validation loss: {best_val_loss:.4f}")
+        # Restore best model
+        if best_model_state is not None:
+            self.network.load_state_dict(best_model_state)
+            if verbose:
+                print(f"Restored model from epoch {best_epoch} (best val loss: {best_val_loss:.4f})")
         
         # Return best validation loss for scheduler
         return best_val_loss
