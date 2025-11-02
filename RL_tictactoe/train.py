@@ -174,12 +174,13 @@ class Trainer:
         )
         
         if verbose:
-            print(f"\nTraining on {n_train} examples, validating on {n_val} examples, {num_epochs} epochs...")
+            print(f"\nTraining with early stopping (stops on first validation loss increase, max {num_epochs} epochs)...")
+            print(f"Training on {n_train} examples, validating on {n_val} examples")
         
         best_val_loss = float('inf')
-        epochs_without_improvement = 0
+        epoch = 0
         
-        for epoch in range(num_epochs):
+        while epoch < num_epochs:
             # Training
             avg_train_total, avg_train_policy, avg_train_value = self.train_epoch(
                 train_dataloader,
@@ -197,27 +198,29 @@ class Trainer:
             # Check for improvement
             if avg_val_total < best_val_loss:
                 best_val_loss = avg_val_total
-                epochs_without_improvement = 0
+                improvement_indicator = " ✓ NEW BEST"
             else:
-                epochs_without_improvement += 1
-            
-            # Detect overfitting
-            overfitting_indicator = ""
-            if avg_val_total > avg_train_total * 1.2:
-                overfitting_indicator = " ⚠️ OVERFITTING"
-            elif epochs_without_improvement >= 3:
-                overfitting_indicator = " ⚠️ VAL NOT IMPROVING"
+                # Validation loss increased - stop training
+                if verbose:
+                    print(f"Epoch {epoch+1} - "
+                          f"Train Loss: {avg_train_total:.4f} | "
+                          f"Val Loss: {avg_val_total:.4f} ⚠️ INCREASED")
+                    print(f"Early stopping: validation loss increased (best was {best_val_loss:.4f})")
+                break
             
             if verbose:
-                print(f"Epoch {epoch+1}/{num_epochs} - "
+                print(f"Epoch {epoch+1} - "
                       f"Train Loss: {avg_train_total:.4f} | "
                       f"Val Loss: {avg_val_total:.4f}"
-                      f"{overfitting_indicator}")
+                      f"{improvement_indicator}")
+            
+            epoch += 1
         
         # Summary
         if verbose:
-            if epochs_without_improvement >= 3:
-                print("⚠️  Training may have converged or overfitting detected")
+            if epoch >= num_epochs:
+                print(f"Training completed: reached maximum {num_epochs} epochs")
+            print(f"Best validation loss: {best_val_loss:.4f}")
         
         # Return best validation loss for scheduler
         return best_val_loss
