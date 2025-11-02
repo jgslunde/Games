@@ -127,7 +127,7 @@ class SelfPlay:
         self.network = network
         self.mcts = MCTS(network, num_simulations=num_simulations, c_puct=c_puct)
         
-    def play_game(self, temperature=1.0, temperature_threshold=15):
+    def play_game(self, temperature=1.0, temperature_threshold=5):
         """
         Play one full game using MCTS for move selection.
         
@@ -135,7 +135,7 @@ class SelfPlay:
             temperature: Controls exploration during move selection.
                         Higher = more exploration. Set to 0 for greedy play.
             temperature_threshold: Move number after which temperature drops to 0
-                                  (for deterministic endgame play)
+                                  (for deterministic endgame play). Default 5 for tic-tac-toe.
         
         Returns:
             training_examples: List of (board_state, mcts_policy, player) tuples
@@ -196,7 +196,7 @@ class SelfPlay:
         
         return training_data, winner
     
-    def generate_training_data(self, num_games=100, verbose=True, use_augmentation=False, random_opponent_fraction=0.0, num_workers=None):
+    def generate_training_data(self, num_games=100, verbose=True, use_augmentation=False, random_opponent_fraction=0.0, num_workers=None, temperature=1.0, temperature_threshold=5):
         """
         Generate training data by playing multiple self-play games in parallel.
         
@@ -206,6 +206,8 @@ class SelfPlay:
             use_augmentation: Whether to use symmetry augmentation (8x data) - USE WITH CAUTION
             random_opponent_fraction: Fraction of games where opponent plays randomly (0.0-1.0)
             num_workers: Number of parallel workers (None = use CPU count)
+            temperature: Temperature for move selection (higher = more exploration)
+            temperature_threshold: Move number after which temperature drops to 0
         
         Returns:
             training_data: List of (board, policy, value) tuples
@@ -237,8 +239,8 @@ class SelfPlay:
                 network_state_dict,
                 self.mcts.num_simulations,
                 self.mcts.c_puct,
-                1.0,  # temperature
-                15    # temperature_threshold
+                temperature,
+                temperature_threshold
             )
             
             with mp.Pool(processes=num_workers) as pool:
@@ -280,8 +282,8 @@ class SelfPlay:
                 network_state_dict,
                 self.mcts.num_simulations,
                 self.mcts.c_puct,
-                1.0,  # temperature
-                15    # temperature_threshold
+                temperature,
+                temperature_threshold
             )
             
             with mp.Pool(processes=num_workers) as pool:
@@ -332,7 +334,7 @@ class SelfPlay:
         
         return all_training_data, game_stats
     
-    def play_game_vs_random(self, temperature=1.0, temperature_threshold=15, network_plays_first=True):
+    def play_game_vs_random(self, temperature=1.0, temperature_threshold=5, network_plays_first=True):
         """
         Play a game where the network plays against a random opponent.
         Only the network's moves are recorded for training.
@@ -340,6 +342,7 @@ class SelfPlay:
         Args:
             temperature: Temperature for move selection
             temperature_threshold: Move number after which temperature drops to 0
+                                  (for deterministic endgame play). Default 5 for tic-tac-toe.
             network_plays_first: If True, network plays X (first), else O (second)
         
         Returns:

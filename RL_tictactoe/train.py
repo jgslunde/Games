@@ -317,7 +317,9 @@ def train_loop(
     eval_mcts_sims=50,
     replay_buffer_size=10000,
     random_opponent_fraction=0.3,
-    num_workers=None
+    num_workers=None,
+    temperature=1.0,
+    temperature_threshold=5
 ):
     """
     Main training loop: self-play -> train -> repeat.
@@ -336,6 +338,8 @@ def train_loop(
         replay_buffer_size: Maximum size of experience replay buffer (0 to disable)
         random_opponent_fraction: Fraction of games against random opponent (0.0-1.0)
         num_workers: Number of parallel workers for game generation (None = auto)
+        temperature: Temperature for move selection during training (higher = more exploration)
+        temperature_threshold: Move number after which temperature drops to 0
     """
     print("=" * 60)
     print("Starting AlphaZero-style Training for Tic-Tac-Toe")
@@ -371,7 +375,9 @@ def train_loop(
             verbose=True,
             use_augmentation=True,  # Keep augmentation - it's genuinely helpful
             random_opponent_fraction=random_opponent_fraction,
-            num_workers=num_workers
+            num_workers=num_workers,
+            temperature=temperature,
+            temperature_threshold=temperature_threshold
         )
         
         # Add to replay buffer
@@ -480,6 +486,8 @@ if __name__ == "__main__":
     REPLAY_BUFFER_SIZE = 0       # DISABLED - train only on current iteration
     RANDOM_OPPONENT_FRACTION = 1.0  # 100% random - correct approach for beating random
     NUM_WORKERS = None           # None = use all CPU cores
+    TEMPERATURE = 1.0            # Exploration during training (1.0 = full exploration, 0 = greedy)
+    TEMPERATURE_THRESHOLD = 5    # Switch to greedy play after move 5 (tic-tac-toe has max 9 moves)
     
     # Check for GPU
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -496,6 +504,7 @@ if __name__ == "__main__":
     print("  LR reduction: 0.5x when validation plateaus (patience=5, min_lr=1e-6)")
     print(f"  Random opponent: {RANDOM_OPPONENT_FRACTION*100:.0f}% of games")
     print(f"  Parallel workers: {NUM_WORKERS if NUM_WORKERS else 'auto (all cores)'}")
+    print(f"  Temperature: {TEMPERATURE} (threshold at move {TEMPERATURE_THRESHOLD})")
     print("\nGoal: X >99%, O 80-90% win rate against random player")
     
     # Run training
@@ -512,7 +521,9 @@ if __name__ == "__main__":
         eval_mcts_sims=400,          # MUST match training MCTS strength
         replay_buffer_size=REPLAY_BUFFER_SIZE,
         random_opponent_fraction=RANDOM_OPPONENT_FRACTION,
-        num_workers=NUM_WORKERS
+        num_workers=NUM_WORKERS,
+        temperature=TEMPERATURE,
+        temperature_threshold=TEMPERATURE_THRESHOLD
     )
     
     # Save final model
