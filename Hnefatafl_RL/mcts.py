@@ -183,6 +183,26 @@ class MCTS:
         self.c_puct = c_puct
         self.device = device
         self.network.to(device)
+        
+        # Timing statistics (accumulated across searches)
+        self.timing_stats = {
+            'selection': 0.0,
+            'terminal_eval': 0.0,
+            'network_eval': 0.0,
+            'expansion': 0.0,
+            'backup': 0.0,
+            'game_clone': 0.0,
+            'get_legal_moves': 0.0
+        }
+    
+    def reset_timing_stats(self):
+        """Reset timing statistics."""
+        for key in self.timing_stats:
+            self.timing_stats[key] = 0.0
+    
+    def get_timing_stats(self):
+        """Get timing statistics."""
+        return self.timing_stats.copy()
     
     def search(self, game: Brandubh) -> Dict[Tuple, float]:
         """
@@ -194,7 +214,11 @@ class MCTS:
         Returns:
             dict mapping moves to visit probabilities
         """
+        import time
+        
+        t0 = time.perf_counter()
         root = MCTSNode(game.clone())
+        self.timing_stats['game_clone'] += time.perf_counter() - t0
         
         # Run simulations
         for _ in range(self.num_simulations):
@@ -202,29 +226,40 @@ class MCTS:
             search_path = [node]
             
             # Selection: traverse tree until leaf
+            t0 = time.perf_counter()
             while not node.is_leaf() and not node.is_terminal():
                 action, node = node.select_child(self.c_puct)
                 search_path.append(node)
+            self.timing_stats['selection'] += time.perf_counter() - t0
             
             # Evaluate leaf with neural network
             value = 0
             if node.is_terminal():
                 # Terminal node: use game result
+                t0 = time.perf_counter()
                 if node.game.winner == node.game.current_player:
                     value = 1.0
                 elif node.game.winner == 1 - node.game.current_player:
                     value = -1.0
                 else:
                     value = 0.0
+                self.timing_stats['terminal_eval'] += time.perf_counter() - t0
             else:
                 # Non-terminal leaf: evaluate with network and expand
+                t0 = time.perf_counter()
                 policy_probs, value = self._evaluate(node.game)
+                self.timing_stats['network_eval'] += time.perf_counter() - t0
+                
+                t0 = time.perf_counter()
                 node.expand(policy_probs)
+                self.timing_stats['expansion'] += time.perf_counter() - t0
             
             # Backup: propagate value up the tree
+            t0 = time.perf_counter()
             for node in reversed(search_path):
                 node.update(value)
                 value = -value  # Flip value for opponent
+            self.timing_stats['backup'] += time.perf_counter() - t0
         
         return root.get_visit_distribution()
     
@@ -239,6 +274,7 @@ class MCTS:
             policy_probs: probability distribution over legal moves
             value: estimated value for current player
         """
+        import time
         from network import MoveEncoder
         
         # Get state representation
@@ -253,6 +289,7 @@ class MCTS:
         value = value.cpu().item()
         
         # Mask illegal moves
+        t0 = time.perf_counter()
         legal_mask = MoveEncoder.get_legal_move_mask(game)
         policy_logits = policy_logits * legal_mask + (1 - legal_mask) * (-1e8)
         
@@ -263,6 +300,7 @@ class MCTS:
         legal_moves = game.get_legal_moves()
         move_indices = [MoveEncoder.encode_move(move) for move in legal_moves]
         legal_probs = policy_probs[move_indices]
+        self.timing_stats['get_legal_moves'] += time.perf_counter() - t0
         
         return legal_probs, value
     
