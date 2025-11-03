@@ -1408,10 +1408,10 @@ if __name__ == "__main__":
     DEFAULT_ITERATIONS = 1000
     DEFAULT_GAMES = 512
     DEFAULT_SIMULATIONS = 100
-    DEFAULT_BATCH_SIZE = 64
+    DEFAULT_BATCH_SIZE = 256
     DEFAULT_LEARNING_RATE = 0.001
-    DEFAULT_EPOCHS = 6
-    DEFAULT_EVAL_VS_RANDOM = 128
+    DEFAULT_EPOCHS = 20
+    DEFAULT_EVAL_VS_RANDOM = 64
     DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
     DEFAULT_DEVICE = None  # None = auto-detect (cuda if available, else cpu)
     DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
@@ -1425,14 +1425,14 @@ if __name__ == "__main__":
     DEFAULT_CHANNELS = 64
     
     # Replay buffer
-    DEFAULT_REPLAY_BUFFER_SIZE = 5_000_000
+    DEFAULT_REPLAY_BUFFER_SIZE = 20_000_000
     DEFAULT_MIN_BUFFER_SIZE = 10*DEFAULT_BATCH_SIZE
     DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
     
     # Learning rate decay and regularization
     DEFAULT_LR_DECAY = 0.97
     DEFAULT_WEIGHT_DECAY = 1e-4
-    DEFAULT_VALUE_LOSS_WEIGHT = 100.0
+    DEFAULT_VALUE_LOSS_WEIGHT = 20.0
     DEFAULT_DRAW_PENALTY_ATTACKER = +0.5  # Draw counts as attacker win, but discouraged.
     DEFAULT_DRAW_PENALTY_DEFENDER = -0.9  # Draw = loss for defender, but slightly encouraged.
     
