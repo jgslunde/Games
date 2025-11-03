@@ -1149,6 +1149,9 @@ def train(config: TrainingConfig, resume_from: str = None):
     # Initialize replay buffer
     replay_buffer = ReplayBuffer(config.replay_buffer_size)
     
+    # ELO tracking - cumulative ELO relative to initial random network
+    cumulative_elo = 0.0  # Start at 0 (random network baseline)
+    
     # Training metrics
     training_history = {
         'iterations': [],
@@ -1160,7 +1163,9 @@ def train(config: TrainingConfig, resume_from: str = None):
         'vs_random_win_rate': [],
         'vs_random_elo': [],
         'vs_random_attacker_wins': [],
-        'vs_random_defender_wins': []
+        'vs_random_defender_wins': [],
+        'cumulative_elo': [],  # ELO relative to iteration 0
+        'elo_gain': []  # ELO gained in network vs network evaluation
     }
     
     # Create persistent worker pool to avoid file descriptor leaks
@@ -1246,11 +1251,23 @@ def train(config: TrainingConfig, resume_from: str = None):
                 print(f"Network evaluation time: {eval_network_time:.1f}s")
                 training_history['win_rates'].append(win_rate)
                 
+                # Calculate ELO gain from this evaluation
+                elo_gain = calculate_elo_difference(win_rate)
+                training_history['elo_gain'].append(elo_gain)
+                
                 if win_rate >= config.eval_win_rate:
                     print(f"New network wins {100*win_rate:.1f}% - updating best network!")
+                    print(f"ELO gain: {elo_gain:+.1f} (new network vs previous best)")
+                    # Update cumulative ELO by adding this gain
+                    cumulative_elo += elo_gain
                     best_network.load_state_dict(network.state_dict())
                 else:
                     print(f"New network wins {100*win_rate:.1f}% - keeping old network")
+                    print(f"ELO difference: {elo_gain:+.1f} (new network vs previous best, not applied)")
+                
+                # Record cumulative ELO (relative to iteration 0)
+                training_history['cumulative_elo'].append(cumulative_elo)
+                print(f"Cumulative ELO (vs iteration 0): {cumulative_elo:+.1f}")
             else:
                 print(f"\n[4/4] Skipping network evaluation (every {config.eval_frequency} iterations)")
                 eval_network_time = 0
@@ -1286,6 +1303,16 @@ def train(config: TrainingConfig, resume_from: str = None):
             if eval_network_time > 0:
                 print(f"  Network evaluation: {eval_network_time:6.1f}s  ({100*eval_network_time/iter_time:.1f}%)")
             print(f"  Total:              {iter_time:6.1f}s")
+            
+            # Print ELO summary
+            if len(training_history['vs_random_elo']) > 0 or len(training_history['cumulative_elo']) > 0:
+                print("\nELO Summary:")
+                if len(training_history['vs_random_elo']) > 0:
+                    latest_random_elo = training_history['vs_random_elo'][-1]
+                    print(f"  Current network vs Random: {latest_random_elo:+.0f} ELO")
+                if len(training_history['cumulative_elo']) > 0:
+                    print(f"  Best network vs Iteration 0: {cumulative_elo:+.0f} ELO")
+                    print(f"    (Chained through {len(training_history['cumulative_elo'])} evaluations)")
             print("-" * 70)
     
     finally:
