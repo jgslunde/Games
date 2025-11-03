@@ -267,6 +267,13 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     Returns:
         dict with game data
     """
+    # Seed random number generators uniquely for each worker
+    # Use game_idx combined with process ID and time to ensure uniqueness
+    import time
+    seed = (game_idx + os.getpid() + int(time.time() * 1000)) % (2**32)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
@@ -634,6 +641,12 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     Returns:
         1 if NN wins, 0 otherwise
     """
+    # Seed random number generators uniquely for each worker
+    import time
+    seed = (game_idx + os.getpid() + int(time.time() * 1000)) % (2**32)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
@@ -801,6 +814,12 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     Returns:
         1 if new network wins, 0 otherwise
     """
+    # Seed random number generators uniquely for each worker
+    import time
+    seed = (game_idx + os.getpid() + int(time.time() * 1000)) % (2**32)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
