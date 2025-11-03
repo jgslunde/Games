@@ -1235,42 +1235,42 @@ if __name__ == "__main__":
     # Modify these values to change defaults without using command-line arguments
     # =============================================================================
     
-    DEFAULT_ITERATIONS = 100
-    DEFAULT_GAMES = 512
-    DEFAULT_SIMULATIONS = 400
-    DEFAULT_BATCH_SIZE = 32
+    DEFAULT_ITERATIONS = 1000
+    DEFAULT_GAMES = 1024
+    DEFAULT_SIMULATIONS = 200
+    DEFAULT_BATCH_SIZE = 128
     DEFAULT_LEARNING_RATE = 0.001
     DEFAULT_EPOCHS = 10
-    DEFAULT_EVAL_VS_RANDOM = 256
+    DEFAULT_EVAL_VS_RANDOM = 128
     DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
     DEFAULT_DEVICE = None  # None = auto-detect (cuda if available, else cpu)
     DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
     
     # Temperature parameters
     DEFAULT_TEMPERATURE = 1.0
-    DEFAULT_TEMPERATURE_THRESHOLD = 25
+    DEFAULT_TEMPERATURE_THRESHOLD = 20
     
     # Network architecture
-    DEFAULT_RES_BLOCKS = 4
-    DEFAULT_CHANNELS = 64
+    DEFAULT_RES_BLOCKS = 8
+    DEFAULT_CHANNELS = 128
     
     # Replay buffer
-    DEFAULT_REPLAY_BUFFER_SIZE = 50000
-    DEFAULT_MIN_BUFFER_SIZE = 1000
+    DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
+    DEFAULT_MIN_BUFFER_SIZE = 10*DEFAULT_BATCH_SIZE
     DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
     
     # Learning rate decay and regularization
-    DEFAULT_LR_DECAY = 0.95
+    DEFAULT_LR_DECAY = 0.97
     DEFAULT_WEIGHT_DECAY = 1e-4
     DEFAULT_VALUE_LOSS_WEIGHT = 1.0
     DEFAULT_DRAW_PENALTY_ATTACKER = -0.1  # Penalty for attacker draws
-    DEFAULT_DRAW_PENALTY_DEFENDER = -0.3  # Penalty for defender draws (more penalizing)
+    DEFAULT_DRAW_PENALTY_DEFENDER = -0.15  # Penalty for defender draws (more penalizing)
     
     # MCTS exploration
     DEFAULT_C_PUCT = 1.4
     
     # Evaluation
-    DEFAULT_EVAL_GAMES = 20
+    DEFAULT_EVAL_GAMES = 256
     DEFAULT_EVAL_WIN_RATE = 0.55
     DEFAULT_EVAL_FREQUENCY = 5
     DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1
