@@ -60,6 +60,7 @@ class TrainingConfig:
     learning_rate = 0.001             # Initial learning rate
     lr_decay = 0.95                   # Learning rate decay per iteration
     weight_decay = 1e-4               # L2 regularization
+    value_loss_weight = 1.0           # Weight for value loss (policy loss weight is always 1.0)
     
     # Replay buffer
     replay_buffer_size = 50000        # Maximum samples in replay buffer
@@ -328,16 +329,25 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         game.make_move(move)
         move_count += 1
         
-        # Safety check
+        # Safety check for move limit
         if move_count > 500:
             break
+    
+    # Determine draw reason
+    draw_reason = None
+    if game.winner is None:
+        draw_reason = 'repetition'
+    elif not game.game_over and move_count > 500:
+        # Hit move limit without natural game end
+        draw_reason = 'move_limit'
     
     return {
         'states': states,
         'policies': policies,
         'winner': game.winner,  # Can be 0, 1, or None (draw)
         'players': players,
-        'num_moves': move_count
+        'num_moves': move_count,
+        'draw_reason': draw_reason  # 'repetition', 'move_limit', or None
     }
 
 
@@ -397,16 +407,25 @@ def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
         game.make_move(move)
         move_count += 1
         
-        # Safety check
+        # Safety check for move limit
         if move_count > 500:
             break
+    
+    # Determine draw reason
+    draw_reason = None
+    if game.winner is None:
+        draw_reason = 'repetition'
+    elif not game.game_over and move_count > 500:
+        # Hit move limit without natural game end
+        draw_reason = 'move_limit'
     
     return {
         'states': states,
         'policies': policies,
         'winner': game.winner,  # Can be 0, 1, or None (draw)
         'players': players,
-        'num_moves': move_count
+        'num_moves': move_count,
+        'draw_reason': draw_reason  # 'repetition', 'move_limit', or None
     }
 
 
@@ -477,16 +496,24 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
     attacker_wins = 0
     defender_wins = 0
     draws = 0
+    repetition_draws = 0
+    move_limit_draws = 0
     
     for game_data in game_results:
         total_moves += game_data['num_moves']
         winner = game_data['winner']
+        draw_reason = game_data.get('draw_reason', None)
+        
         if winner == 0:
             attacker_wins += 1
         elif winner == 1:
             defender_wins += 1
-        else:  # winner is None
+        else:  # winner is None or move limit reached
             draws += 1
+            if draw_reason == 'repetition':
+                repetition_draws += 1
+            elif draw_reason == 'move_limit':
+                move_limit_draws += 1
         
         # Add to buffer
         for state, policy, player in zip(game_data['states'], 
@@ -513,7 +540,11 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
     
     print(f"Generated {len(buffer)} training samples")
     total_games = config.num_games_per_iteration
-    print(f"Results: {attacker_wins} attacker wins, {defender_wins} defender wins, {draws} draws")
+    print(f"Results: {attacker_wins} attacker wins ({100*attacker_wins/total_games:.1f}%), "
+          f"{defender_wins} defender wins ({100*defender_wins/total_games:.1f}%), "
+          f"{draws} draws ({100*draws/total_games:.1f}%)")
+    if draws > 0:
+        print(f"  Draw breakdown: {repetition_draws} by repetition, {move_limit_draws} by move limit (500+ moves)")
     print(f"Average game length: {total_moves/total_games:.1f} moves")
     
     return buffer
@@ -559,7 +590,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             policy_loss = -torch.mean(torch.sum(policies * 
                                       torch.log_softmax(pred_policies, dim=1), dim=1))
             value_loss = torch.mean((pred_values - values) ** 2)
-            loss = policy_loss + value_loss
+            loss = policy_loss + config.value_loss_weight * value_loss
             
             # Backward pass
             optimizer.zero_grad()
@@ -1145,6 +1176,7 @@ if __name__ == "__main__":
     # Learning rate decay and regularization
     DEFAULT_LR_DECAY = 0.95
     DEFAULT_WEIGHT_DECAY = 1e-4
+    DEFAULT_VALUE_LOSS_WEIGHT = 1.0
     
     # MCTS exploration
     DEFAULT_C_PUCT = 1.4
@@ -1181,6 +1213,8 @@ if __name__ == "__main__":
                        help=f"Learning rate decay per iteration (default: {DEFAULT_LR_DECAY})")
     parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY,
                        help=f"L2 regularization weight decay (default: {DEFAULT_WEIGHT_DECAY})")
+    parser.add_argument("--value-loss-weight", type=float, default=DEFAULT_VALUE_LOSS_WEIGHT,
+                       help=f"Weight for value loss relative to policy loss (default: {DEFAULT_VALUE_LOSS_WEIGHT})")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS,
                        help=f"Training epochs per iteration (default: {DEFAULT_EPOCHS})")
     
@@ -1243,6 +1277,7 @@ if __name__ == "__main__":
     config.learning_rate = args.lr
     config.lr_decay = args.lr_decay
     config.weight_decay = args.weight_decay
+    config.value_loss_weight = args.value_loss_weight
     config.num_epochs = args.epochs
     
     # Network architecture
