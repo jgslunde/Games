@@ -1181,19 +1181,19 @@ if __name__ == "__main__":
     # =============================================================================
     
     DEFAULT_ITERATIONS = 100
-    DEFAULT_GAMES = 100
-    DEFAULT_SIMULATIONS = 100
+    DEFAULT_GAMES = 512
+    DEFAULT_SIMULATIONS = 400
     DEFAULT_BATCH_SIZE = 32
     DEFAULT_LEARNING_RATE = 0.001
     DEFAULT_EPOCHS = 10
-    DEFAULT_EVAL_VS_RANDOM = 10
+    DEFAULT_EVAL_VS_RANDOM = 256
     DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
     DEFAULT_DEVICE = None  # None = auto-detect (cuda if available, else cpu)
     DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
     
     # Temperature parameters
     DEFAULT_TEMPERATURE = 1.0
-    DEFAULT_TEMPERATURE_THRESHOLD = 15
+    DEFAULT_TEMPERATURE_THRESHOLD = 25
     
     # Network architecture
     DEFAULT_RES_BLOCKS = 4
@@ -1221,7 +1221,7 @@ if __name__ == "__main__":
     DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1
     
     # Checkpointing
-    DEFAULT_SAVE_FREQUENCY = 5
+    DEFAULT_SAVE_FREQUENCY = 1
     DEFAULT_CHECKPOINT_DIR = "checkpoints"
     
     # =============================================================================
