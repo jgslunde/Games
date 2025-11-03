@@ -1433,8 +1433,8 @@ if __name__ == "__main__":
     DEFAULT_LR_DECAY = 0.97
     DEFAULT_WEIGHT_DECAY = 1e-4
     DEFAULT_VALUE_LOSS_WEIGHT = 100.0
-    DEFAULT_DRAW_PENALTY_ATTACKER = -0.1  # Penalty for attacker draws
-    DEFAULT_DRAW_PENALTY_DEFENDER = -0.15  # Penalty for defender draws (more penalizing)
+    DEFAULT_DRAW_PENALTY_ATTACKER = +0.5  # Draw counts as attacker win, but discouraged.
+    DEFAULT_DRAW_PENALTY_DEFENDER = -0.9  # Draw = loss for defender, but slightly encouraged.
     
     # MCTS exploration
     DEFAULT_C_PUCT = 1.4
