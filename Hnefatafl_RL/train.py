@@ -1021,9 +1021,15 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             except Exception:
                 pass
     
-    new_wins = sum(results)
-    win_rate = new_wins / config.eval_games
-    print(f"New network win rate: {100*win_rate:.1f}% ({new_wins}/{config.eval_games})")
+    # Process results - split by attacker/defender
+    attacker_wins = sum(results[:half_games + remainder])
+    defender_wins = sum(results[half_games + remainder:])
+    total_wins = attacker_wins + defender_wins
+    win_rate = total_wins / config.eval_games
+    
+    print(f"  As Attacker: {attacker_wins}/{half_games + remainder} wins")
+    print(f"  As Defender: {defender_wins}/{half_games} wins")
+    print(f"New network win rate: {100*win_rate:.1f}% ({total_wins}/{config.eval_games})")
     
     return win_rate
 

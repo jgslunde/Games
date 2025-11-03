@@ -192,6 +192,9 @@ class MCTS:
         self.device = device
         self.network.to(device)
         
+        # Root node from last search (for accessing statistics)
+        self.root = None
+        
         # Timing statistics (accumulated across searches)
         self.timing_stats = {
             'selection': 0.0,
@@ -227,6 +230,9 @@ class MCTS:
         t0 = time.perf_counter()
         root = MCTSNode(game.clone())
         self.timing_stats['game_clone'] += time.perf_counter() - t0
+        
+        # Store root for later access to statistics
+        self.root = root
         
         # Run simulations
         for _ in range(self.num_simulations):
