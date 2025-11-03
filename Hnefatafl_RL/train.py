@@ -439,8 +439,9 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig) -> Rep
     
     # Play games in parallel
     if config.num_workers > 1:
-        with mp.Pool(processes=config.num_workers) as pool:
-            game_results = pool.map(worker_func, range(config.num_games_per_iteration))
+        # Use maxtasksperchild to recycle workers and reduce file descriptor usage
+        with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as pool:
+            game_results = pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
     else:
         # Single-threaded fallback
         game_results = [worker_func(i) for i in range(config.num_games_per_iteration)]
@@ -665,11 +666,12 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
     
     # Play games in parallel
     if config.num_workers > 1:
-        with mp.Pool(processes=config.num_workers) as pool:
+        # Use maxtasksperchild to recycle workers and reduce file descriptor usage
+        with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as pool:
             # Play as attacker
-            attacker_results = pool.map(worker_func_attacker, range(num_games))
+            attacker_results = pool.map(worker_func_attacker, range(num_games), chunksize=1)
             # Play as defender
-            defender_results = pool.map(worker_func_defender, range(num_games))
+            defender_results = pool.map(worker_func_defender, range(num_games), chunksize=1)
     else:
         # Single-threaded fallback
         attacker_results = [worker_func_attacker(i) for i in range(num_games)]
@@ -785,7 +787,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
     
     # Play games in parallel
     if config.num_workers > 1:
-        with mp.Pool(processes=config.num_workers) as pool:
+        # Use maxtasksperchild to recycle workers and reduce file descriptor usage
+        with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as pool:
             results = [pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
     else:
         # Single-threaded fallback
