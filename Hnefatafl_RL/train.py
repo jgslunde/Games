@@ -246,14 +246,14 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float) -> List[
 # SELF-PLAY
 # =============================================================================
 
-def _play_self_play_game_worker(network_state_dict, num_res_blocks, num_channels, 
+def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, 
                                 num_simulations, c_puct, temperature, temperature_threshold, game_idx):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
     
     Args:
-        network_state_dict: State dict of the network (on CPU)
+        network_path: Path to saved network weights file
         num_res_blocks: Number of residual blocks in network
         num_channels: Number of channels in network
         num_simulations: MCTS simulations per move
@@ -273,9 +273,9 @@ def _play_self_play_game_worker(network_state_dict, num_res_blocks, num_channels
     from network import BrandubhNet, MoveEncoder
     from mcts import MCTS
     
-    # Reconstruct network on CPU
+    # Reconstruct network on CPU and load from file
     network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    network.load_state_dict(network_state_dict)
+    network.load_state_dict(torch.load(network_path, map_location='cpu'))
     network.to('cpu')
     network.eval()
     
@@ -410,7 +410,7 @@ def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
     }
 
 
-def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=None) -> ReplayBuffer:
+def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=None, temp_network_path=None) -> ReplayBuffer:
     """
     Generate self-play games and store in replay buffer.
     Uses multiprocessing to parallelize game generation.
@@ -419,6 +419,7 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
         agent: Agent to use for self-play
         config: Training configuration
         pool: Optional multiprocessing pool to use (if None, creates temporary pool)
+        temp_network_path: Path to temporary network file (avoids pickling large tensors)
     
     Returns:
         ReplayBuffer with collected experience
@@ -427,33 +428,49 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
     
     print(f"Generating {config.num_games_per_iteration} self-play games using {config.num_workers} workers...")
     
-    # Get network state dict (on CPU for pickling)
-    network_state_dict = {k: v.cpu() for k, v in agent.network.state_dict().items()}
-    
-    # Create worker function with partial
-    worker_func = partial(
-        _play_self_play_game_worker,
-        network_state_dict,
-        config.num_res_blocks,
-        config.num_channels,
-        config.num_mcts_simulations,
-        config.c_puct,
-        config.temperature,
-        config.temperature_threshold
-    )
-    
-    # Play games in parallel
-    if config.num_workers > 1:
-        if pool is not None:
-            # Use provided persistent pool
-            game_results = pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
-        else:
-            # Create temporary pool (for backward compatibility)
-            with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
-                game_results = temp_pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
+    # Save network to temporary file to avoid pickling issues with many workers
+    import tempfile
+    if temp_network_path is None:
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pth', delete=False)
+        temp_network_path = temp_file.name
+        temp_file.close()
+        torch.save(agent.network.state_dict(), temp_network_path)
+        cleanup_temp_file = True
     else:
-        # Single-threaded fallback
-        game_results = [worker_func(i) for i in range(config.num_games_per_iteration)]
+        cleanup_temp_file = False
+    
+    try:
+        # Create worker function with partial
+        worker_func = partial(
+            _play_self_play_game_worker,
+            temp_network_path,
+            config.num_res_blocks,
+            config.num_channels,
+            config.num_mcts_simulations,
+            config.c_puct,
+            config.temperature,
+            config.temperature_threshold
+        )
+        
+        # Play games in parallel
+        if config.num_workers > 1:
+            if pool is not None:
+                # Use provided persistent pool
+                game_results = pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
+            else:
+                # Create temporary pool (for backward compatibility)
+                with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
+                    game_results = temp_pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
+        else:
+            # Single-threaded fallback
+            game_results = [worker_func(i) for i in range(config.num_games_per_iteration)]
+    finally:
+        # Clean up temporary file
+        if cleanup_temp_file:
+            try:
+                os.unlink(temp_network_path)
+            except Exception:
+                pass
     
     # Process results
     total_moves = 0
@@ -566,14 +583,14 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 # EVALUATION
 # =============================================================================
 
-def _evaluate_vs_random_worker(network_state_dict, num_res_blocks, num_channels,
+def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
                                 num_simulations, c_puct, nn_plays_attacker, game_idx):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
     
     Args:
-        network_state_dict: State dict of the network (on CPU)
+        network_path: Path to saved network weights file
         num_res_blocks: Number of residual blocks
         num_channels: Number of channels
         num_simulations: MCTS simulations per move
@@ -591,9 +608,9 @@ def _evaluate_vs_random_worker(network_state_dict, num_res_blocks, num_channels,
     from network import BrandubhNet
     from agent import BrandubhAgent, RandomAgent, play_game
     
-    # Reconstruct network on CPU
+    # Reconstruct network on CPU and load from file
     network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    network.load_state_dict(network_state_dict)
+    network.load_state_dict(torch.load(network_path, map_location='cpu'))
     network.to('cpu')
     network.eval()
     
@@ -633,7 +650,7 @@ def calculate_elo_difference(win_rate: float) -> float:
 
 
 def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig, 
-                       num_games: int = 10, pool=None) -> Dict[str, float]:
+                       num_games: int = 10, pool=None, temp_network_path=None) -> Dict[str, float]:
     """
     Evaluate network against random player.
     Uses multiprocessing to parallelize evaluation games.
@@ -643,6 +660,7 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
         config: training configuration
         num_games: number of games to play (will play num_games as each color)
         pool: Optional multiprocessing pool to use (if None, creates temporary pool)
+        temp_network_path: Path to temporary network file (avoids pickling large tensors)
     
     Returns:
         dict with 'total_wins', 'total_games', 'win_rate', 'elo_diff',
@@ -650,45 +668,61 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
     """
     print(f"\nEvaluating vs Random player ({num_games * 2} games using {config.num_workers} workers)...")
     
-    # Get network state dict (on CPU for pickling)
-    network_state_dict = {k: v.cpu() for k, v in network.state_dict().items()}
-    
-    # Create worker functions with partial for attacker and defender games
-    worker_func_attacker = partial(
-        _evaluate_vs_random_worker,
-        network_state_dict,
-        config.num_res_blocks,
-        config.num_channels,
-        config.num_mcts_simulations,
-        config.c_puct,
-        True  # nn_plays_attacker
-    )
-    
-    worker_func_defender = partial(
-        _evaluate_vs_random_worker,
-        network_state_dict,
-        config.num_res_blocks,
-        config.num_channels,
-        config.num_mcts_simulations,
-        config.c_puct,
-        False  # nn_plays_attacker
-    )
-    
-    # Play games in parallel
-    if config.num_workers > 1:
-        if pool is not None:
-            # Use provided persistent pool
-            attacker_results = pool.map(worker_func_attacker, range(num_games), chunksize=1)
-            defender_results = pool.map(worker_func_defender, range(num_games), chunksize=1)
-        else:
-            # Create temporary pool (for backward compatibility)
-            with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
-                attacker_results = temp_pool.map(worker_func_attacker, range(num_games), chunksize=1)
-                defender_results = temp_pool.map(worker_func_defender, range(num_games), chunksize=1)
+    # Save network to temporary file to avoid pickling issues with many workers
+    import tempfile
+    if temp_network_path is None:
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pth', delete=False)
+        temp_network_path = temp_file.name
+        temp_file.close()
+        torch.save(network.state_dict(), temp_network_path)
+        cleanup_temp_file = True
     else:
-        # Single-threaded fallback
-        attacker_results = [worker_func_attacker(i) for i in range(num_games)]
-        defender_results = [worker_func_defender(i) for i in range(num_games)]
+        cleanup_temp_file = False
+    
+    try:
+        # Create worker functions with partial for attacker and defender games
+        worker_func_attacker = partial(
+            _evaluate_vs_random_worker,
+            temp_network_path,
+            config.num_res_blocks,
+            config.num_channels,
+            config.num_mcts_simulations,
+            config.c_puct,
+            True  # nn_plays_attacker
+        )
+        
+        worker_func_defender = partial(
+            _evaluate_vs_random_worker,
+            temp_network_path,
+            config.num_res_blocks,
+            config.num_channels,
+            config.num_mcts_simulations,
+            config.c_puct,
+            False  # nn_plays_attacker
+        )
+        
+        # Play games in parallel
+        if config.num_workers > 1:
+            if pool is not None:
+                # Use provided persistent pool
+                attacker_results = pool.map(worker_func_attacker, range(num_games), chunksize=1)
+                defender_results = pool.map(worker_func_defender, range(num_games), chunksize=1)
+            else:
+                # Create temporary pool (for backward compatibility)
+                with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
+                    attacker_results = temp_pool.map(worker_func_attacker, range(num_games), chunksize=1)
+                    defender_results = temp_pool.map(worker_func_defender, range(num_games), chunksize=1)
+        else:
+            # Single-threaded fallback
+            attacker_results = [worker_func_attacker(i) for i in range(num_games)]
+            defender_results = [worker_func_defender(i) for i in range(num_games)]
+    finally:
+        # Clean up temporary file
+        if cleanup_temp_file:
+            try:
+                os.unlink(temp_network_path)
+            except Exception:
+                pass
     
     # Process results
     attacker_wins = sum(attacker_results)
@@ -714,7 +748,7 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
     }
 
 
-def _evaluate_networks_worker(new_network_state_dict, old_network_state_dict,
+def _evaluate_networks_worker(new_network_path, old_network_path,
                              num_res_blocks, num_channels, num_simulations, c_puct,
                              new_plays_attacker, game_idx):
     """
@@ -722,8 +756,8 @@ def _evaluate_networks_worker(new_network_state_dict, old_network_state_dict,
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
     
     Args:
-        new_network_state_dict: State dict of new network (on CPU)
-        old_network_state_dict: State dict of old network (on CPU)
+        new_network_path: Path to saved new network weights file
+        old_network_path: Path to saved old network weights file
         num_res_blocks: Number of residual blocks
         num_channels: Number of channels
         num_simulations: MCTS simulations per move
@@ -741,14 +775,14 @@ def _evaluate_networks_worker(new_network_state_dict, old_network_state_dict,
     from network import BrandubhNet
     from agent import BrandubhAgent, play_game
     
-    # Reconstruct networks on CPU
+    # Reconstruct networks on CPU and load from files
     new_network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    new_network.load_state_dict(new_network_state_dict)
+    new_network.load_state_dict(torch.load(new_network_path, map_location='cpu'))
     new_network.to('cpu')
     new_network.eval()
     
     old_network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    old_network.load_state_dict(old_network_state_dict)
+    old_network.load_state_dict(torch.load(old_network_path, map_location='cpu'))
     old_network.to('cpu')
     old_network.eval()
     
@@ -768,7 +802,7 @@ def _evaluate_networks_worker(new_network_state_dict, old_network_state_dict,
 
 
 def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet, 
-                     config: TrainingConfig, pool=None) -> float:
+                     config: TrainingConfig, pool=None, temp_new_path=None, temp_old_path=None) -> float:
     """
     Evaluate new network against old network.
     Uses multiprocessing to parallelize evaluation games.
@@ -778,44 +812,75 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         old_network: Old network to compare against
         config: Training configuration
         pool: Optional multiprocessing pool to use (if None, creates temporary pool)
+        temp_new_path: Path to temporary new network file (avoids pickling large tensors)
+        temp_old_path: Path to temporary old network file (avoids pickling large tensors)
     
     Returns:
         win_rate: fraction of games won by new network
     """
     print(f"\nEvaluating new network vs old network ({config.eval_games} games using {config.num_workers} workers)...")
     
-    # Get network state dicts (on CPU for pickling)
-    new_network_state_dict = {k: v.cpu() for k, v in new_network.state_dict().items()}
-    old_network_state_dict = {k: v.cpu() for k, v in old_network.state_dict().items()}
-    
-    # Create worker functions with partial, alternating who plays attacker
-    work_items = []
-    for i in range(config.eval_games):
-        new_plays_attacker = (i % 2 == 0)
-        worker_func = partial(
-            _evaluate_networks_worker,
-            new_network_state_dict,
-            old_network_state_dict,
-            config.num_res_blocks,
-            config.num_channels,
-            config.num_mcts_simulations,
-            config.c_puct,
-            new_plays_attacker
-        )
-        work_items.append(worker_func)
-    
-    # Play games in parallel
-    if config.num_workers > 1:
-        if pool is not None:
-            # Use provided persistent pool
-            results = [pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
-        else:
-            # Create temporary pool (for backward compatibility)
-            with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
-                results = [temp_pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
+    # Save networks to temporary files to avoid pickling issues with many workers
+    import tempfile
+    if temp_new_path is None:
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='_new.pth', delete=False)
+        temp_new_path = temp_file.name
+        temp_file.close()
+        torch.save(new_network.state_dict(), temp_new_path)
+        cleanup_new = True
     else:
-        # Single-threaded fallback
-        results = [func(i) for i, func in enumerate(work_items)]
+        cleanup_new = False
+    
+    if temp_old_path is None:
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='_old.pth', delete=False)
+        temp_old_path = temp_file.name
+        temp_file.close()
+        torch.save(old_network.state_dict(), temp_old_path)
+        cleanup_old = True
+    else:
+        cleanup_old = False
+    
+    try:
+        # Create worker functions with partial, alternating who plays attacker
+        work_items = []
+        for i in range(config.eval_games):
+            new_plays_attacker = (i % 2 == 0)
+            worker_func = partial(
+                _evaluate_networks_worker,
+                temp_new_path,
+                temp_old_path,
+                config.num_res_blocks,
+                config.num_channels,
+                config.num_mcts_simulations,
+                config.c_puct,
+                new_plays_attacker
+            )
+            work_items.append(worker_func)
+        
+        # Play games in parallel
+        if config.num_workers > 1:
+            if pool is not None:
+                # Use provided persistent pool
+                results = [pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
+            else:
+                # Create temporary pool (for backward compatibility)
+                with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
+                    results = [temp_pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
+        else:
+            # Single-threaded fallback
+            results = [func(i) for i, func in enumerate(work_items)]
+    finally:
+        # Clean up temporary files
+        if cleanup_new:
+            try:
+                os.unlink(temp_new_path)
+            except Exception:
+                pass
+        if cleanup_old:
+            try:
+                os.unlink(temp_old_path)
+            except Exception:
+                pass
     
     new_wins = sum(results)
     win_rate = new_wins / config.eval_games
