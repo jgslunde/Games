@@ -46,6 +46,9 @@ class Brandubh:
         self.position_history = []
         self.move_count = 0
         
+        # Track if king has moved off throne
+        self.king_has_left_throne = False
+        
         self._setup_board()
         self._record_position()
     
@@ -168,6 +171,10 @@ class Brandubh:
         piece = self.board[from_r, from_c]
         self.board[from_r, from_c] = EMPTY
         self.board[to_r, to_c] = piece
+        
+        # Track if king has left the throne
+        if piece == KING and (from_r, from_c) == self.throne:
+            self.king_has_left_throne = True
         
         # Increment move counter
         self.move_count += 1
@@ -294,6 +301,7 @@ class Brandubh:
         new_game.corner_set = self.corner_set
         new_game.position_history = self.position_history.copy()
         new_game.move_count = self.move_count
+        new_game.king_has_left_throne = self.king_has_left_throne
         return new_game
     
     def __str__(self) -> str:

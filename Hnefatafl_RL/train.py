@@ -48,7 +48,7 @@ class TrainingConfig:
     
     # Temperature (exploration during self-play)
     temperature = 1.0                 # Sampling temperature for moves
-    temperature_threshold = 15        # Move number after which temperature = 0
+    temperature_threshold = 15        # Move number after which temperature = 0, or "king" to drop when king leaves throne
     
     # Neural network
     num_res_blocks = 4                # Residual blocks in network
@@ -304,8 +304,13 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     while not game.game_over:
         current_player = game.current_player
         
-        # Determine temperature based on move count
-        temp = temperature if move_count < temperature_threshold else 0.0
+        # Determine temperature based on move count or king position
+        if temperature_threshold == "king":
+            # Drop temperature when king leaves throne
+            temp = 0.0 if game.king_has_left_throne else temperature
+        else:
+            # Drop temperature after a fixed number of moves
+            temp = temperature if move_count < temperature_threshold else 0.0
         
         # Get state
         state = game.get_state()
@@ -380,8 +385,11 @@ def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
     while not game.game_over:
         current_player = game.current_player
         
-        # Determine temperature based on move count
-        if move_count < config.temperature_threshold:
+        # Determine temperature based on move count or king position
+        if config.temperature_threshold == "king":
+            # Drop temperature when king leaves throne
+            temperature = 0.0 if game.king_has_left_throne else config.temperature
+        elif move_count < config.temperature_threshold:
             temperature = config.temperature
         else:
             temperature = 0.0  # Deterministic after threshold
@@ -1099,7 +1107,10 @@ def train(config: TrainingConfig, resume_from: str = None):
     print(f"Simulations per move: {config.num_mcts_simulations}")
     print(f"Exploration constant (c_puct): {config.c_puct}")
     print(f"Temperature: {config.temperature}")
-    print(f"Temperature threshold: {config.temperature_threshold} moves")
+    if config.temperature_threshold == "king":
+        print(f"Temperature threshold: drop when king leaves throne")
+    else:
+        print(f"Temperature threshold: {config.temperature_threshold} moves")
     
     # Training parameters
     print("\n--- Training Parameters ---")
@@ -1362,6 +1373,18 @@ def train(config: TrainingConfig, resume_from: str = None):
 if __name__ == "__main__":
     import argparse
     
+    # Custom type for temperature_threshold argument
+    def temperature_threshold_type(value):
+        """Parse temperature threshold as either int or 'king' string."""
+        if value.lower() == "king":
+            return "king"
+        try:
+            return int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"temperature-threshold must be an integer or 'king', got: {value}"
+            )
+    
     # =============================================================================
     # DEFAULT COMMAND-LINE ARGUMENTS
     # Modify these values to change defaults without using command-line arguments
@@ -1454,8 +1477,8 @@ if __name__ == "__main__":
                        help=f"MCTS exploration constant (default: {DEFAULT_C_PUCT})")
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
                        help=f"Sampling temperature for move selection (default: {DEFAULT_TEMPERATURE})")
-    parser.add_argument("--temperature-threshold", type=int, default=DEFAULT_TEMPERATURE_THRESHOLD,
-                       help=f"Move number after which temperature=0 (default: {DEFAULT_TEMPERATURE_THRESHOLD})")
+    parser.add_argument("--temperature-threshold", type=temperature_threshold_type, default=DEFAULT_TEMPERATURE_THRESHOLD,
+                       help=f"Move number after which temperature=0, or 'king' to drop when king leaves throne (default: {DEFAULT_TEMPERATURE_THRESHOLD})")
     
     # Replay buffer
     parser.add_argument("--replay-buffer-size", type=int, default=DEFAULT_REPLAY_BUFFER_SIZE,
