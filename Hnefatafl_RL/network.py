@@ -61,16 +61,20 @@ class BrandubhNet(nn.Module):
             ResidualBlock(num_channels) for _ in range(num_res_blocks)
         ])
         
-        # Policy head
-        self.conv_policy = nn.Conv2d(num_channels, 32, kernel_size=1)
-        self.bn_policy = nn.BatchNorm2d(32)
+        # Policy head - compact AlphaZero design
+        # Use tiny 1x1 conv (2 channels is standard) to compress features
+        self.conv_policy = nn.Conv2d(num_channels, 2, kernel_size=1)
+        self.bn_policy = nn.BatchNorm2d(2)
         # Policy output: from_square (49) * direction (4) * distance (6)
-        self.fc_policy = nn.Linear(32 * 7 * 7, 49 * 4 * 6)
+        # FC layer is now much smaller: 2*7*7=98 inputs instead of 32*7*7=1568
+        self.fc_policy = nn.Linear(2 * 7 * 7, 49 * 4 * 6)
         
-        # Value head
-        self.conv_value = nn.Conv2d(num_channels, 16, kernel_size=1)
-        self.bn_value = nn.BatchNorm2d(16)
-        self.fc_value1 = nn.Linear(16 * 7 * 7, 64)
+        # Value head - compact AlphaZero design
+        # Use tiny 1x1 conv (1 channel is standard) to compress features
+        self.conv_value = nn.Conv2d(num_channels, 1, kernel_size=1)
+        self.bn_value = nn.BatchNorm2d(1)
+        # FC layers are now much smaller: 1*7*7=49 inputs instead of 16*7*7=784
+        self.fc_value1 = nn.Linear(1 * 7 * 7, 64)
         self.fc_value2 = nn.Linear(64, 1)
     
     def forward(self, x):
