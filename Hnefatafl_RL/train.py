@@ -589,6 +589,10 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     batches_per_epoch = samples_per_epoch // config.batch_size
     
     for epoch in range(config.num_epochs):
+        epoch_policy_loss = 0.0
+        epoch_value_loss = 0.0
+        epoch_total_loss = 0.0
+        
         for batch_idx in range(batches_per_epoch):
             # Sample batch
             states, policies, values = buffer.sample(config.batch_size)
@@ -613,10 +617,27 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             optimizer.step()
             
             # Accumulate losses
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
-            total_loss += loss.item()
+            batch_policy_loss = policy_loss.item()
+            batch_value_loss = value_loss.item()
+            batch_total_loss = loss.item()
+            
+            total_policy_loss += batch_policy_loss
+            total_value_loss += batch_value_loss
+            total_loss += batch_total_loss
+            
+            epoch_policy_loss += batch_policy_loss
+            epoch_value_loss += batch_value_loss
+            epoch_total_loss += batch_total_loss
+            
             num_batches += 1
+        
+        # Print per-epoch losses
+        avg_epoch_policy = epoch_policy_loss / batches_per_epoch
+        avg_epoch_value = epoch_value_loss / batches_per_epoch
+        avg_epoch_total = epoch_total_loss / batches_per_epoch
+        print(f"  Epoch {epoch+1}/{config.num_epochs}: "
+              f"policy={avg_epoch_policy:.4f}, value={avg_epoch_value:.4f}, "
+              f"total={avg_epoch_total:.4f}")
     
     return {
         'policy_loss': total_policy_loss / num_batches,
@@ -1074,27 +1095,34 @@ def train(config: TrainingConfig, resume_from: str = None):
             print("=" * 70)
             
             # 1. Self-play
+            print("\n[1/4] Self-play game generation...")
+            selfplay_start = time.time()
             agent = BrandubhAgent(network, 
                                  num_simulations=config.num_mcts_simulations,
                                  c_puct=config.c_puct,
                                  device=config.device)
             
             new_buffer = generate_self_play_data(agent, config, pool=worker_pool)
+            selfplay_time = time.time() - selfplay_start
             
             # Add to main replay buffer
             for state, policy, value in new_buffer.buffer:
                 replay_buffer.add(state, policy, value)
             
             print(f"Replay buffer size: {len(replay_buffer)}")
+            print(f"Self-play time: {selfplay_time:.1f}s")
             
             # 2. Train network
             if len(replay_buffer) >= config.min_buffer_size:
-                print(f"\nTraining network for {config.num_epochs} epochs...")
+                print(f"\n[2/4] Training network for {config.num_epochs} epochs...")
+                training_start = time.time()
                 losses = train_network(network, replay_buffer, optimizer, config)
+                training_time = time.time() - training_start
                 
-                print(f"Policy loss: {losses['policy_loss']:.4f}")
-                print(f"Value loss: {losses['value_loss']:.4f}")
-                print(f"Total loss: {losses['total_loss']:.4f}")
+                print(f"Training time: {training_time:.1f}s")
+                print(f"Final losses - Policy: {losses['policy_loss']:.4f}, "
+                      f"Value: {losses['value_loss']:.4f}, "
+                      f"Total: {losses['total_loss']:.4f}")
                 
                 # Record metrics
                 training_history['iterations'].append(iteration + 1)
@@ -1103,22 +1131,34 @@ def train(config: TrainingConfig, resume_from: str = None):
                 training_history['total_loss'].append(losses['total_loss'])
                 training_history['buffer_size'].append(len(replay_buffer))
             else:
-                print(f"\nSkipping training: buffer size {len(replay_buffer)} < "
+                print(f"\n[2/4] Skipping training: buffer size {len(replay_buffer)} < "
                       f"minimum {config.min_buffer_size}")
+                training_time = 0
             
             # 3. Evaluate vs random player
             if (iteration + 1) % config.eval_vs_random_frequency == 0:
+                print(f"\n[3/4] Evaluating vs Random player...")
+                eval_random_start = time.time()
                 random_eval = evaluate_vs_random(network, config, 
                                                 num_games=config.eval_vs_random_games,
                                                 pool=worker_pool)
+                eval_random_time = time.time() - eval_random_start
+                print(f"Random evaluation time: {eval_random_time:.1f}s")
                 training_history['vs_random_win_rate'].append(random_eval['win_rate'])
                 training_history['vs_random_elo'].append(random_eval['elo_diff'])
                 training_history['vs_random_attacker_wins'].append(random_eval['attacker_wins'])
                 training_history['vs_random_defender_wins'].append(random_eval['defender_wins'])
+            else:
+                print(f"\n[3/4] Skipping random evaluation (every {config.eval_vs_random_frequency} iterations)")
+                eval_random_time = 0
             
             # 4. Evaluate and update best network
             if (iteration + 1) % config.eval_frequency == 0:
+                print(f"\n[4/4] Evaluating new vs old network...")
+                eval_network_start = time.time()
                 win_rate = evaluate_networks(network, best_network, config, pool=worker_pool)
+                eval_network_time = time.time() - eval_network_start
+                print(f"Network evaluation time: {eval_network_time:.1f}s")
                 training_history['win_rates'].append(win_rate)
                 
                 if win_rate >= config.eval_win_rate:
@@ -1126,6 +1166,9 @@ def train(config: TrainingConfig, resume_from: str = None):
                     best_network.load_state_dict(network.state_dict())
                 else:
                     print(f"New network wins {100*win_rate:.1f}% - keeping old network")
+            else:
+                print(f"\n[4/4] Skipping network evaluation (every {config.eval_frequency} iterations)")
+                eval_network_time = 0
             
             # 5. Learning rate decay
             scheduler.step()
@@ -1146,7 +1189,19 @@ def train(config: TrainingConfig, resume_from: str = None):
                 json.dump(training_history, f, indent=2)
             
             iter_time = time.time() - iter_start_time
-            print(f"\nIteration time: {iter_time:.1f}s")
+            
+            # Print timing summary
+            print("\n" + "-" * 70)
+            print("Timing Summary:")
+            print(f"  Self-play:          {selfplay_time:6.1f}s  ({100*selfplay_time/iter_time:.1f}%)")
+            if training_time > 0:
+                print(f"  Training:           {training_time:6.1f}s  ({100*training_time/iter_time:.1f}%)")
+            if eval_random_time > 0:
+                print(f"  Random evaluation:  {eval_random_time:6.1f}s  ({100*eval_random_time/iter_time:.1f}%)")
+            if eval_network_time > 0:
+                print(f"  Network evaluation: {eval_network_time:6.1f}s  ({100*eval_network_time/iter_time:.1f}%)")
+            print(f"  Total:              {iter_time:6.1f}s")
+            print("-" * 70)
     
     finally:
         # Clean up worker pool
