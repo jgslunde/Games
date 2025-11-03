@@ -286,9 +286,12 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     
     # Reconstruct network on CPU and load from file
     network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    network.load_state_dict(torch.load(network_path, map_location='cpu'))
+    checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
+    network.load_state_dict(checkpoint['model_state_dict'])
     network.to('cpu')
     network.eval()
+    # Optimize for CPU inference
+    network = network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     # Create MCTS instance
     mcts = MCTS(network, num_simulations=num_simulations, c_puct=c_puct, device='cpu')
@@ -723,9 +726,12 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     
     # Reconstruct network on CPU and load from file
     network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    network.load_state_dict(torch.load(network_path, map_location='cpu'))
+    checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
+    network.load_state_dict(checkpoint['model_state_dict'])
     network.to('cpu')
     network.eval()
+    # Optimize for CPU inference
+    network = network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     # Create agents on CPU
     nn_agent = BrandubhAgent(network, num_simulations=num_simulations,
@@ -896,14 +902,20 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     
     # Reconstruct networks on CPU and load from files
     new_network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    new_network.load_state_dict(torch.load(new_network_path, map_location='cpu'))
+    checkpoint = torch.load(new_network_path, map_location='cpu', weights_only=False)
+    new_network.load_state_dict(checkpoint['model_state_dict'])
     new_network.to('cpu')
     new_network.eval()
+    # Optimize for CPU inference
+    new_network = new_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     old_network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    old_network.load_state_dict(torch.load(old_network_path, map_location='cpu'))
+    checkpoint = torch.load(old_network_path, map_location='cpu', weights_only=False)
+    old_network.load_state_dict(checkpoint['model_state_dict'])
     old_network.to('cpu')
     old_network.eval()
+    # Optimize for CPU inference
+    old_network = old_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     # Create agents on CPU
     new_agent = BrandubhAgent(new_network, num_simulations=num_simulations,

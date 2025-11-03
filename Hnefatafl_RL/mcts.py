@@ -307,7 +307,8 @@ class MCTS:
         state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)
         
         # Evaluate with network
-        with torch.no_grad():
+        # Use inference_mode for better performance than no_grad
+        with torch.inference_mode():
             policy_logits, value = self.network(state_tensor)
         
         policy_logits = policy_logits.cpu().numpy()[0]
