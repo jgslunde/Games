@@ -48,6 +48,9 @@ class MCTSNode:
     
     def is_terminal(self) -> bool:
         """Check if this is a terminal game state."""
+        # Lazy-initialized nodes are never terminal (game state not yet created)
+        if self.game is None:
+            return False
         return self.game.game_over
     
     def get_legal_moves(self) -> List[Tuple]:
@@ -59,6 +62,7 @@ class MCTSNode:
     def expand(self, policy_probs: np.ndarray):
         """
         Expand this node by creating children for all legal moves.
+        Uses lazy initialization - child game states are created only when visited.
         
         Args:
             policy_probs: probability distribution over moves (from neural network)
@@ -76,17 +80,16 @@ class MCTSNode:
             # Uniform distribution if no valid probabilities
             legal_probs = np.ones(len(legal_moves)) / len(legal_moves)
         
-        # Create child nodes
+        # Create child nodes without game states (lazy initialization)
         for move, prob in zip(legal_moves, legal_probs):
-            child_game = self.game.clone()
-            child_game.make_move(move)
-            self.children[move] = MCTSNode(child_game, parent=self, parent_action=move, prior=prob)
+            self.children[move] = MCTSNode(None, parent=self, parent_action=move, prior=prob)
         
         self._is_expanded = True
     
     def select_child(self, c_puct: float = 1.4) -> Tuple[Tuple, 'MCTSNode']:
         """
         Select best child using PUCT algorithm.
+        Lazily initializes child game state on first selection.
         
         PUCT = Q(s,a) + c_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a))
         
@@ -116,6 +119,11 @@ class MCTSNode:
                 best_score = score
                 best_action = action
                 best_child = child
+        
+        # Lazy initialization: create game state for selected child if not already done
+        if best_child.game is None:
+            best_child.game = self.game.clone()
+            best_child.game.make_move(best_action)
         
         return best_action, best_child
     
