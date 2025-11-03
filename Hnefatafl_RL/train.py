@@ -1026,22 +1026,75 @@ def train(config: TrainingConfig, resume_from: str = None):
     print("=" * 70)
     print("Brandubh AlphaZero Training")
     print("=" * 70)
-    print(f"\nDevice: {config.device}")
+    
+    # Training configuration
+    print("\n--- Training Configuration ---")
+    print(f"Device: {config.device}")
     print(f"Iterations: {config.num_iterations}")
     print(f"Games per iteration: {config.num_games_per_iteration}")
-    print(f"MCTS simulations: {config.num_mcts_simulations}")
     print(f"Parallel workers: {config.num_workers}")
+    
+    # Network architecture
+    print("\n--- Network Architecture ---")
+    print(f"Residual blocks: {config.num_res_blocks}")
+    print(f"Channels: {config.num_channels}")
+    print(f"Input: 4 planes (7×7) - [attackers, defenders, king, current_player]")
+    print(f"Policy output: 1176 moves (49 squares × 4 directions × 6 distances)")
+    print(f"Value output: single scalar (win probability)")
+    
+    # MCTS parameters
+    print("\n--- MCTS Parameters ---")
+    print(f"Simulations per move: {config.num_mcts_simulations}")
+    print(f"Exploration constant (c_puct): {config.c_puct}")
+    print(f"Temperature: {config.temperature}")
+    print(f"Temperature threshold: {config.temperature_threshold} moves")
+    
+    # Training parameters
+    print("\n--- Training Parameters ---")
     print(f"Batch size: {config.batch_size}")
+    print(f"Epochs per iteration: {config.num_epochs}")
     print(f"Learning rate: {config.learning_rate}")
+    print(f"LR decay per iteration: {config.lr_decay}")
+    print(f"Weight decay (L2): {config.weight_decay}")
     print(f"Value loss weight: {config.value_loss_weight}")
-    print(f"Draw penalties: Attacker={config.draw_penalty_attacker}, Defender={config.draw_penalty_defender}")
-    print(f"Replay buffer size: {config.replay_buffer_size}")
-    print(f"Data augmentation: {'Enabled (8x)' if config.use_data_augmentation else 'Disabled'}")
+    
+    # Replay buffer
+    print("\n--- Replay Buffer ---")
+    print(f"Max size: {config.replay_buffer_size:,} samples")
+    print(f"Min size for training: {config.min_buffer_size:,} samples")
+    print(f"Data augmentation: {'Enabled (8x symmetries)' if config.use_data_augmentation else 'Disabled'}")
+    if config.use_data_augmentation:
+        samples_per_iter = config.num_games_per_iteration * 50 * 8  # rough estimate
+        print(f"Estimated samples/iteration: ~{samples_per_iter:,} ({config.num_games_per_iteration} games × ~50 moves × 8 augmentations)")
+        print(f"Buffer turnover: ~{samples_per_iter/config.replay_buffer_size:.1f}x per iteration")
+    
+    # Draw handling
+    print("\n--- Draw Penalties ---")
+    print(f"Attacker draws: {config.draw_penalty_attacker}")
+    print(f"Defender draws: {config.draw_penalty_defender}")
+    
+    # Evaluation
+    print("\n--- Evaluation ---")
+    print(f"Eval frequency (network vs network): every {config.eval_frequency} iterations")
+    print(f"Eval games (network vs network): {config.eval_games}")
+    print(f"Win rate threshold: {config.eval_win_rate:.1%}")
+    print(f"Eval vs random frequency: every {config.eval_vs_random_frequency} iteration(s)")
+    print(f"Eval vs random games: {config.eval_vs_random_games} per color ({config.eval_vs_random_games * 2} total)")
+    
+    # Checkpointing
+    print("\n--- Checkpointing ---")
+    print(f"Checkpoint directory: {config.checkpoint_dir}")
+    print(f"Save frequency: every {config.save_frequency} iteration(s)")
     print()
     
     # Initialize network
     network = BrandubhNet(num_res_blocks=config.num_res_blocks,
                          num_channels=config.num_channels).to(config.device)
+    
+    # Calculate and display network size
+    total_params = sum(p.numel() for p in network.parameters())
+    trainable_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
+    print(f"Network initialized: {total_params:,} total parameters ({trainable_params:,} trainable)")
     
     # Initialize optimizer
     optimizer = optim.Adam(network.parameters(), 
@@ -1236,11 +1289,11 @@ if __name__ == "__main__":
     # =============================================================================
     
     DEFAULT_ITERATIONS = 1000
-    DEFAULT_GAMES = 1024
-    DEFAULT_SIMULATIONS = 200
-    DEFAULT_BATCH_SIZE = 128
+    DEFAULT_GAMES = 512
+    DEFAULT_SIMULATIONS = 100
+    DEFAULT_BATCH_SIZE = 64
     DEFAULT_LEARNING_RATE = 0.001
-    DEFAULT_EPOCHS = 10
+    DEFAULT_EPOCHS = 6
     DEFAULT_EVAL_VS_RANDOM = 128
     DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
     DEFAULT_DEVICE = None  # None = auto-detect (cuda if available, else cpu)
@@ -1251,11 +1304,11 @@ if __name__ == "__main__":
     DEFAULT_TEMPERATURE_THRESHOLD = 20
     
     # Network architecture
-    DEFAULT_RES_BLOCKS = 8
-    DEFAULT_CHANNELS = 128
+    DEFAULT_RES_BLOCKS = 4
+    DEFAULT_CHANNELS = 64
     
     # Replay buffer
-    DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
+    DEFAULT_REPLAY_BUFFER_SIZE = 5_000_000
     DEFAULT_MIN_BUFFER_SIZE = 10*DEFAULT_BATCH_SIZE
     DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
     
