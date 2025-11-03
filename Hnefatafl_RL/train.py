@@ -29,7 +29,7 @@ except ImportError:
 
 from brandubh import Brandubh
 from network import BrandubhNet, MoveEncoder
-from agent import BrandubhAgent, RandomAgent
+from agent import BrandubhAgent
 
 
 # =============================================================================
@@ -410,10 +410,15 @@ def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
     }
 
 
-def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig) -> ReplayBuffer:
+def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=None) -> ReplayBuffer:
     """
     Generate self-play games and store in replay buffer.
     Uses multiprocessing to parallelize game generation.
+    
+    Args:
+        agent: Agent to use for self-play
+        config: Training configuration
+        pool: Optional multiprocessing pool to use (if None, creates temporary pool)
     
     Returns:
         ReplayBuffer with collected experience
@@ -439,9 +444,13 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig) -> Rep
     
     # Play games in parallel
     if config.num_workers > 1:
-        # Use maxtasksperchild to recycle workers and reduce file descriptor usage
-        with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as pool:
+        if pool is not None:
+            # Use provided persistent pool
             game_results = pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
+        else:
+            # Create temporary pool (for backward compatibility)
+            with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
+                game_results = temp_pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
     else:
         # Single-threaded fallback
         game_results = [worker_func(i) for i in range(config.num_games_per_iteration)]
@@ -624,7 +633,7 @@ def calculate_elo_difference(win_rate: float) -> float:
 
 
 def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig, 
-                       num_games: int = 10) -> Dict[str, float]:
+                       num_games: int = 10, pool=None) -> Dict[str, float]:
     """
     Evaluate network against random player.
     Uses multiprocessing to parallelize evaluation games.
@@ -633,6 +642,7 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
         network: neural network to evaluate
         config: training configuration
         num_games: number of games to play (will play num_games as each color)
+        pool: Optional multiprocessing pool to use (if None, creates temporary pool)
     
     Returns:
         dict with 'total_wins', 'total_games', 'win_rate', 'elo_diff',
@@ -666,12 +676,15 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
     
     # Play games in parallel
     if config.num_workers > 1:
-        # Use maxtasksperchild to recycle workers and reduce file descriptor usage
-        with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as pool:
-            # Play as attacker
+        if pool is not None:
+            # Use provided persistent pool
             attacker_results = pool.map(worker_func_attacker, range(num_games), chunksize=1)
-            # Play as defender
             defender_results = pool.map(worker_func_defender, range(num_games), chunksize=1)
+        else:
+            # Create temporary pool (for backward compatibility)
+            with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
+                attacker_results = temp_pool.map(worker_func_attacker, range(num_games), chunksize=1)
+                defender_results = temp_pool.map(worker_func_defender, range(num_games), chunksize=1)
     else:
         # Single-threaded fallback
         attacker_results = [worker_func_attacker(i) for i in range(num_games)]
@@ -755,10 +768,16 @@ def _evaluate_networks_worker(new_network_state_dict, old_network_state_dict,
 
 
 def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet, 
-                     config: TrainingConfig) -> float:
+                     config: TrainingConfig, pool=None) -> float:
     """
     Evaluate new network against old network.
     Uses multiprocessing to parallelize evaluation games.
+    
+    Args:
+        new_network: New network to evaluate
+        old_network: Old network to compare against
+        config: Training configuration
+        pool: Optional multiprocessing pool to use (if None, creates temporary pool)
     
     Returns:
         win_rate: fraction of games won by new network
@@ -787,9 +806,13 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
     
     # Play games in parallel
     if config.num_workers > 1:
-        # Use maxtasksperchild to recycle workers and reduce file descriptor usage
-        with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as pool:
+        if pool is not None:
+            # Use provided persistent pool
             results = [pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
+        else:
+            # Create temporary pool (for backward compatibility)
+            with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
+                results = [temp_pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
     else:
         # Single-threaded fallback
         results = [func(i) for i, func in enumerate(work_items)]
@@ -908,87 +931,103 @@ def train(config: TrainingConfig, resume_from: str = None):
         'vs_random_defender_wins': []
     }
     
-    # Main training loop
-    for iteration in range(start_iteration, config.num_iterations):
-        iter_start_time = time.time()
-        
-        print("\n" + "=" * 70)
-        print(f"Iteration {iteration + 1}/{config.num_iterations}")
-        print("=" * 70)
-        
-        # 1. Self-play
-        agent = BrandubhAgent(network, 
-                             num_simulations=config.num_mcts_simulations,
-                             c_puct=config.c_puct,
-                             device=config.device)
-        
-        new_buffer = generate_self_play_data(agent, config)
-        
-        # Add to main replay buffer
-        for state, policy, value in new_buffer.buffer:
-            replay_buffer.add(state, policy, value)
-        
-        print(f"Replay buffer size: {len(replay_buffer)}")
-        
-        # 2. Train network
-        if len(replay_buffer) >= config.min_buffer_size:
-            print(f"\nTraining network for {config.num_epochs} epochs...")
-            losses = train_network(network, replay_buffer, optimizer, config)
+    # Create persistent worker pool to avoid file descriptor leaks
+    # Use maxtasksperchild to periodically recycle workers and free resources
+    worker_pool = None
+    if config.num_workers > 1:
+        print(f"Creating persistent worker pool with {config.num_workers} workers...")
+        worker_pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
+    
+    try:
+        # Main training loop
+        for iteration in range(start_iteration, config.num_iterations):
+            iter_start_time = time.time()
             
-            print(f"Policy loss: {losses['policy_loss']:.4f}")
-            print(f"Value loss: {losses['value_loss']:.4f}")
-            print(f"Total loss: {losses['total_loss']:.4f}")
+            print("\n" + "=" * 70)
+            print(f"Iteration {iteration + 1}/{config.num_iterations}")
+            print("=" * 70)
             
-            # Record metrics
-            training_history['iterations'].append(iteration + 1)
-            training_history['policy_loss'].append(losses['policy_loss'])
-            training_history['value_loss'].append(losses['value_loss'])
-            training_history['total_loss'].append(losses['total_loss'])
-            training_history['buffer_size'].append(len(replay_buffer))
-        else:
-            print(f"\nSkipping training: buffer size {len(replay_buffer)} < "
-                  f"minimum {config.min_buffer_size}")
-        
-        # 3. Evaluate vs random player
-        if (iteration + 1) % config.eval_vs_random_frequency == 0:
-            random_eval = evaluate_vs_random(network, config, 
-                                            num_games=config.eval_vs_random_games)
-            training_history['vs_random_win_rate'].append(random_eval['win_rate'])
-            training_history['vs_random_elo'].append(random_eval['elo_diff'])
-            training_history['vs_random_attacker_wins'].append(random_eval['attacker_wins'])
-            training_history['vs_random_defender_wins'].append(random_eval['defender_wins'])
-        
-        # 4. Evaluate and update best network
-        if (iteration + 1) % config.eval_frequency == 0:
-            win_rate = evaluate_networks(network, best_network, config)
-            training_history['win_rates'].append(win_rate)
+            # 1. Self-play
+            agent = BrandubhAgent(network, 
+                                 num_simulations=config.num_mcts_simulations,
+                                 c_puct=config.c_puct,
+                                 device=config.device)
             
-            if win_rate >= config.eval_win_rate:
-                print(f"New network wins {100*win_rate:.1f}% - updating best network!")
-                best_network.load_state_dict(network.state_dict())
+            new_buffer = generate_self_play_data(agent, config, pool=worker_pool)
+            
+            # Add to main replay buffer
+            for state, policy, value in new_buffer.buffer:
+                replay_buffer.add(state, policy, value)
+            
+            print(f"Replay buffer size: {len(replay_buffer)}")
+            
+            # 2. Train network
+            if len(replay_buffer) >= config.min_buffer_size:
+                print(f"\nTraining network for {config.num_epochs} epochs...")
+                losses = train_network(network, replay_buffer, optimizer, config)
+                
+                print(f"Policy loss: {losses['policy_loss']:.4f}")
+                print(f"Value loss: {losses['value_loss']:.4f}")
+                print(f"Total loss: {losses['total_loss']:.4f}")
+                
+                # Record metrics
+                training_history['iterations'].append(iteration + 1)
+                training_history['policy_loss'].append(losses['policy_loss'])
+                training_history['value_loss'].append(losses['value_loss'])
+                training_history['total_loss'].append(losses['total_loss'])
+                training_history['buffer_size'].append(len(replay_buffer))
             else:
-                print(f"New network wins {100*win_rate:.1f}% - keeping old network")
-        
-        # 5. Learning rate decay
-        scheduler.step()
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f"\nLearning rate: {current_lr:.6f}")
-        
-        # 6. Save checkpoint
-        if (iteration + 1) % config.save_frequency == 0:
-            save_checkpoint(network, optimizer, iteration + 1, config, 
-                          training_history, f"checkpoint_iter_{iteration + 1}.pth")
-            save_checkpoint(best_network, optimizer, iteration + 1, config,
-                          training_history, "best_model.pth")
-        
-        # 7. Save training history
-        history_path = os.path.join(config.checkpoint_dir, "training_history.json")
-        os.makedirs(config.checkpoint_dir, exist_ok=True)
-        with open(history_path, 'w') as f:
-            json.dump(training_history, f, indent=2)
-        
-        iter_time = time.time() - iter_start_time
-        print(f"\nIteration time: {iter_time:.1f}s")
+                print(f"\nSkipping training: buffer size {len(replay_buffer)} < "
+                      f"minimum {config.min_buffer_size}")
+            
+            # 3. Evaluate vs random player
+            if (iteration + 1) % config.eval_vs_random_frequency == 0:
+                random_eval = evaluate_vs_random(network, config, 
+                                                num_games=config.eval_vs_random_games,
+                                                pool=worker_pool)
+                training_history['vs_random_win_rate'].append(random_eval['win_rate'])
+                training_history['vs_random_elo'].append(random_eval['elo_diff'])
+                training_history['vs_random_attacker_wins'].append(random_eval['attacker_wins'])
+                training_history['vs_random_defender_wins'].append(random_eval['defender_wins'])
+            
+            # 4. Evaluate and update best network
+            if (iteration + 1) % config.eval_frequency == 0:
+                win_rate = evaluate_networks(network, best_network, config, pool=worker_pool)
+                training_history['win_rates'].append(win_rate)
+                
+                if win_rate >= config.eval_win_rate:
+                    print(f"New network wins {100*win_rate:.1f}% - updating best network!")
+                    best_network.load_state_dict(network.state_dict())
+                else:
+                    print(f"New network wins {100*win_rate:.1f}% - keeping old network")
+            
+            # 5. Learning rate decay
+            scheduler.step()
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"\nLearning rate: {current_lr:.6f}")
+            
+            # 6. Save checkpoint
+            if (iteration + 1) % config.save_frequency == 0:
+                save_checkpoint(network, optimizer, iteration + 1, config, 
+                              training_history, f"checkpoint_iter_{iteration + 1}.pth")
+                save_checkpoint(best_network, optimizer, iteration + 1, config,
+                              training_history, "best_model.pth")
+            
+            # 7. Save training history
+            history_path = os.path.join(config.checkpoint_dir, "training_history.json")
+            os.makedirs(config.checkpoint_dir, exist_ok=True)
+            with open(history_path, 'w') as f:
+                json.dump(training_history, f, indent=2)
+            
+            iter_time = time.time() - iter_start_time
+            print(f"\nIteration time: {iter_time:.1f}s")
+    
+    finally:
+        # Clean up worker pool
+        if worker_pool is not None:
+            print("\nClosing worker pool...")
+            worker_pool.close()
+            worker_pool.join()
     
     print("\n" + "=" * 70)
     print("Training complete!")
