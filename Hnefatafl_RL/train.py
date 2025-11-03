@@ -267,7 +267,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         game_idx: Game index (unused, for pool.map)
     
     Returns:
-        dict with game data
+        dict with game data and timing information
     """
     # Seed random number generators uniquely for each worker
     # Use game_idx combined with process ID and time to ensure uniqueness
@@ -284,11 +284,21 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     from network import BrandubhNet, MoveEncoder
     from mcts import MCTS
     
+    # Timing counters
+    time_network_load = 0.0
+    time_mcts_search = 0.0
+    time_get_state = 0.0
+    time_policy_encoding = 0.0
+    time_move_selection = 0.0
+    time_make_move = 0.0
+    
     # Reconstruct network on CPU and load from file
+    t0 = time.perf_counter()
     network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
     network.load_state_dict(torch.load(network_path, map_location='cpu'))
     network.to('cpu')
     network.eval()
+    time_network_load = time.perf_counter() - t0
     
     # Create MCTS instance
     mcts = MCTS(network, num_simulations=num_simulations, c_puct=c_puct, device='cpu')
@@ -307,16 +317,22 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         temp = temperature if move_count < temperature_threshold else 0.0
         
         # Get state
+        t0 = time.perf_counter()
         state = game.get_state()
+        time_get_state += time.perf_counter() - t0
         
         # Run MCTS to get policy
+        t0 = time.perf_counter()
         visit_probs = mcts.search(game)
+        time_mcts_search += time.perf_counter() - t0
         
         # Convert to policy vector
+        t0 = time.perf_counter()
         policy = np.zeros(1176, dtype=np.float32)
         for move, prob in visit_probs.items():
             idx = MoveEncoder.encode_move(move)
             policy[idx] = prob
+        time_policy_encoding += time.perf_counter() - t0
         
         # Store experience
         states.append(state)
@@ -324,6 +340,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         players.append(current_player)
         
         # Select and make move
+        t0 = time.perf_counter()
         moves = list(visit_probs.keys())
         probs = np.array(list(visit_probs.values()))
         
@@ -335,8 +352,11 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
             probs = probs / probs.sum()
             move_idx = np.random.choice(len(moves), p=probs)
             move = moves[move_idx]
+        time_move_selection += time.perf_counter() - t0
         
+        t0 = time.perf_counter()
         game.make_move(move)
+        time_make_move += time.perf_counter() - t0
         move_count += 1
         
         # Safety check for move limit
@@ -357,7 +377,15 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         'winner': game.winner,  # Can be 0, 1, or None (draw)
         'players': players,
         'num_moves': move_count,
-        'draw_reason': draw_reason  # 'repetition', 'move_limit', or None
+        'draw_reason': draw_reason,  # 'repetition', 'move_limit', or None
+        'timing': {
+            'network_load': time_network_load,
+            'mcts_search': time_mcts_search,
+            'get_state': time_get_state,
+            'policy_encoding': time_policy_encoding,
+            'move_selection': time_move_selection,
+            'make_move': time_make_move
+        }
     }
 
 
@@ -509,6 +537,16 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
     repetition_draws = 0
     move_limit_draws = 0
     
+    # Timing aggregation
+    timing_totals = {
+        'network_load': 0.0,
+        'mcts_search': 0.0,
+        'get_state': 0.0,
+        'policy_encoding': 0.0,
+        'move_selection': 0.0,
+        'make_move': 0.0
+    }
+    
     for game_data in game_results:
         total_moves += game_data['num_moves']
         winner = game_data['winner']
@@ -524,6 +562,11 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
                 repetition_draws += 1
             elif draw_reason == 'move_limit':
                 move_limit_draws += 1
+        
+        # Aggregate timing data
+        if 'timing' in game_data:
+            for key, value in game_data['timing'].items():
+                timing_totals[key] += value
         
         # Add to buffer
         for state, policy, player in zip(game_data['states'], 
@@ -561,6 +604,18 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
     if draws > 0:
         print(f"  Draw breakdown: {repetition_draws} by repetition, {move_limit_draws} by move limit (500+ moves)")
     print(f"Average game length: {total_moves/total_games:.1f} moves")
+    
+    # Print timing breakdown
+    total_time = sum(timing_totals.values())
+    if total_time > 0:
+        print("\nSelf-play timing breakdown:")
+        print(f"  Network loading:   {timing_totals['network_load']:7.1f}s ({100*timing_totals['network_load']/total_time:5.1f}%)")
+        print(f"  MCTS search:       {timing_totals['mcts_search']:7.1f}s ({100*timing_totals['mcts_search']/total_time:5.1f}%)")
+        print(f"  Get state:         {timing_totals['get_state']:7.1f}s ({100*timing_totals['get_state']/total_time:5.1f}%)")
+        print(f"  Policy encoding:   {timing_totals['policy_encoding']:7.1f}s ({100*timing_totals['policy_encoding']/total_time:5.1f}%)")
+        print(f"  Move selection:    {timing_totals['move_selection']:7.1f}s ({100*timing_totals['move_selection']/total_time:5.1f}%)")
+        print(f"  Make move:         {timing_totals['make_move']:7.1f}s ({100*timing_totals['make_move']/total_time:5.1f}%)")
+        print(f"  Total tracked:     {total_time:7.1f}s")
     
     return buffer
 
