@@ -67,6 +67,7 @@ class TrainingConfig:
     # Replay buffer
     replay_buffer_size = 50000        # Maximum samples in replay buffer
     min_buffer_size = 1000            # Minimum samples before training
+    use_data_augmentation = True      # Use symmetry-based data augmentation (8x data)
     
     # Evaluation
     eval_games = 20                   # Games for evaluation
@@ -546,11 +547,11 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
             # Add original sample
             buffer.add(state, policy, value)
             
-            # Optionally add augmented samples (can be memory intensive)
-            # Uncomment to enable data augmentation
-            # augmented = augment_sample(state, policy, value)
-            # for aug_state, aug_policy, aug_value in augmented:
-            #     buffer.add(aug_state, aug_policy, aug_value)
+            # Add augmented samples using board symmetries
+            if config.use_data_augmentation:
+                augmented = augment_sample(state, policy, value)
+                for aug_state, aug_policy, aug_value in augmented:
+                    buffer.add(aug_state, aug_policy, aug_value)
     
     print(f"Generated {len(buffer)} training samples")
     total_games = config.num_games_per_iteration
@@ -1014,6 +1015,7 @@ def train(config: TrainingConfig, resume_from: str = None):
     print(f"Value loss weight: {config.value_loss_weight}")
     print(f"Draw penalties: Attacker={config.draw_penalty_attacker}, Defender={config.draw_penalty_defender}")
     print(f"Replay buffer size: {config.replay_buffer_size}")
+    print(f"Data augmentation: {'Enabled (8x)' if config.use_data_augmentation else 'Disabled'}")
     print()
     
     # Initialize network
@@ -1200,6 +1202,7 @@ if __name__ == "__main__":
     # Replay buffer
     DEFAULT_REPLAY_BUFFER_SIZE = 50000
     DEFAULT_MIN_BUFFER_SIZE = 1000
+    DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
     
     # Learning rate decay and regularization
     DEFAULT_LR_DECAY = 0.95
@@ -1272,6 +1275,10 @@ if __name__ == "__main__":
                        help=f"Maximum replay buffer size (default: {DEFAULT_REPLAY_BUFFER_SIZE})")
     parser.add_argument("--min-buffer-size", type=int, default=DEFAULT_MIN_BUFFER_SIZE,
                        help=f"Minimum buffer size before training (default: {DEFAULT_MIN_BUFFER_SIZE})")
+    parser.add_argument("--use-data-augmentation", action="store_true", default=DEFAULT_USE_DATA_AUGMENTATION,
+                       help=f"Enable symmetry-based data augmentation (default: {DEFAULT_USE_DATA_AUGMENTATION})")
+    parser.add_argument("--no-data-augmentation", action="store_false", dest="use_data_augmentation",
+                       help="Disable data augmentation")
     
     # Evaluation
     parser.add_argument("--eval-games", type=int, default=DEFAULT_EVAL_GAMES,
@@ -1331,6 +1338,7 @@ if __name__ == "__main__":
     # Replay buffer
     config.replay_buffer_size = args.replay_buffer_size
     config.min_buffer_size = args.min_buffer_size
+    config.use_data_augmentation = args.use_data_augmentation
     
     # Evaluation
     config.eval_games = args.eval_games
