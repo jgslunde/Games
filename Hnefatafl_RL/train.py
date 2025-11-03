@@ -60,8 +60,9 @@ class TrainingConfig:
     learning_rate = 0.001             # Initial learning rate
     lr_decay = 0.95                   # Learning rate decay per iteration
     weight_decay = 1e-4               # L2 regularization
-    value_loss_weight = 1.0           # Weight for value loss (policy loss weight is always 1.0)
-    draw_penalty = 0.0                # Penalty for draws (0=neutral, negative=discourage draws)
+    value_loss_weight = 10.0           # Weight for value loss (policy loss weight is always 1.0)
+    draw_penalty_attacker = -0.1      # Draw penalty for attackers
+    draw_penalty_defender = -0.3      # Draw penalty for defenders (more penalizing)
     
     # Replay buffer
     replay_buffer_size = 50000        # Maximum samples in replay buffer
@@ -530,7 +531,11 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
             # Determine value from player's perspective
             if winner is None or (not game_data.get('winner') and draw_reason == 'move_limit'):
                 # Draw (either by repetition or move limit)
-                value = config.draw_penalty
+                # Apply player-specific draw penalty
+                if player == 0:  # Attacker
+                    value = config.draw_penalty_attacker
+                else:  # Defender (player == 1)
+                    value = config.draw_penalty_defender
             elif winner == player:
                 value = 1.0
             elif winner == 1 - player:
@@ -1007,7 +1012,7 @@ def train(config: TrainingConfig, resume_from: str = None):
     print(f"Batch size: {config.batch_size}")
     print(f"Learning rate: {config.learning_rate}")
     print(f"Value loss weight: {config.value_loss_weight}")
-    print(f"Draw penalty: {config.draw_penalty}")
+    print(f"Draw penalties: Attacker={config.draw_penalty_attacker}, Defender={config.draw_penalty_defender}")
     print(f"Replay buffer size: {config.replay_buffer_size}")
     print()
     
@@ -1200,7 +1205,8 @@ if __name__ == "__main__":
     DEFAULT_LR_DECAY = 0.95
     DEFAULT_WEIGHT_DECAY = 1e-4
     DEFAULT_VALUE_LOSS_WEIGHT = 1.0
-    DEFAULT_DRAW_PENALTY = -0.2  # Penalty for draws to encourage decisive play
+    DEFAULT_DRAW_PENALTY_ATTACKER = -0.1  # Penalty for attacker draws
+    DEFAULT_DRAW_PENALTY_DEFENDER = -0.2  # Penalty for defender draws (more penalizing)
     
     # MCTS exploration
     DEFAULT_C_PUCT = 1.4
@@ -1239,8 +1245,10 @@ if __name__ == "__main__":
                        help=f"L2 regularization weight decay (default: {DEFAULT_WEIGHT_DECAY})")
     parser.add_argument("--value-loss-weight", type=float, default=DEFAULT_VALUE_LOSS_WEIGHT,
                        help=f"Weight for value loss relative to policy loss (default: {DEFAULT_VALUE_LOSS_WEIGHT})")
-    parser.add_argument("--draw-penalty", type=float, default=DEFAULT_DRAW_PENALTY,
-                       help=f"Value penalty for draws to discourage them (default: {DEFAULT_DRAW_PENALTY})")
+    parser.add_argument("--draw-penalty-attacker", type=float, default=DEFAULT_DRAW_PENALTY_ATTACKER,
+                       help=f"Value penalty for attacker draws (default: {DEFAULT_DRAW_PENALTY_ATTACKER})")
+    parser.add_argument("--draw-penalty-defender", type=float, default=DEFAULT_DRAW_PENALTY_DEFENDER,
+                       help=f"Value penalty for defender draws (default: {DEFAULT_DRAW_PENALTY_DEFENDER})")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS,
                        help=f"Training epochs per iteration (default: {DEFAULT_EPOCHS})")
     
@@ -1304,7 +1312,8 @@ if __name__ == "__main__":
     config.lr_decay = args.lr_decay
     config.weight_decay = args.weight_decay
     config.value_loss_weight = args.value_loss_weight
-    config.draw_penalty = args.draw_penalty
+    config.draw_penalty_attacker = args.draw_penalty_attacker
+    config.draw_penalty_defender = args.draw_penalty_defender
     config.num_epochs = args.epochs
     
     # Network architecture
