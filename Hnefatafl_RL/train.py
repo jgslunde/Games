@@ -952,34 +952,54 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         cleanup_old = False
     
     try:
-        # Create worker functions with partial, alternating who plays attacker
-        work_items = []
-        for i in range(config.eval_games):
-            new_plays_attacker = (i % 2 == 0)
-            worker_func = partial(
-                _evaluate_networks_worker,
-                temp_new_path,
-                temp_old_path,
-                config.num_res_blocks,
-                config.num_channels,
-                config.num_mcts_simulations,
-                config.c_puct,
-                new_plays_attacker
-            )
-            work_items.append(worker_func)
+        # Create worker function with partial - alternates who plays attacker based on game index
+        # Game indices 0, 2, 4, ... have new network as attacker
+        # Game indices 1, 3, 5, ... have new network as defender
+        # This is handled by using modulo inside the worker function parameters
         
-        # Play games in parallel
+        # Create two partial functions - one for new as attacker, one for new as defender
+        half_games = config.eval_games // 2
+        remainder = config.eval_games % 2
+        
+        worker_func_new_attacker = partial(
+            _evaluate_networks_worker,
+            temp_new_path,
+            temp_old_path,
+            config.num_res_blocks,
+            config.num_channels,
+            config.num_mcts_simulations,
+            config.c_puct,
+            True  # new_plays_attacker
+        )
+        
+        worker_func_new_defender = partial(
+            _evaluate_networks_worker,
+            temp_new_path,
+            temp_old_path,
+            config.num_res_blocks,
+            config.num_channels,
+            config.num_mcts_simulations,
+            config.c_puct,
+            False  # new_plays_attacker
+        )
+        
+        # Play games in parallel using pool.map for true parallelization
         if config.num_workers > 1:
             if pool is not None:
                 # Use provided persistent pool
-                results = [pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
+                attacker_results = pool.map(worker_func_new_attacker, range(half_games + remainder), chunksize=1)
+                defender_results = pool.map(worker_func_new_defender, range(half_games), chunksize=1)
+                results = attacker_results + defender_results
             else:
                 # Create temporary pool (for backward compatibility)
                 with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
-                    results = [temp_pool.apply(func, args=(i,)) for i, func in enumerate(work_items)]
+                    attacker_results = temp_pool.map(worker_func_new_attacker, range(half_games + remainder), chunksize=1)
+                    defender_results = temp_pool.map(worker_func_new_defender, range(half_games), chunksize=1)
+                    results = attacker_results + defender_results
         else:
             # Single-threaded fallback
-            results = [func(i) for i, func in enumerate(work_items)]
+            results = [worker_func_new_attacker(i) for i in range(half_games + remainder)]
+            results += [worker_func_new_defender(i) for i in range(half_games)]
     finally:
         # Clean up temporary files
         if cleanup_new:
