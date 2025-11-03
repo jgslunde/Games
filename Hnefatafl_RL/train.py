@@ -907,9 +907,9 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     
     # Create agents on CPU
     new_agent = BrandubhAgent(new_network, num_simulations=num_simulations,
-                             c_puct=c_puct, device='cpu')
+                             c_puct=c_puct, device='cpu', add_dirichlet_noise=True)
     old_agent = BrandubhAgent(old_network, num_simulations=num_simulations,
-                             c_puct=c_puct, device='cpu')
+                             c_puct=c_puct, device='cpu', add_dirichlet_noise=True)
     
     # Play game
     if new_plays_attacker:

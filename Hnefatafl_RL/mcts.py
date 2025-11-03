@@ -175,7 +175,8 @@ class MCTS:
     """
     
     def __init__(self, network, num_simulations: int = 100, c_puct: float = 1.4, 
-                 device: str = 'cpu'):
+                 device: str = 'cpu', dirichlet_alpha: float = 0.3, dirichlet_epsilon: float = 0.25,
+                 add_dirichlet_noise: bool = False):
         """
         Initialize MCTS.
         
@@ -184,6 +185,9 @@ class MCTS:
             num_simulations: number of MCTS simulations per move
             c_puct: exploration constant
             device: 'cpu' or 'cuda'
+            dirichlet_alpha: concentration parameter for Dirichlet noise
+            dirichlet_epsilon: weight of Dirichlet noise (0.25 = 25% noise, 75% network prior)
+            add_dirichlet_noise: whether to add Dirichlet noise to root node
         """
         self.network = network
         self.network.eval()
@@ -191,6 +195,9 @@ class MCTS:
         self.c_puct = c_puct
         self.device = device
         self.network.to(device)
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
+        self.add_dirichlet_noise = add_dirichlet_noise
         
         # Root node from last search (for accessing statistics)
         self.root = None
@@ -235,7 +242,7 @@ class MCTS:
         self.root = root
         
         # Run simulations
-        for _ in range(self.num_simulations):
+        for sim_idx in range(self.num_simulations):
             node = root
             search_path = [node]
             
@@ -267,6 +274,10 @@ class MCTS:
                 t0 = time.perf_counter()
                 node.expand(policy_probs)
                 self.timing_stats['expansion'] += time.perf_counter() - t0
+                
+                # Add Dirichlet noise to root node after first expansion
+                if sim_idx == 0 and node is root and self.add_dirichlet_noise:
+                    self._add_dirichlet_noise_to_node(root)
             
             # Backup: propagate value up the tree
             t0 = time.perf_counter()
@@ -323,6 +334,28 @@ class MCTS:
         """Compute softmax values for array x."""
         exp_x = np.exp(x - np.max(x))
         return exp_x / exp_x.sum()
+    
+    def _add_dirichlet_noise_to_node(self, node: MCTSNode):
+        """
+        Add Dirichlet noise to the priors of a node's children.
+        This adds exploration at the root node during evaluation.
+        
+        Args:
+            node: node to add noise to (typically the root)
+        """
+        if not node.children:
+            return
+        
+        actions = list(node.children.keys())
+        num_actions = len(actions)
+        
+        # Generate Dirichlet noise
+        noise = np.random.dirichlet([self.dirichlet_alpha] * num_actions)
+        
+        # Mix noise with priors: P = (1-ε)*P_prior + ε*noise
+        for action, noise_value in zip(actions, noise):
+            child = node.children[action]
+            child.prior = (1 - self.dirichlet_epsilon) * child.prior + self.dirichlet_epsilon * noise_value
     
     def select_move(self, game: Brandubh, temperature: float = 1.0) -> Tuple[int, int, int, int]:
         """

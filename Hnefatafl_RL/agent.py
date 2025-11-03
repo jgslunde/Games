@@ -17,7 +17,9 @@ class BrandubhAgent:
     """
     
     def __init__(self, network: BrandubhNet = None, num_simulations: int = 100, 
-                 c_puct: float = 1.4, device: str = 'cpu'):
+                 c_puct: float = 1.4, device: str = 'cpu', 
+                 add_dirichlet_noise: bool = False, dirichlet_alpha: float = 0.3, 
+                 dirichlet_epsilon: float = 0.25):
         """
         Initialize agent.
         
@@ -26,12 +28,16 @@ class BrandubhAgent:
             num_simulations: number of MCTS simulations per move
             c_puct: exploration constant
             device: 'cpu' or 'cuda'
+            add_dirichlet_noise: whether to add Dirichlet noise to root (for evaluation diversity)
+            dirichlet_alpha: concentration parameter for Dirichlet noise
+            dirichlet_epsilon: weight of Dirichlet noise
         """
         if network is None:
             network = BrandubhNet()
         
         self.network = network
-        self.mcts = MCTS(network, num_simulations, c_puct, device)
+        self.mcts = MCTS(network, num_simulations, c_puct, device, 
+                        dirichlet_alpha, dirichlet_epsilon, add_dirichlet_noise)
         self.device = device
     
     def select_move(self, game: Brandubh, temperature: float = 0.0) -> Tuple[int, int, int, int]:
