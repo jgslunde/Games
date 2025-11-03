@@ -478,14 +478,7 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
         temp_file.close()
         # Save as checkpoint format (workers expect 'model_state_dict' key)
         # Strip _orig_mod. prefix if network is compiled (torch.compile adds this)
-        state_dict = agent.network.state_dict()
-        cleaned_state_dict = {}
-        for key, value in state_dict.items():
-            if key.startswith('_orig_mod.'):
-                cleaned_state_dict[key[10:]] = value  # Remove '_orig_mod.' prefix
-            else:
-                cleaned_state_dict[key] = value
-        checkpoint = {'model_state_dict': cleaned_state_dict}
+        checkpoint = {'model_state_dict': clean_state_dict(agent.network.state_dict())}
         torch.save(checkpoint, temp_network_path)
         cleanup_temp_file = True
     else:
@@ -805,14 +798,7 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
         temp_file.close()
         # Save as checkpoint format (workers expect 'model_state_dict' key)
         # Strip _orig_mod. prefix if network is compiled (torch.compile adds this)
-        state_dict = network.state_dict()
-        cleaned_state_dict = {}
-        for key, value in state_dict.items():
-            if key.startswith('_orig_mod.'):
-                cleaned_state_dict[key[10:]] = value  # Remove '_orig_mod.' prefix
-            else:
-                cleaned_state_dict[key] = value
-        checkpoint = {'model_state_dict': cleaned_state_dict}
+        checkpoint = {'model_state_dict': clean_state_dict(network.state_dict())}
         torch.save(checkpoint, temp_network_path)
         cleanup_temp_file = True
     else:
@@ -979,14 +965,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         temp_file.close()
         # Save as checkpoint format (workers expect 'model_state_dict' key)
         # Strip _orig_mod. prefix if network is compiled (torch.compile adds this)
-        state_dict = new_network.state_dict()
-        cleaned_state_dict = {}
-        for key, value in state_dict.items():
-            if key.startswith('_orig_mod.'):
-                cleaned_state_dict[key[10:]] = value  # Remove '_orig_mod.' prefix
-            else:
-                cleaned_state_dict[key] = value
-        checkpoint = {'model_state_dict': cleaned_state_dict}
+        checkpoint = {'model_state_dict': clean_state_dict(new_network.state_dict())}
         torch.save(checkpoint, temp_new_path)
         cleanup_new = True
     else:
@@ -998,14 +977,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         temp_file.close()
         # Save as checkpoint format (workers expect 'model_state_dict' key)
         # Strip _orig_mod. prefix if network is compiled (torch.compile adds this)
-        state_dict = old_network.state_dict()
-        cleaned_state_dict = {}
-        for key, value in state_dict.items():
-            if key.startswith('_orig_mod.'):
-                cleaned_state_dict[key[10:]] = value  # Remove '_orig_mod.' prefix
-            else:
-                cleaned_state_dict[key] = value
-        checkpoint = {'model_state_dict': cleaned_state_dict}
+        checkpoint = {'model_state_dict': clean_state_dict(old_network.state_dict())}
         torch.save(checkpoint, temp_old_path)
         cleanup_old = True
     else:
@@ -1089,6 +1061,29 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
 # =============================================================================
 # CHECKPOINTING
 # =============================================================================
+
+def clean_state_dict(state_dict):
+    """
+    Remove _orig_mod. prefix from state dict keys if present.
+    
+    torch.compile() wraps models and adds _orig_mod. prefix to all parameters.
+    This function strips that prefix to make the state dict compatible with
+    uncompiled models.
+    
+    Args:
+        state_dict: State dict possibly containing _orig_mod. prefixes
+        
+    Returns:
+        Cleaned state dict without _orig_mod. prefixes
+    """
+    cleaned = {}
+    for key, value in state_dict.items():
+        if key.startswith('_orig_mod.'):
+            cleaned[key[10:]] = value  # Remove '_orig_mod.' prefix (10 chars)
+        else:
+            cleaned[key] = value
+    return cleaned
+
 
 def save_checkpoint(network: BrandubhNet, optimizer: optim.Optimizer,
                    iteration: int, config: TrainingConfig, 
@@ -1257,7 +1252,8 @@ def train(config: TrainingConfig, resume_from: str = None):
         best_network.load_state_dict(torch.load(best_model_path, map_location=config.device))
     else:
         # Starting fresh or no best model exists yet
-        best_network.load_state_dict(network.state_dict())
+        # Clean state dict to remove _orig_mod. prefix from compiled network
+        best_network.load_state_dict(clean_state_dict(network.state_dict()))
     
     # Initialize replay buffer
     replay_buffer = ReplayBuffer(config.replay_buffer_size)
@@ -1373,7 +1369,8 @@ def train(config: TrainingConfig, resume_from: str = None):
                     print(f"ELO gain: {elo_gain:+.1f} (new network vs previous best)")
                     # Update cumulative ELO by adding this gain
                     cumulative_elo += elo_gain
-                    best_network.load_state_dict(network.state_dict())
+                    # Clean state dict to remove _orig_mod. prefix from compiled network
+                    best_network.load_state_dict(clean_state_dict(network.state_dict()))
                     # Save the new best model immediately
                     save_checkpoint(best_network, optimizer, iteration + 1, config,
                                   training_history, "best_model.pth")
