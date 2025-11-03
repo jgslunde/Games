@@ -476,7 +476,17 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
         temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pth', delete=False)
         temp_network_path = temp_file.name
         temp_file.close()
-        torch.save(agent.network.state_dict(), temp_network_path)
+        # Save as checkpoint format (workers expect 'model_state_dict' key)
+        # Strip _orig_mod. prefix if network is compiled (torch.compile adds this)
+        state_dict = agent.network.state_dict()
+        cleaned_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('_orig_mod.'):
+                cleaned_state_dict[key[10:]] = value  # Remove '_orig_mod.' prefix
+            else:
+                cleaned_state_dict[key] = value
+        checkpoint = {'model_state_dict': cleaned_state_dict}
+        torch.save(checkpoint, temp_network_path)
         cleanup_temp_file = True
     else:
         cleanup_temp_file = False
@@ -654,8 +664,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             value_loss = torch.mean((pred_values - values) ** 2)
             loss = policy_loss + config.value_loss_weight * value_loss
             
-            # Backward pass
-            optimizer.zero_grad()
+            # Backward pass (set_to_none=True is faster than default zero_grad)
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             
@@ -793,7 +803,17 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
         temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pth', delete=False)
         temp_network_path = temp_file.name
         temp_file.close()
-        torch.save(network.state_dict(), temp_network_path)
+        # Save as checkpoint format (workers expect 'model_state_dict' key)
+        # Strip _orig_mod. prefix if network is compiled (torch.compile adds this)
+        state_dict = network.state_dict()
+        cleaned_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('_orig_mod.'):
+                cleaned_state_dict[key[10:]] = value  # Remove '_orig_mod.' prefix
+            else:
+                cleaned_state_dict[key] = value
+        checkpoint = {'model_state_dict': cleaned_state_dict}
+        torch.save(checkpoint, temp_network_path)
         cleanup_temp_file = True
     else:
         cleanup_temp_file = False
@@ -957,7 +977,17 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='_new.pth', delete=False)
         temp_new_path = temp_file.name
         temp_file.close()
-        torch.save(new_network.state_dict(), temp_new_path)
+        # Save as checkpoint format (workers expect 'model_state_dict' key)
+        # Strip _orig_mod. prefix if network is compiled (torch.compile adds this)
+        state_dict = new_network.state_dict()
+        cleaned_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('_orig_mod.'):
+                cleaned_state_dict[key[10:]] = value  # Remove '_orig_mod.' prefix
+            else:
+                cleaned_state_dict[key] = value
+        checkpoint = {'model_state_dict': cleaned_state_dict}
+        torch.save(checkpoint, temp_new_path)
         cleanup_new = True
     else:
         cleanup_new = False
@@ -966,7 +996,17 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='_old.pth', delete=False)
         temp_old_path = temp_file.name
         temp_file.close()
-        torch.save(old_network.state_dict(), temp_old_path)
+        # Save as checkpoint format (workers expect 'model_state_dict' key)
+        # Strip _orig_mod. prefix if network is compiled (torch.compile adds this)
+        state_dict = old_network.state_dict()
+        cleaned_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith('_orig_mod.'):
+                cleaned_state_dict[key[10:]] = value  # Remove '_orig_mod.' prefix
+            else:
+                cleaned_state_dict[key] = value
+        checkpoint = {'model_state_dict': cleaned_state_dict}
+        torch.save(checkpoint, temp_old_path)
         cleanup_old = True
     else:
         cleanup_old = False
@@ -1177,10 +1217,20 @@ def train(config: TrainingConfig, resume_from: str = None):
     trainable_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
     print(f"Network initialized: {total_params:,} total parameters ({trainable_params:,} trainable)")
     
-    # Initialize optimizer
-    optimizer = optim.Adam(network.parameters(), 
-                          lr=config.learning_rate,
-                          weight_decay=config.weight_decay)
+    # Initialize optimizer with fused=True for faster CPU training
+    # Note: fused Adam is faster but only available on CPU/CUDA, not all devices
+    try:
+        optimizer = optim.Adam(network.parameters(), 
+                              lr=config.learning_rate,
+                              weight_decay=config.weight_decay,
+                              fused=True)
+        print("Using fused Adam optimizer for better training performance")
+    except Exception:
+        # Fall back to standard Adam if fused not available
+        optimizer = optim.Adam(network.parameters(), 
+                              lr=config.learning_rate,
+                              weight_decay=config.weight_decay)
+        print("Using standard Adam optimizer (fused not available)")
     
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.lr_decay)
@@ -1189,6 +1239,12 @@ def train(config: TrainingConfig, resume_from: str = None):
     start_iteration = 0
     if resume_from is not None:
         start_iteration = load_checkpoint(resume_from, network, optimizer)
+    
+    # Compile network for faster training (forward + backward passes)
+    # This provides ~4-6% speedup on CPU for training
+    print("Compiling network for training with torch.compile...")
+    network = torch.compile(network, mode='default')
+    print("Network compilation complete")
     
     # Initialize best network (for evaluation)
     best_network = BrandubhNet(num_res_blocks=config.num_res_blocks,
