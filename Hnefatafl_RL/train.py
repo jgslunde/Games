@@ -1181,7 +1181,15 @@ def train(config: TrainingConfig, resume_from: str = None):
     # Initialize best network (for evaluation)
     best_network = BrandubhNet(num_res_blocks=config.num_res_blocks,
                               num_channels=config.num_channels).to(config.device)
-    best_network.load_state_dict(network.state_dict())
+    
+    # Load best network from best_model.pth if resuming and it exists, otherwise copy current network
+    best_model_path = os.path.join(config.checkpoint_dir, 'best_model.pth')
+    if resume_from is not None and os.path.exists(best_model_path):
+        print(f"Loading best network from {best_model_path}")
+        best_network.load_state_dict(torch.load(best_model_path, map_location=config.device))
+    else:
+        # Starting fresh or no best model exists yet
+        best_network.load_state_dict(network.state_dict())
     
     # Initialize replay buffer
     replay_buffer = ReplayBuffer(config.replay_buffer_size)
@@ -1298,6 +1306,9 @@ def train(config: TrainingConfig, resume_from: str = None):
                     # Update cumulative ELO by adding this gain
                     cumulative_elo += elo_gain
                     best_network.load_state_dict(network.state_dict())
+                    # Save the new best model immediately
+                    save_checkpoint(best_network, optimizer, iteration + 1, config,
+                                  training_history, "best_model.pth")
                 else:
                     print(f"New network wins {100*win_rate:.1f}% - keeping old network")
                     print(f"ELO difference: {elo_gain:+.1f} (new network vs previous best, not applied)")
@@ -1314,12 +1325,10 @@ def train(config: TrainingConfig, resume_from: str = None):
             current_lr = optimizer.param_groups[0]['lr']
             print(f"\nLearning rate: {current_lr:.6f}")
             
-            # 6. Save checkpoint
+            # 6. Save checkpoint (only save the current network checkpoint, not best)
             if (iteration + 1) % config.save_frequency == 0:
                 save_checkpoint(network, optimizer, iteration + 1, config, 
                               training_history, f"checkpoint_iter_{iteration + 1}.pth")
-                save_checkpoint(best_network, optimizer, iteration + 1, config,
-                              training_history, "best_model.pth")
             
             # 7. Save training history
             history_path = os.path.join(config.checkpoint_dir, "training_history.json")
