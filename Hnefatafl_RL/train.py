@@ -1219,6 +1219,7 @@ if __name__ == "__main__":
     
     # Checkpointing
     DEFAULT_SAVE_FREQUENCY = 5
+    DEFAULT_CHECKPOINT_DIR = "checkpoints"
     
     # =============================================================================
     # COMMAND-LINE ARGUMENT PARSER
@@ -1293,6 +1294,8 @@ if __name__ == "__main__":
     # Checkpointing
     parser.add_argument("--save-frequency", type=int, default=DEFAULT_SAVE_FREQUENCY,
                        help=f"Save checkpoint every N iterations (default: {DEFAULT_SAVE_FREQUENCY})")
+    parser.add_argument("--checkpoint-dir", type=str, default=DEFAULT_CHECKPOINT_DIR,
+                       help=f"Directory for saving checkpoints (default: {DEFAULT_CHECKPOINT_DIR})")
     parser.add_argument("--resume", type=str, default=DEFAULT_RESUME,
                        help="Resume from checkpoint file")
     
@@ -1343,6 +1346,7 @@ if __name__ == "__main__":
     
     # Checkpointing
     config.save_frequency = args.save_frequency
+    config.checkpoint_dir = args.checkpoint_dir
     
     # Run training
     train(config, resume_from=args.resume)
