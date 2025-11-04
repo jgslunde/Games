@@ -57,6 +57,7 @@ class TrainingConfig:
     # Training
     batch_size = 32                   # Training batch size
     num_epochs = 10                   # Epochs per iteration
+    batches_per_epoch = 100           # Number of batches to sample per epoch (limits training data)
     learning_rate = 0.001             # Initial learning rate
     lr_decay = 0.95                   # Learning rate decay per iteration
     weight_decay = 1e-4               # L2 regularization
@@ -646,7 +647,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     total_loss = 0.0
     num_batches = 0
     
-    samples_per_epoch = min(len(buffer), config.batch_size * 100)
+    samples_per_epoch = min(len(buffer), config.batch_size * config.batches_per_epoch)
     batches_per_epoch = samples_per_epoch // config.batch_size
     
     for epoch in range(config.num_epochs):
@@ -1200,10 +1201,37 @@ def train(config: TrainingConfig, resume_from: str = None):
     print("\n--- Training Parameters ---")
     print(f"Batch size: {config.batch_size}")
     print(f"Epochs per iteration: {config.num_epochs}")
+    print(f"Batches per epoch: {config.batches_per_epoch}")
     print(f"Learning rate: {config.learning_rate}")
     print(f"LR decay per iteration: {config.lr_decay}")
     print(f"Weight decay (L2): {config.weight_decay}")
     print(f"Value loss weight: {config.value_loss_weight}")
+    
+    # Calculate training data statistics
+    print("\n--- Training Data Usage ---")
+    # Estimate moves generated per iteration (rough average: ~50 moves per game)
+    avg_moves_per_game = 50
+    if config.use_data_augmentation:
+        moves_generated_per_iter = config.num_games_per_iteration * avg_moves_per_game * 8  # 8x from symmetries
+    else:
+        moves_generated_per_iter = config.num_games_per_iteration * avg_moves_per_game
+    
+    # Calculate training samples used per iteration
+    samples_per_epoch = config.batch_size * config.batches_per_epoch
+    total_training_samples = samples_per_epoch * config.num_epochs
+    
+    print(f"New positions generated per iteration: ~{moves_generated_per_iter:,}")
+    print(f"  ({config.num_games_per_iteration} games × ~{avg_moves_per_game} moves" + 
+          (f" × 8 augmentations)" if config.use_data_augmentation else ")"))
+    print(f"Positions used in training per iteration: {total_training_samples:,}")
+    print(f"  ({config.batches_per_epoch} batches × {config.batch_size} samples × {config.num_epochs} epochs)")
+    
+    training_usage_ratio = total_training_samples / moves_generated_per_iter
+    print(f"Training usage ratio: {training_usage_ratio:.2f}x")
+    if training_usage_ratio > 1:
+        print(f"  → Each new position trained on ~{training_usage_ratio:.1f} times on average")
+    else:
+        print(f"  → Only ~{training_usage_ratio*100:.0f}% of new positions used in training")
     
     # Replay buffer
     print("\n--- Replay Buffer ---")
@@ -1506,6 +1534,7 @@ if __name__ == "__main__":
     DEFAULT_BATCH_SIZE = 256
     DEFAULT_LEARNING_RATE = 0.001
     DEFAULT_EPOCHS = 20
+    DEFAULT_BATCHES_PER_EPOCH = 100
     DEFAULT_EVAL_VS_RANDOM = 64
     DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
     DEFAULT_DEVICE = None  # None = auto-detect (cuda if available, else cpu)
@@ -1575,6 +1604,8 @@ if __name__ == "__main__":
                        help=f"Value penalty for defender draws (default: {DEFAULT_DRAW_PENALTY_DEFENDER})")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS,
                        help=f"Training epochs per iteration (default: {DEFAULT_EPOCHS})")
+    parser.add_argument("--batches-per-epoch", type=int, default=DEFAULT_BATCHES_PER_EPOCH,
+                       help=f"Number of batches sampled per epoch (default: {DEFAULT_BATCHES_PER_EPOCH})")
     
     # Network architecture
     parser.add_argument("--res-blocks", type=int, default=DEFAULT_RES_BLOCKS,
@@ -1645,6 +1676,7 @@ if __name__ == "__main__":
     config.draw_penalty_attacker = args.draw_penalty_attacker
     config.draw_penalty_defender = args.draw_penalty_defender
     config.num_epochs = args.epochs
+    config.batches_per_epoch = args.batches_per_epoch
     
     # Network architecture
     config.num_res_blocks = args.res_blocks
