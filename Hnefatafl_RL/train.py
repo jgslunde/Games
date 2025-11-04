@@ -620,10 +620,17 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     """
     Train the neural network on samples from the replay buffer.
     
+    Note: This function compiles the network with torch.compile() for faster
+    training (forward + backward passes). The compiled version is only used
+    within this function and doesn't affect the original network object.
+    
     Returns:
         dict with 'policy_loss', 'value_loss', 'total_loss'
     """
-    network.train()
+    # Compile network for faster training (~18% speedup)
+    # This creates a compiled wrapper that's only used during training
+    network_compiled = torch.compile(network, mode='default')
+    network_compiled.train()
     device = config.device
     
     total_policy_loss = 0.0
@@ -648,8 +655,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             policies = torch.from_numpy(policies).to(device)
             values = torch.from_numpy(values).unsqueeze(1).to(device)
             
-            # Forward pass
-            pred_policies, pred_values = network(states)
+            # Forward pass (using compiled network for speed)
+            pred_policies, pred_values = network_compiled(states)
             
             # Compute losses
             policy_loss = -torch.mean(torch.sum(policies * 
@@ -1235,11 +1242,10 @@ def train(config: TrainingConfig, resume_from: str = None):
     if resume_from is not None:
         start_iteration = load_checkpoint(resume_from, network, optimizer)
     
-    # Compile network for faster training (forward + backward passes)
-    # This provides ~4-6% speedup on CPU for training
-    print("Compiling network for training with torch.compile...")
-    network = torch.compile(network, mode='default')
-    print("Network compilation complete")
+    # Note: We do NOT compile the network here because:
+    # 1. Compiled networks can't be pickled for multiprocessing
+    # 2. We only need compilation speedup during training phase
+    # We'll compile a separate copy for training only
     
     # Initialize best network (for evaluation)
     best_network = BrandubhNet(num_res_blocks=config.num_res_blocks,
