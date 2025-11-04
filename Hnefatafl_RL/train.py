@@ -279,6 +279,13 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
+    # Add random delay to stagger torch.compile cache access across workers
+    # With many workers, this prevents "Failed to load artifact" warnings from cache contention
+    # Delay scales with game_idx to spread workers over ~10 seconds
+    max_stagger_time = 10.0  # seconds
+    delay = (game_idx % 100) * (max_stagger_time / 100) + np.random.uniform(0, 0.1)
+    time.sleep(delay)
+    
     # Import inside worker to avoid issues with multiprocessing
     from brandubh import Brandubh
     from network import BrandubhNet, MoveEncoder
@@ -290,7 +297,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     network.load_state_dict(checkpoint['model_state_dict'])
     network.to('cpu')
     network.eval()
-    # Optimize for CPU inference
+    # Optimize for CPU inference with compilation for 2.5-2.75x speedup
+    # Worker startup is staggered to prevent cache contention warnings
     network = network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     # Create MCTS instance
@@ -730,6 +738,12 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
+    # Add random delay to stagger torch.compile cache access across workers
+    # With many workers, this prevents "Failed to load artifact" warnings from cache contention
+    # Compile 4 times a second:
+    delay = game_idx/4.0
+    time.sleep(delay)
+    
     # Import inside worker
     from network import BrandubhNet
     from agent import BrandubhAgent, RandomAgent, play_game
@@ -740,7 +754,8 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     network.load_state_dict(checkpoint['model_state_dict'])
     network.to('cpu')
     network.eval()
-    # Optimize for CPU inference
+    # Optimize for CPU inference with compilation for 2.5-2.75x speedup
+    # Worker startup is staggered to prevent cache contention warnings
     network = network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     # Create agents on CPU
@@ -909,6 +924,13 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
+    # Add random delay to stagger torch.compile cache access across workers
+    # With many workers, this prevents "Failed to load artifact" warnings from cache contention
+    # Delay scales with game_idx to spread workers over ~10 seconds
+    max_stagger_time = 10.0  # seconds
+    delay = (game_idx % 100) * (max_stagger_time / 100) + np.random.uniform(0, 0.1)
+    time.sleep(delay)
+    
     # Import inside worker
     from network import BrandubhNet
     from agent import BrandubhAgent, play_game
@@ -919,7 +941,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     new_network.load_state_dict(checkpoint['model_state_dict'])
     new_network.to('cpu')
     new_network.eval()
-    # Optimize for CPU inference
+    # Optimize for CPU inference with compilation for 2.5-2.75x speedup
+    # Worker startup is staggered to prevent cache contention warnings
     new_network = new_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     old_network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
@@ -927,7 +950,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     old_network.load_state_dict(checkpoint['model_state_dict'])
     old_network.to('cpu')
     old_network.eval()
-    # Optimize for CPU inference
+    # Optimize for CPU inference with compilation for 2.5-2.75x speedup
+    # Worker startup is staggered to prevent cache contention warnings
     old_network = old_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     # Create agents on CPU
