@@ -42,7 +42,9 @@ class TrainingConfig:
     # Self-play
     num_iterations = 100              # Number of training iterations
     num_games_per_iteration = 100     # Self-play games per iteration
-    num_mcts_simulations = 100        # MCTS simulations per move
+    num_mcts_simulations = 100        # MCTS simulations per move (deprecated, use attacker/defender specific)
+    num_mcts_sims_attacker = 100      # MCTS simulations for attacker in self-play
+    num_mcts_sims_defender = 100      # MCTS simulations for defender in self-play
     c_puct = 1.4                      # MCTS exploration constant
     num_workers = mp.cpu_count()      # Number of parallel workers (default: all CPUs)
     
@@ -74,6 +76,8 @@ class TrainingConfig:
     eval_games = 20                   # Games for evaluation
     eval_win_rate = 0.55              # Win rate threshold to replace best model
     eval_frequency = 5                # Evaluate every N iterations
+    eval_mcts_sims_attacker = 100     # MCTS simulations for attacker in evaluation
+    eval_mcts_sims_defender = 100     # MCTS simulations for defender in evaluation
     
     # Random baseline evaluation
     eval_vs_random_games = 10         # Games vs random (per color)
@@ -252,7 +256,7 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float) -> List[
 # =============================================================================
 
 def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, 
-                                num_simulations, c_puct, temperature, temperature_threshold, game_idx):
+                                num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_threshold, game_idx):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -261,7 +265,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         network_path: Path to saved network weights file
         num_res_blocks: Number of residual blocks in network
         num_channels: Number of channels in network
-        num_simulations: MCTS simulations per move
+        num_sims_attacker: MCTS simulations per move for attacker
+        num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         temperature: Sampling temperature
         temperature_threshold: Move number threshold for temperature
@@ -302,9 +307,11 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     # Worker startup is staggered to prevent cache contention warnings
     network = network.optimize_for_inference(use_compile=True, compile_mode='default')
     
-    # Create MCTS instance
-    mcts = MCTS(network, num_simulations=num_simulations, c_puct=c_puct, device='cpu')
-    mcts.reset_timing_stats()
+    # Create MCTS instances for each player (with different simulation counts)
+    mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu')
+    mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu')
+    mcts_attacker.reset_timing_stats()
+    mcts_defender.reset_timing_stats()
     
     # Play game
     game = Brandubh()
@@ -315,6 +322,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     
     while not game.game_over:
         current_player = game.current_player
+        
+        # Select MCTS based on current player
+        mcts = mcts_attacker if current_player == 0 else mcts_defender
         
         # Determine temperature based on move count or king position
         if temperature_threshold == "king":
@@ -369,6 +379,19 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         # Hit move limit without natural game end
         draw_reason = 'move_limit'
     
+    # Combine timing stats from both MCTS instances
+    timing_attacker = mcts_attacker.get_timing_stats()
+    timing_defender = mcts_defender.get_timing_stats()
+    combined_timing = {
+        'total_time': timing_attacker['total_time'] + timing_defender['total_time'],
+        'num_searches': timing_attacker['num_searches'] + timing_defender['num_searches'],
+        'avg_time_per_search': (
+            (timing_attacker['total_time'] + timing_defender['total_time']) / 
+            (timing_attacker['num_searches'] + timing_defender['num_searches'])
+            if (timing_attacker['num_searches'] + timing_defender['num_searches']) > 0 else 0
+        )
+    }
+    
     return {
         'states': states,
         'policies': policies,
@@ -376,7 +399,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         'players': players,
         'num_moves': move_count,
         'draw_reason': draw_reason,  # 'repetition', 'move_limit', or None
-        'timing': mcts.get_timing_stats()
+        'timing': combined_timing
     }
 
 
@@ -500,7 +523,8 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
             temp_network_path,
             config.num_res_blocks,
             config.num_channels,
-            config.num_mcts_simulations,
+            config.num_mcts_sims_attacker,
+            config.num_mcts_sims_defender,
             config.c_puct,
             config.temperature,
             config.temperature_threshold
@@ -713,7 +737,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 # =============================================================================
 
 def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
-                                num_simulations, c_puct, nn_plays_attacker, game_idx):
+                                num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -722,7 +746,8 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
         network_path: Path to saved network weights file
         num_res_blocks: Number of residual blocks
         num_channels: Number of channels
-        num_simulations: MCTS simulations per move
+        num_sims_attacker: MCTS simulations per move for attacker
+        num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         nn_plays_attacker: Whether NN plays as attacker
         game_idx: Game index (unused, for pool.map)
@@ -758,6 +783,9 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     # Optimize for CPU inference with compilation for 2.5-2.75x speedup
     # Worker startup is staggered to prevent cache contention warnings
     network = network.optimize_for_inference(use_compile=True, compile_mode='default')
+    
+    # Determine which simulations to use based on NN's role
+    num_simulations = num_sims_attacker if nn_plays_attacker else num_sims_defender
     
     # Create agents on CPU
     nn_agent = BrandubhAgent(network, num_simulations=num_simulations,
@@ -834,7 +862,8 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             temp_network_path,
             config.num_res_blocks,
             config.num_channels,
-            config.num_mcts_simulations,
+            config.eval_mcts_sims_attacker,
+            config.eval_mcts_sims_defender,
             config.c_puct,
             True  # nn_plays_attacker
         )
@@ -844,7 +873,8 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             temp_network_path,
             config.num_res_blocks,
             config.num_channels,
-            config.num_mcts_simulations,
+            config.eval_mcts_sims_attacker,
+            config.eval_mcts_sims_defender,
             config.c_puct,
             False  # nn_plays_attacker
         )
@@ -897,7 +927,7 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
 
 
 def _evaluate_networks_worker(new_network_path, old_network_path,
-                             num_res_blocks, num_channels, num_simulations, c_puct,
+                             num_res_blocks, num_channels, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker, game_idx):
     """
     Worker function for parallel network evaluation.
@@ -908,7 +938,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         old_network_path: Path to saved old network weights file
         num_res_blocks: Number of residual blocks
         num_channels: Number of channels
-        num_simulations: MCTS simulations per move
+        num_sims_attacker: MCTS simulations per move for attacker
+        num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         new_plays_attacker: Whether new network plays as attacker
         game_idx: Game index (unused, for pool.map)
@@ -955,10 +986,15 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Worker startup is staggered to prevent cache contention warnings
     old_network = old_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
+    # Determine simulations based on roles
+    # Both agents use role-appropriate simulation counts
+    new_sims = num_sims_attacker if new_plays_attacker else num_sims_defender
+    old_sims = num_sims_defender if new_plays_attacker else num_sims_attacker
+    
     # Create agents on CPU
-    new_agent = BrandubhAgent(new_network, num_simulations=num_simulations,
+    new_agent = BrandubhAgent(new_network, num_simulations=new_sims,
                              c_puct=c_puct, device='cpu', add_dirichlet_noise=True)
-    old_agent = BrandubhAgent(old_network, num_simulations=num_simulations,
+    old_agent = BrandubhAgent(old_network, num_simulations=old_sims,
                              c_puct=c_puct, device='cpu', add_dirichlet_noise=True)
     
     # Play game
@@ -1031,7 +1067,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temp_old_path,
             config.num_res_blocks,
             config.num_channels,
-            config.num_mcts_simulations,
+            config.eval_mcts_sims_attacker,
+            config.eval_mcts_sims_defender,
             config.c_puct,
             True  # new_plays_attacker
         )
@@ -1042,7 +1079,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temp_old_path,
             config.num_res_blocks,
             config.num_channels,
-            config.num_mcts_simulations,
+            config.eval_mcts_sims_attacker,
+            config.eval_mcts_sims_defender,
             config.c_puct,
             False  # new_plays_attacker
         )
@@ -1189,7 +1227,12 @@ def train(config: TrainingConfig, resume_from: str = None):
     
     # MCTS parameters
     print("\n--- MCTS Parameters ---")
-    print(f"Simulations per move: {config.num_mcts_simulations}")
+    print("Self-play simulations:")
+    print(f"  Attacker: {config.num_mcts_sims_attacker}")
+    print(f"  Defender: {config.num_mcts_sims_defender}")
+    print("Evaluation simulations:")
+    print(f"  Attacker: {config.eval_mcts_sims_attacker}")
+    print(f"  Defender: {config.eval_mcts_sims_defender}")
     print(f"Exploration constant (c_puct): {config.c_puct}")
     print(f"Temperature: {config.temperature}")
     if config.temperature_threshold == "king":
@@ -1530,7 +1573,11 @@ if __name__ == "__main__":
     
     DEFAULT_ITERATIONS = 1000
     DEFAULT_GAMES = 512
-    DEFAULT_SIMULATIONS = 100
+    DEFAULT_SIMULATIONS = 100  # Deprecated, use role-specific defaults
+    DEFAULT_SIMS_ATTACKER_SELFPLAY = 100
+    DEFAULT_SIMS_DEFENDER_SELFPLAY = 100
+    DEFAULT_SIMS_ATTACKER_EVAL = 100
+    DEFAULT_SIMS_DEFENDER_EVAL = 100
     DEFAULT_BATCH_SIZE = 256
     DEFAULT_LEARNING_RATE = 0.001
     DEFAULT_EPOCHS = 20
@@ -1585,7 +1632,15 @@ if __name__ == "__main__":
     parser.add_argument("--games", type=int, default=DEFAULT_GAMES,
                        help=f"Self-play games per iteration (default: {DEFAULT_GAMES})")
     parser.add_argument("--simulations", type=int, default=DEFAULT_SIMULATIONS,
-                       help=f"MCTS simulations per move (default: {DEFAULT_SIMULATIONS})")
+                       help=f"MCTS simulations per move (DEPRECATED, use role-specific args) (default: {DEFAULT_SIMULATIONS})")
+    parser.add_argument("--sims-attacker-selfplay", type=int, default=DEFAULT_SIMS_ATTACKER_SELFPLAY,
+                       help=f"MCTS simulations for attacker in self-play (default: {DEFAULT_SIMS_ATTACKER_SELFPLAY})")
+    parser.add_argument("--sims-defender-selfplay", type=int, default=DEFAULT_SIMS_DEFENDER_SELFPLAY,
+                       help=f"MCTS simulations for defender in self-play (default: {DEFAULT_SIMS_DEFENDER_SELFPLAY})")
+    parser.add_argument("--sims-attacker-eval", type=int, default=DEFAULT_SIMS_ATTACKER_EVAL,
+                       help=f"MCTS simulations for attacker in evaluation (default: {DEFAULT_SIMS_ATTACKER_EVAL})")
+    parser.add_argument("--sims-defender-eval", type=int, default=DEFAULT_SIMS_DEFENDER_EVAL,
+                       help=f"MCTS simulations for defender in evaluation (default: {DEFAULT_SIMS_DEFENDER_EVAL})")
     
     # Neural network training
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
@@ -1665,7 +1720,11 @@ if __name__ == "__main__":
     # Core training parameters
     config.num_iterations = args.iterations
     config.num_games_per_iteration = args.games
-    config.num_mcts_simulations = args.simulations
+    config.num_mcts_simulations = args.simulations  # Deprecated, kept for backward compatibility
+    config.num_mcts_sims_attacker = args.sims_attacker_selfplay
+    config.num_mcts_sims_defender = args.sims_defender_selfplay
+    config.eval_mcts_sims_attacker = args.sims_attacker_eval
+    config.eval_mcts_sims_defender = args.sims_defender_eval
     
     # Neural network training
     config.batch_size = args.batch_size
