@@ -392,12 +392,23 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     for key in timing_attacker.keys():
         combined_timing[key] = timing_attacker[key] + timing_defender.get(key, 0.0)
     
+    # Clean up references to prevent pickle errors
+    # Convert states/policies to ensure they're picklable numpy arrays without references
+    states_clean = [np.array(s, dtype=np.float32) for s in states]
+    policies_clean = [np.array(p, dtype=np.float32) for p in policies]
+    players_clean = list(players)
+    
+    # Delete MCTS and network references before returning
+    del mcts_attacker
+    del mcts_defender
+    del network
+    
     return {
-        'states': states,
-        'policies': policies,
-        'winner': game.winner,  # Can be 0, 1, or None (draw)
-        'players': players,
-        'num_moves': move_count,
+        'states': states_clean,
+        'policies': policies_clean,
+        'winner': int(game.winner) if game.winner is not None else None,
+        'players': players_clean,
+        'num_moves': int(move_count),
         'draw_reason': draw_reason,  # 'repetition', 'move_limit', or None
         'timing': combined_timing
     }
@@ -1598,7 +1609,7 @@ if __name__ == "__main__":
     DEFAULT_SIMS_ATTACKER_EVAL = 600
     DEFAULT_SIMS_DEFENDER_EVAL = 600
     DEFAULT_BATCH_SIZE = 256
-    DEFAULT_LEARNING_RATE = 0.001*(DEFAULT_BATCH_SIZE/256)
+    DEFAULT_LEARNING_RATE = 5e-4*(DEFAULT_BATCH_SIZE/256)
     DEFAULT_EPOCHS = 10
     DEFAULT_BATCHES_PER_EPOCH = 100
     DEFAULT_EVAL_VS_RANDOM = 64
@@ -1611,8 +1622,8 @@ if __name__ == "__main__":
     DEFAULT_TEMPERATURE_THRESHOLD = "king"
     
     # Network architecture
-    DEFAULT_RES_BLOCKS = 6
-    DEFAULT_CHANNELS = 128
+    DEFAULT_RES_BLOCKS = 4
+    DEFAULT_CHANNELS = 64
     
     # Replay buffer
     DEFAULT_REPLAY_BUFFER_SIZE = 5_000_000
@@ -1623,7 +1634,7 @@ if __name__ == "__main__":
     DEFAULT_LR_DECAY = 0.99
     DEFAULT_WEIGHT_DECAY = 1e-4
     DEFAULT_VALUE_LOSS_WEIGHT = 20.0
-    DEFAULT_ATTACKER_WIN_LOSS_BOOST = 1.0  # No boost by default
+    DEFAULT_ATTACKER_WIN_LOSS_BOOST = 10.0  # No boost by default
     DEFAULT_DRAW_PENALTY_ATTACKER = +0.5  # Draw counts as attacker win, but discouraged.
     DEFAULT_DRAW_PENALTY_DEFENDER = -0.9  # Draw = loss for defender, but slightly encouraged.
     
