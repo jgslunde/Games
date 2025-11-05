@@ -64,6 +64,7 @@ class TrainingConfig:
     lr_decay = 0.95                   # Learning rate decay per iteration
     weight_decay = 1e-4               # L2 regularization
     value_loss_weight = 10.0           # Weight for value loss (policy loss weight is always 1.0)
+    attacker_win_loss_boost = 1.0     # Boost factor for losses from attacker-won games (1.0 = no boost)
     draw_penalty_attacker = -0.1      # Draw penalty for attackers
     draw_penalty_defender = -0.3      # Draw penalty for defenders (more penalizing)
     
@@ -102,16 +103,17 @@ class TrainingConfig:
 class ReplayBuffer:
     """
     Stores experience from self-play games.
-    Each sample is (state, policy, value).
+    Each sample is (state, policy, value, attacker_won).
+    The attacker_won flag is used to boost losses from attacker-won games.
     """
     
     def __init__(self, max_size: int):
         self.max_size = max_size
         self.buffer = deque(maxlen=max_size)
     
-    def add(self, state: np.ndarray, policy: np.ndarray, value: float):
+    def add(self, state: np.ndarray, policy: np.ndarray, value: float, attacker_won: bool = False):
         """Add a sample to the buffer."""
-        self.buffer.append((state, policy, value))
+        self.buffer.append((state, policy, value, attacker_won))
     
     def add_game(self, states: List[np.ndarray], policies: List[np.ndarray], 
                  winner: int, player_perspectives: List[int]):
@@ -124,6 +126,7 @@ class ReplayBuffer:
             winner: 0 for attackers, 1 for defenders, None for draw
             player_perspectives: list of which player made each move
         """
+        attacker_won = (winner == 0)
         for state, policy, player in zip(states, policies, player_perspectives):
             # Value from perspective of player who made the move
             if winner is None:
@@ -135,26 +138,29 @@ class ReplayBuffer:
             else:
                 value = 0.0  # Shouldn't happen, but safe default
             
-            self.add(state, policy, value)
+            self.add(state, policy, value, attacker_won)
     
-    def sample(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def sample(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Sample a random batch from the buffer."""
         indices = np.random.choice(len(self.buffer), batch_size, replace=False)
         
         states = []
         policies = []
         values = []
+        attacker_won_flags = []
         
         for idx in indices:
-            state, policy, value = self.buffer[idx]
+            state, policy, value, attacker_won = self.buffer[idx]
             states.append(state)
             policies.append(policy)
             values.append(value)
+            attacker_won_flags.append(attacker_won)
         
         return (
             np.array(states, dtype=np.float32),
             np.array(policies, dtype=np.float32),
-            np.array(values, dtype=np.float32)
+            np.array(values, dtype=np.float32),
+            np.array(attacker_won_flags, dtype=bool)
         )
     
     def __len__(self):
@@ -382,15 +388,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     # Combine timing stats from both MCTS instances
     timing_attacker = mcts_attacker.get_timing_stats()
     timing_defender = mcts_defender.get_timing_stats()
-    combined_timing = {
-        'total_time': timing_attacker['total_time'] + timing_defender['total_time'],
-        'num_searches': timing_attacker['num_searches'] + timing_defender['num_searches'],
-        'avg_time_per_search': (
-            (timing_attacker['total_time'] + timing_defender['total_time']) / 
-            (timing_attacker['num_searches'] + timing_defender['num_searches'])
-            if (timing_attacker['num_searches'] + timing_defender['num_searches']) > 0 else 0
-        )
-    }
+    combined_timing = {}
+    for key in timing_attacker.keys():
+        combined_timing[key] = timing_attacker[key] + timing_defender.get(key, 0.0)
     
     return {
         'states': states,
@@ -610,14 +610,17 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
             else:
                 value = 0.0  # Shouldn't happen
             
+            # Mark if attacker won this game
+            attacker_won = (winner == 0)
+            
             # Add original sample
-            buffer.add(state, policy, value)
+            buffer.add(state, policy, value, attacker_won)
             
             # Add augmented samples using board symmetries
             if config.use_data_augmentation:
                 augmented = augment_sample(state, policy, value)
                 for aug_state, aug_policy, aug_value in augmented:
-                    buffer.add(aug_state, aug_policy, aug_value)
+                    buffer.add(aug_state, aug_policy, aug_value, attacker_won)
     
     print(f"Generated {len(buffer)} training samples")
     total_games = config.num_games_per_iteration
@@ -681,20 +684,33 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         
         for batch_idx in range(batches_per_epoch):
             # Sample batch
-            states, policies, values = buffer.sample(config.batch_size)
+            states, policies, values, attacker_won_flags = buffer.sample(config.batch_size)
             
             # Convert to tensors
             states = torch.from_numpy(states).to(device)
             policies = torch.from_numpy(policies).to(device)
             values = torch.from_numpy(values).unsqueeze(1).to(device)
+            attacker_won_flags = torch.from_numpy(attacker_won_flags).to(device)
             
             # Forward pass (using compiled network for speed)
             pred_policies, pred_values = network_compiled(states)
             
-            # Compute losses
-            policy_loss = -torch.mean(torch.sum(policies * 
-                                      torch.log_softmax(pred_policies, dim=1), dim=1))
-            value_loss = torch.mean((pred_values - values) ** 2)
+            # Compute per-sample losses
+            policy_loss_per_sample = -torch.sum(policies * 
+                                      torch.log_softmax(pred_policies, dim=1), dim=1)
+            value_loss_per_sample = (pred_values.squeeze(1) - values.squeeze(1)) ** 2
+            
+            # Apply boost factor to attacker-won games
+            if config.attacker_win_loss_boost != 1.0:
+                boost_weights = torch.where(attacker_won_flags, 
+                                           config.attacker_win_loss_boost, 
+                                           1.0)
+                policy_loss_per_sample = policy_loss_per_sample * boost_weights
+                value_loss_per_sample = value_loss_per_sample * boost_weights
+            
+            # Aggregate losses
+            policy_loss = torch.mean(policy_loss_per_sample)
+            value_loss = torch.mean(value_loss_per_sample)
             loss = policy_loss + config.value_loss_weight * value_loss
             
             # Backward pass (set_to_none=True is faster than default zero_grad)
@@ -1249,6 +1265,8 @@ def train(config: TrainingConfig, resume_from: str = None):
     print(f"LR decay per iteration: {config.lr_decay}")
     print(f"Weight decay (L2): {config.weight_decay}")
     print(f"Value loss weight: {config.value_loss_weight}")
+    print(f"Attacker win loss boost: {config.attacker_win_loss_boost}x")
+    print(f"Draw penalties: attacker={config.draw_penalty_attacker}, defender={config.draw_penalty_defender}")
     
     # Calculate training data statistics
     print("\n--- Training Data Usage ---")
@@ -1571,16 +1589,17 @@ if __name__ == "__main__":
     # Modify these values to change defaults without using command-line arguments
     # =============================================================================
     
+    
     DEFAULT_ITERATIONS = 1000
     DEFAULT_GAMES = 512
-    DEFAULT_SIMULATIONS = 100  # Deprecated, use role-specific defaults
-    DEFAULT_SIMS_ATTACKER_SELFPLAY = 100
-    DEFAULT_SIMS_DEFENDER_SELFPLAY = 100
-    DEFAULT_SIMS_ATTACKER_EVAL = 100
-    DEFAULT_SIMS_DEFENDER_EVAL = 100
+    # DEFAULT_SIMULATIONS = 100  # Deprecated, use role-specific defaults
+    DEFAULT_SIMS_ATTACKER_SELFPLAY = 1000
+    DEFAULT_SIMS_DEFENDER_SELFPLAY = 400
+    DEFAULT_SIMS_ATTACKER_EVAL = 600
+    DEFAULT_SIMS_DEFENDER_EVAL = 600
     DEFAULT_BATCH_SIZE = 256
-    DEFAULT_LEARNING_RATE = 0.001
-    DEFAULT_EPOCHS = 20
+    DEFAULT_LEARNING_RATE = 0.001*(DEFAULT_BATCH_SIZE/256)
+    DEFAULT_EPOCHS = 10
     DEFAULT_BATCHES_PER_EPOCH = 100
     DEFAULT_EVAL_VS_RANDOM = 64
     DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
@@ -1589,21 +1608,22 @@ if __name__ == "__main__":
     
     # Temperature parameters
     DEFAULT_TEMPERATURE = 1.0
-    DEFAULT_TEMPERATURE_THRESHOLD = 20
+    DEFAULT_TEMPERATURE_THRESHOLD = "king"
     
     # Network architecture
-    DEFAULT_RES_BLOCKS = 4
-    DEFAULT_CHANNELS = 64
+    DEFAULT_RES_BLOCKS = 6
+    DEFAULT_CHANNELS = 128
     
     # Replay buffer
-    DEFAULT_REPLAY_BUFFER_SIZE = 20_000_000
+    DEFAULT_REPLAY_BUFFER_SIZE = 5_000_000
     DEFAULT_MIN_BUFFER_SIZE = 10*DEFAULT_BATCH_SIZE
     DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
     
     # Learning rate decay and regularization
-    DEFAULT_LR_DECAY = 0.97
+    DEFAULT_LR_DECAY = 0.99
     DEFAULT_WEIGHT_DECAY = 1e-4
     DEFAULT_VALUE_LOSS_WEIGHT = 20.0
+    DEFAULT_ATTACKER_WIN_LOSS_BOOST = 1.0  # No boost by default
     DEFAULT_DRAW_PENALTY_ATTACKER = +0.5  # Draw counts as attacker win, but discouraged.
     DEFAULT_DRAW_PENALTY_DEFENDER = -0.9  # Draw = loss for defender, but slightly encouraged.
     
@@ -1611,10 +1631,10 @@ if __name__ == "__main__":
     DEFAULT_C_PUCT = 1.4
     
     # Evaluation
-    DEFAULT_EVAL_GAMES = 256
-    DEFAULT_EVAL_WIN_RATE = 0.55
-    DEFAULT_EVAL_FREQUENCY = 5
-    DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1
+    DEFAULT_EVAL_GAMES = 128
+    DEFAULT_EVAL_WIN_RATE = 0.52
+    DEFAULT_EVAL_FREQUENCY = 4
+    DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 2
     
     # Checkpointing
     DEFAULT_SAVE_FREQUENCY = 1
@@ -1631,8 +1651,8 @@ if __name__ == "__main__":
                        help=f"Number of training iterations (default: {DEFAULT_ITERATIONS})")
     parser.add_argument("--games", type=int, default=DEFAULT_GAMES,
                        help=f"Self-play games per iteration (default: {DEFAULT_GAMES})")
-    parser.add_argument("--simulations", type=int, default=DEFAULT_SIMULATIONS,
-                       help=f"MCTS simulations per move (DEPRECATED, use role-specific args) (default: {DEFAULT_SIMULATIONS})")
+    # parser.add_argument("--simulations", type=int, default=DEFAULT_SIMULATIONS,
+                    #    help=f"MCTS simulations per move (DEPRECATED, use role-specific args) (default: {DEFAULT_SIMULATIONS})")
     parser.add_argument("--sims-attacker-selfplay", type=int, default=DEFAULT_SIMS_ATTACKER_SELFPLAY,
                        help=f"MCTS simulations for attacker in self-play (default: {DEFAULT_SIMS_ATTACKER_SELFPLAY})")
     parser.add_argument("--sims-defender-selfplay", type=int, default=DEFAULT_SIMS_DEFENDER_SELFPLAY,
@@ -1653,6 +1673,8 @@ if __name__ == "__main__":
                        help=f"L2 regularization weight decay (default: {DEFAULT_WEIGHT_DECAY})")
     parser.add_argument("--value-loss-weight", type=float, default=DEFAULT_VALUE_LOSS_WEIGHT,
                        help=f"Weight for value loss relative to policy loss (default: {DEFAULT_VALUE_LOSS_WEIGHT})")
+    parser.add_argument("--attacker-win-loss-boost", type=float, default=DEFAULT_ATTACKER_WIN_LOSS_BOOST,
+                       help=f"Boost factor for losses from attacker-won games (default: {DEFAULT_ATTACKER_WIN_LOSS_BOOST})")
     parser.add_argument("--draw-penalty-attacker", type=float, default=DEFAULT_DRAW_PENALTY_ATTACKER,
                        help=f"Value penalty for attacker draws (default: {DEFAULT_DRAW_PENALTY_ATTACKER})")
     parser.add_argument("--draw-penalty-defender", type=float, default=DEFAULT_DRAW_PENALTY_DEFENDER,
@@ -1720,7 +1742,7 @@ if __name__ == "__main__":
     # Core training parameters
     config.num_iterations = args.iterations
     config.num_games_per_iteration = args.games
-    config.num_mcts_simulations = args.simulations  # Deprecated, kept for backward compatibility
+    # config.num_mcts_simulations = args.simulations  # Deprecated, kept for backward compatibility
     config.num_mcts_sims_attacker = args.sims_attacker_selfplay
     config.num_mcts_sims_defender = args.sims_defender_selfplay
     config.eval_mcts_sims_attacker = args.sims_attacker_eval
@@ -1732,6 +1754,7 @@ if __name__ == "__main__":
     config.lr_decay = args.lr_decay
     config.weight_decay = args.weight_decay
     config.value_loss_weight = args.value_loss_weight
+    config.attacker_win_loss_boost = args.attacker_win_loss_boost
     config.draw_penalty_attacker = args.draw_penalty_attacker
     config.draw_penalty_defender = args.draw_penalty_defender
     config.num_epochs = args.epochs
