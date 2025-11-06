@@ -420,10 +420,6 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         from network import BrandubhNet, MoveEncoder
         from mcts import MCTS
         
-        # Debug: print when worker starts (only for first few workers to avoid spam)
-        if game_idx < 3:
-            print(f"Worker {game_idx} (PID {os.getpid()}) starting...", flush=True)
-        
         # Reconstruct network on CPU and load from file
         network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
         checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
@@ -433,11 +429,6 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         # Optimize for CPU inference with compilation for 2.5-2.75x speedup
         # Worker startup is staggered to prevent cache contention warnings
         network = network.optimize_for_inference(use_compile=True, compile_mode='default')
-        
-        # Debug: print when network is ready
-        if game_idx < 3:
-            print(f"Worker {game_idx} network compiled, starting game...", flush=True)
-            game_start_time = time.time()
         
         # Create MCTS instances for each player (with different simulation counts)
         mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu')
@@ -547,12 +538,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         import gc
         gc.collect()
         
-        # Debug: print when worker completes
-        if game_idx < 3:
-            game_duration = time.time() - game_start_time
-            print(f"Worker {game_idx} completed game (moves: {num_moves}, game took {game_duration:.2f}s)", flush=True)
-        
-        result = {
+        return {
             'states': states_clean,
             'policies': policies_clean,
             'winner': winner,
@@ -561,14 +547,6 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
             'draw_reason': draw_reason_clean,
             'timing': combined_timing
         }
-        
-        # Debug: Check result size
-        if game_idx < 3:
-            import sys
-            result_size = sys.getsizeof(result) / 1024 / 1024  # MB
-            print(f"Worker {game_idx} returning result (~{result_size:.2f} MB)", flush=True)
-        
-        return result
     except Exception as e:
         # Catch any exception and re-raise as a simple picklable RuntimeError
         # This prevents "cannot pickle 'frame' object" errors in multiprocessing
@@ -714,20 +692,7 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
             if pool is not None:
                 # Use provided persistent pool
                 try:
-                    # Use imap_unordered for better progress feedback
-                    completed = 0
-                    game_results = []
-                    import time as time_module
-                    last_print_time = time_module.time()
-                    for result in pool.imap_unordered(worker_func, range(config.num_games_per_iteration), chunksize=1):
-                        game_results.append(result)
-                        completed += 1
-                        # Print progress every 10 games or every 5 seconds
-                        current_time = time_module.time()
-                        if completed % 10 == 0 or completed == config.num_games_per_iteration or (current_time - last_print_time) > 5:
-                            elapsed = current_time - last_print_time
-                            print(f"  Completed {completed}/{config.num_games_per_iteration} games (last batch took {elapsed:.2f}s)", flush=True)
-                            last_print_time = current_time
+                    game_results = list(pool.imap_unordered(worker_func, range(config.num_games_per_iteration), chunksize=1))
                 except Exception as e:
                     # Re-raise to ensure proper error propagation
                     print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
@@ -736,18 +701,7 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
                 # Create temporary pool (for backward compatibility)
                 with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
                     try:
-                        completed = 0
-                        game_results = []
-                        import time as time_module
-                        last_print_time = time_module.time()
-                        for result in temp_pool.imap_unordered(worker_func, range(config.num_games_per_iteration), chunksize=1):
-                            game_results.append(result)
-                            completed += 1
-                            current_time = time_module.time()
-                            if completed % 10 == 0 or completed == config.num_games_per_iteration or (current_time - last_print_time) > 5:
-                                elapsed = current_time - last_print_time
-                                print(f"  Completed {completed}/{config.num_games_per_iteration} games (last batch took {elapsed:.2f}s)", flush=True)
-                                last_print_time = current_time
+                        game_results = list(temp_pool.imap_unordered(worker_func, range(config.num_games_per_iteration), chunksize=1))
                     except Exception as e:
                         print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
                         raise
@@ -1650,14 +1604,8 @@ def train(config: TrainingConfig, resume_from: str = None):
     # Use maxtasksperchild to periodically recycle workers and free resources
     worker_pool = None
     if config.num_workers > 1:
-        # Cap actual worker processes at a reasonable level to avoid resource contention
-        # Each worker will process multiple games from the queue
-        actual_workers = min(config.num_workers, mp.cpu_count(), 64)  # Cap at 64 workers max
-        if actual_workers < config.num_workers:
-            print(f"Note: Using {actual_workers} worker processes (capped from {config.num_workers}) to avoid resource contention")
-            print(f"      Each worker will process ~{config.num_games_per_iteration // actual_workers} games from the queue")
-        print(f"Creating persistent worker pool with {actual_workers} workers...")
-        worker_pool = mp.Pool(processes=actual_workers, maxtasksperchild=50)
+        print(f"Creating persistent worker pool with {config.num_workers} workers...")
+        worker_pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
     
     try:
         # Main training loop

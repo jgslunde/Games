@@ -112,6 +112,7 @@ class Brandubh:
         """
         Get all legal moves for current player.
         Returns list of (from_row, from_col, to_row, to_col)
+        Filters out moves that would result in three-fold repetition.
         """
         moves = []
         
@@ -125,7 +126,42 @@ class Brandubh:
                 if self.board[r, c] in piece_types:
                     moves.extend(self._get_piece_moves(r, c))
         
-        return moves
+        # Filter out moves that would cause three-fold repetition
+        legal_moves = []
+        for move in moves:
+            if not self._would_cause_repetition(move):
+                legal_moves.append(move)
+        
+        return legal_moves
+    
+    def _would_cause_repetition(self, move: Tuple[int, int, int, int]) -> bool:
+        """
+        Check if making this move would result in a position that has already 
+        occurred twice (i.e., would be the third occurrence).
+        """
+        from_r, from_c, to_r, to_c = move
+        
+        # Temporarily make the move
+        piece = self.board[from_r, from_c]
+        original_to_piece = self.board[to_r, to_c]
+        
+        self.board[from_r, from_c] = EMPTY
+        self.board[to_r, to_c] = piece
+        
+        # Get position hash after the move (with switched player)
+        # Note: We need to check with the NEXT player's turn
+        next_player = 1 - self.current_player
+        position_hash = (self.board.tobytes(), next_player)
+        
+        # Count how many times this position has occurred
+        count = self.position_history.count(position_hash)
+        
+        # Undo the move
+        self.board[from_r, from_c] = piece
+        self.board[to_r, to_c] = original_to_piece
+        
+        # If this position has already occurred twice, this move would cause repetition
+        return count >= 2
     
     def _get_piece_moves(self, r: int, c: int) -> List[Tuple[int, int, int, int]]:
         """Get all legal moves for a piece at position (r, c)."""
@@ -277,13 +313,9 @@ class Brandubh:
             self.winner = ATTACKER_PLAYER
             return
         
-        # Check for draw by repetition
-        if self._check_repetition_draw():
-            self.game_over = True
-            self.winner = None  # Draw
-            return
-        
         # Check if current player has no legal moves (stalemate = loss)
+        # Note: Three-fold repetition is now handled by filtering illegal moves,
+        # so a player with only repetition moves will have no legal moves
         if not self.get_legal_moves():
             self.game_over = True
             self.winner = 1 - self.current_player
