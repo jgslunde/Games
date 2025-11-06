@@ -10,6 +10,7 @@ Implements the complete AlphaZero training pipeline:
 """
 
 import os
+import sys
 import time
 import json
 from collections import deque
@@ -64,7 +65,14 @@ class TrainingConfig:
     lr_decay = 0.95                   # Learning rate decay per iteration
     weight_decay = 1e-4               # L2 regularization
     value_loss_weight = 10.0           # Weight for value loss (policy loss weight is always 1.0)
-    attacker_win_loss_boost = 1.0     # Boost factor for losses from attacker-won games (1.0 = no boost)
+    
+    # Dynamic loss boosting (set use_dynamic_boosting=False to use static boost)
+    use_dynamic_boosting = True       # Use dynamic loss boosting based on win rates
+    dynamic_boost_alpha = 0.1         # Smoothing factor for win rate tracking (0-1, higher = more reactive)
+    dynamic_boost_min = 0.5           # Minimum boost factor
+    dynamic_boost_max = 3.0           # Maximum boost factor
+    attacker_win_loss_boost = 1.0     # Static boost (only used if use_dynamic_boosting=False)
+    
     draw_penalty_attacker = -0.1      # Draw penalty for attackers
     draw_penalty_defender = -0.3      # Draw penalty for defenders (more penalizing)
     
@@ -169,6 +177,115 @@ class ReplayBuffer:
     def clear(self):
         """Clear the buffer."""
         self.buffer.clear()
+    
+    def get_win_statistics(self) -> Dict[str, int]:
+        """
+        Get win statistics from samples in the buffer.
+        
+        Returns:
+            dict with 'attacker_wins', 'defender_wins', 'total_samples'
+        """
+        attacker_wins = 0
+        defender_wins = 0
+        
+        for _, _, _, attacker_won in self.buffer:
+            if attacker_won:
+                attacker_wins += 1
+            else:
+                defender_wins += 1
+        
+        return {
+            'attacker_wins': attacker_wins,
+            'defender_wins': defender_wins,
+            'total_samples': len(self.buffer)
+        }
+
+
+class WinRateTracker:
+    """
+    Tracks win rates over time to compute dynamic loss boosting.
+    Uses exponential moving average for smoothing.
+    """
+    
+    def __init__(self, alpha: float = 0.1, min_boost: float = 0.5, max_boost: float = 3.0):
+        """
+        Args:
+            alpha: Smoothing factor (0-1, higher = more weight to recent games)
+            min_boost: Minimum boost factor to prevent extreme values
+            max_boost: Maximum boost factor to prevent extreme values
+        """
+        self.alpha = alpha
+        self.min_boost = min_boost
+        self.max_boost = max_boost
+        
+        # Smoothed win counts
+        self.attacker_wins_smooth = 1.0  # Start with pseudocounts to avoid division by zero
+        self.defender_wins_smooth = 1.0
+        
+        # Total games tracked
+        self.total_games = 0
+    
+    def update(self, attacker_wins: int, defender_wins: int):
+        """
+        Update win rate tracking with new game results.
+        
+        Args:
+            attacker_wins: Number of attacker wins in this batch
+            defender_wins: Number of defender wins in this batch
+        """
+        total_new_games = attacker_wins + defender_wins
+        
+        if total_new_games == 0:
+            return  # No games to update with
+        
+        # Update with exponential moving average
+        self.attacker_wins_smooth = (1 - self.alpha) * self.attacker_wins_smooth + self.alpha * attacker_wins
+        self.defender_wins_smooth = (1 - self.alpha) * self.defender_wins_smooth + self.alpha * defender_wins
+        self.total_games += total_new_games
+    
+    def get_boost_factors(self) -> Tuple[float, float]:
+        """
+        Compute boost factors for attacker and defender losses.
+        
+        The boost is inversely proportional to win rate:
+        - If attackers win less, boost their loss more
+        - If defenders win less, boost their loss more
+        
+        Returns:
+            (attacker_boost, defender_boost) tuple
+        """
+        total_wins = self.attacker_wins_smooth + self.defender_wins_smooth
+        
+        if total_wins == 0:
+            return 1.0, 1.0  # No data yet, equal boost
+        
+        # Win rates
+        attacker_rate = self.attacker_wins_smooth / total_wins
+        defender_rate = self.defender_wins_smooth / total_wins
+        
+        # Boost is inversely proportional to win rate
+        # If attacker wins 10% of games, they get 10x more boost than defenders
+        # Clamp to reasonable range to prevent extreme values
+        attacker_boost = defender_rate / attacker_rate if attacker_rate > 0 else self.max_boost
+        defender_boost = attacker_rate / defender_rate if defender_rate > 0 else self.max_boost
+        
+        # Clamp to [min_boost, max_boost]
+        attacker_boost = np.clip(attacker_boost, self.min_boost, self.max_boost)
+        defender_boost = np.clip(defender_boost, self.min_boost, self.max_boost)
+        
+        return attacker_boost, defender_boost
+    
+    def get_win_rates(self) -> Tuple[float, float]:
+        """
+        Get current smoothed win rates.
+        
+        Returns:
+            (attacker_rate, defender_rate) tuple
+        """
+        total = self.attacker_wins_smooth + self.defender_wins_smooth
+        if total == 0:
+            return 0.5, 0.5
+        return self.attacker_wins_smooth / total, self.defender_wins_smooth / total
 
 
 # =============================================================================
@@ -281,137 +398,188 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
     Returns:
         dict with game data and MCTS timing information
     """
-    # Seed random number generators uniquely for each worker
-    # Use game_idx combined with process ID and time to ensure uniqueness
-    import time
-    seed = (game_idx + os.getpid() + int(time.time() * 1000)) % (2**32)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    
-    # Set torch to use only 1 thread per worker to avoid conflicts
-    torch.set_num_threads(1)
-    
-    # Add random delay to stagger torch.compile cache access across workers
-    # With many workers, this prevents "Failed to load artifact" warnings from cache contention
-    # Delay scales with game_idx to spread workers over ~10 seconds
-    max_stagger_time = 10.0  # seconds
-    delay = (game_idx % 100) * (max_stagger_time / 100) + np.random.uniform(0, 0.1)
-    time.sleep(delay)
-    
-    # Import inside worker to avoid issues with multiprocessing
-    from brandubh import Brandubh
-    from network import BrandubhNet, MoveEncoder
-    from mcts import MCTS
-    
-    # Reconstruct network on CPU and load from file
-    network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-    checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
-    network.load_state_dict(checkpoint['model_state_dict'])
-    network.to('cpu')
-    network.eval()
-    # Optimize for CPU inference with compilation for 2.5-2.75x speedup
-    # Worker startup is staggered to prevent cache contention warnings
-    network = network.optimize_for_inference(use_compile=True, compile_mode='default')
-    
-    # Create MCTS instances for each player (with different simulation counts)
-    mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu')
-    mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu')
-    mcts_attacker.reset_timing_stats()
-    mcts_defender.reset_timing_stats()
-    
-    # Play game
-    game = Brandubh()
-    states = []
-    policies = []
-    players = []
-    move_count = 0
-    
-    while not game.game_over:
-        current_player = game.current_player
+    try:
+        # Seed random number generators uniquely for each worker
+        # Use game_idx combined with process ID and time to ensure uniqueness
+        import time
+        seed = (game_idx + os.getpid() + int(time.time() * 1000)) % (2**32)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
         
-        # Select MCTS based on current player
-        mcts = mcts_attacker if current_player == 0 else mcts_defender
+        # Set torch to use only 1 thread per worker to avoid conflicts
+        torch.set_num_threads(1)
         
-        # Determine temperature based on move count or king position
-        if temperature_threshold == "king":
-            # Drop temperature when king leaves throne
-            temp = 0.0 if game.king_has_left_throne else temperature
-        else:
-            # Drop temperature after a fixed number of moves
-            temp = temperature if move_count < temperature_threshold else 0.0
+        # Add small random delay to stagger torch.compile cache access across workers
+        # This prevents "Failed to load artifact" warnings from cache contention
+        # Keep delay small to avoid serializing worker startup
+        delay = np.random.uniform(0, 0.5)  # Max 0.5 seconds
+        time.sleep(delay)
         
-        # Get state
-        state = game.get_state()
+        # Import inside worker to avoid issues with multiprocessing
+        from brandubh import Brandubh
+        from network import BrandubhNet, MoveEncoder
+        from mcts import MCTS
         
-        # Run MCTS to get policy
-        visit_probs = mcts.search(game)
+        # Debug: print when worker starts (only for first few workers to avoid spam)
+        if game_idx < 3:
+            print(f"Worker {game_idx} (PID {os.getpid()}) starting...", flush=True)
         
-        # Convert to policy vector
-        policy = np.zeros(1176, dtype=np.float32)
-        for move, prob in visit_probs.items():
-            idx = MoveEncoder.encode_move(move)
-            policy[idx] = prob
+        # Reconstruct network on CPU and load from file
+        network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+        checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
+        network.load_state_dict(checkpoint['model_state_dict'])
+        network.to('cpu')
+        network.eval()
+        # Optimize for CPU inference with compilation for 2.5-2.75x speedup
+        # Worker startup is staggered to prevent cache contention warnings
+        network = network.optimize_for_inference(use_compile=True, compile_mode='default')
         
-        # Store experience
-        states.append(state)
-        policies.append(policy)
-        players.append(current_player)
+        # Debug: print when network is ready
+        if game_idx < 3:
+            print(f"Worker {game_idx} network compiled, starting game...", flush=True)
+            game_start_time = time.time()
         
-        # Select and make move
-        moves = list(visit_probs.keys())
-        probs = np.array(list(visit_probs.values()))
+        # Create MCTS instances for each player (with different simulation counts)
+        mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu')
+        mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu')
+        mcts_attacker.reset_timing_stats()
+        mcts_defender.reset_timing_stats()
         
-        if temp == 0:
-            move = moves[np.argmax(probs)]
-        else:
-            # Apply temperature
-            probs = probs ** (1.0 / temp)
-            probs = probs / probs.sum()
-            move_idx = np.random.choice(len(moves), p=probs)
-            move = moves[move_idx]
+        # Play game
+        game = Brandubh()
+        states = []
+        policies = []
+        players = []
+        move_count = 0
         
-        game.make_move(move)
-        move_count += 1
+        while not game.game_over:
+            current_player = game.current_player
+            
+            # Select MCTS based on current player
+            mcts = mcts_attacker if current_player == 0 else mcts_defender
+            
+            # Determine temperature based on move count or king position
+            if temperature_threshold == "king":
+                # Drop temperature when king leaves throne
+                temp = 0.0 if game.king_has_left_throne else temperature
+            else:
+                # Drop temperature after a fixed number of moves
+                temp = temperature if move_count < temperature_threshold else 0.0
+            
+            # Get state
+            state = game.get_state()
+            
+            # Run MCTS to get policy
+            visit_probs = mcts.search(game)
+            
+            # Convert to policy vector
+            policy = np.zeros(1176, dtype=np.float32)
+            for move, prob in visit_probs.items():
+                idx = MoveEncoder.encode_move(move)
+                policy[idx] = prob
+            
+            # Store experience
+            states.append(state)
+            policies.append(policy)
+            players.append(current_player)
+            
+            # Select and make move
+            moves = list(visit_probs.keys())
+            probs = np.array(list(visit_probs.values()))
+            
+            if temp == 0:
+                move = moves[np.argmax(probs)]
+            else:
+                # Apply temperature
+                probs = probs ** (1.0 / temp)
+                probs = probs / probs.sum()
+                move_idx = np.random.choice(len(moves), p=probs)
+                move = moves[move_idx]
+            
+            game.make_move(move)
+            move_count += 1
+            
+            # Safety check for move limit
+            if move_count > 500:
+                break
         
-        # Safety check for move limit
-        if move_count > 500:
-            break
-    
-    # Determine draw reason
-    draw_reason = None
-    if game.winner is None:
-        draw_reason = 'repetition'
-    elif not game.game_over and move_count > 500:
-        # Hit move limit without natural game end
-        draw_reason = 'move_limit'
-    
-    # Combine timing stats from both MCTS instances
-    timing_attacker = mcts_attacker.get_timing_stats()
-    timing_defender = mcts_defender.get_timing_stats()
-    combined_timing = {}
-    for key in timing_attacker.keys():
-        combined_timing[key] = timing_attacker[key] + timing_defender.get(key, 0.0)
-    
-    # Clean up references to prevent pickle errors
-    # Convert states/policies to ensure they're picklable numpy arrays without references
-    states_clean = [np.array(s, dtype=np.float32) for s in states]
-    policies_clean = [np.array(p, dtype=np.float32) for p in policies]
-    players_clean = list(players)
-    
-    # Delete MCTS and network references before returning
-    del mcts_attacker
-    del mcts_defender
-    del network
-    
-    return {
-        'states': states_clean,
-        'policies': policies_clean,
-        'winner': int(game.winner) if game.winner is not None else None,
-        'players': players_clean,
-        'num_moves': int(move_count),
-        'draw_reason': draw_reason,  # 'repetition', 'move_limit', or None
-        'timing': combined_timing
-    }
+        # Determine draw reason
+        draw_reason = None
+        if game.winner is None:
+            draw_reason = 'repetition'
+        elif not game.game_over and move_count > 500:
+            # Hit move limit without natural game end
+            draw_reason = 'move_limit'
+        
+        # Combine timing stats from both MCTS instances
+        timing_attacker = mcts_attacker.get_timing_stats()
+        timing_defender = mcts_defender.get_timing_stats()
+        
+        # Build combined timing with explicit float conversion to ensure picklability
+        combined_timing = {
+            key: float(timing_attacker[key] + timing_defender.get(key, 0.0))
+            for key in timing_attacker.keys()
+        }
+        
+        # Extract game results before cleanup
+        winner = int(game.winner) if game.winner is not None else None
+        num_moves = int(move_count)
+        draw_reason_clean = str(draw_reason) if draw_reason else None
+        
+        # Clean up references to prevent pickle errors
+        # Convert states/policies to ensure they're picklable numpy arrays without references
+        states_clean = [np.array(s, dtype=np.float32).copy() for s in states]
+        policies_clean = [np.array(p, dtype=np.float32).copy() for p in policies]
+        players_clean = [int(p) for p in players]
+        
+        # Delete ALL objects that might hold references to compiled network
+        del mcts_attacker
+        del mcts_defender
+        del network
+        del game  # Delete game object too
+        del states
+        del policies
+        del players
+        del timing_attacker
+        del timing_defender
+        
+        # Force garbage collection to clean up any circular references
+        import gc
+        gc.collect()
+        
+        # Debug: print when worker completes
+        if game_idx < 3:
+            game_duration = time.time() - game_start_time
+            print(f"Worker {game_idx} completed game (moves: {num_moves}, game took {game_duration:.2f}s)", flush=True)
+        
+        result = {
+            'states': states_clean,
+            'policies': policies_clean,
+            'winner': winner,
+            'players': players_clean,
+            'num_moves': num_moves,
+            'draw_reason': draw_reason_clean,
+            'timing': combined_timing
+        }
+        
+        # Debug: Check result size
+        if game_idx < 3:
+            import sys
+            result_size = sys.getsizeof(result) / 1024 / 1024  # MB
+            print(f"Worker {game_idx} returning result (~{result_size:.2f} MB)", flush=True)
+        
+        return result
+    except Exception as e:
+        # Catch any exception and re-raise as a simple picklable RuntimeError
+        # This prevents "cannot pickle 'frame' object" errors in multiprocessing
+        import traceback
+        error_msg = f"Error in worker {game_idx} (PID {os.getpid()}):\n"
+        error_msg += "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        # Print to stderr immediately so user sees it even if pickling fails
+        import sys
+        print(error_msg, file=sys.stderr, flush=True)
+        # Raise simple picklable exception
+        raise RuntimeError(error_msg)
 
 
 def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
@@ -545,11 +713,44 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
         if config.num_workers > 1:
             if pool is not None:
                 # Use provided persistent pool
-                game_results = pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
+                try:
+                    # Use imap_unordered for better progress feedback
+                    completed = 0
+                    game_results = []
+                    import time as time_module
+                    last_print_time = time_module.time()
+                    for result in pool.imap_unordered(worker_func, range(config.num_games_per_iteration), chunksize=1):
+                        game_results.append(result)
+                        completed += 1
+                        # Print progress every 10 games or every 5 seconds
+                        current_time = time_module.time()
+                        if completed % 10 == 0 or completed == config.num_games_per_iteration or (current_time - last_print_time) > 5:
+                            elapsed = current_time - last_print_time
+                            print(f"  Completed {completed}/{config.num_games_per_iteration} games (last batch took {elapsed:.2f}s)", flush=True)
+                            last_print_time = current_time
+                except Exception as e:
+                    # Re-raise to ensure proper error propagation
+                    print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
+                    raise
             else:
                 # Create temporary pool (for backward compatibility)
                 with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
-                    game_results = temp_pool.map(worker_func, range(config.num_games_per_iteration), chunksize=1)
+                    try:
+                        completed = 0
+                        game_results = []
+                        import time as time_module
+                        last_print_time = time_module.time()
+                        for result in temp_pool.imap_unordered(worker_func, range(config.num_games_per_iteration), chunksize=1):
+                            game_results.append(result)
+                            completed += 1
+                            current_time = time_module.time()
+                            if completed % 10 == 0 or completed == config.num_games_per_iteration or (current_time - last_print_time) > 5:
+                                elapsed = current_time - last_print_time
+                                print(f"  Completed {completed}/{config.num_games_per_iteration} games (last batch took {elapsed:.2f}s)", flush=True)
+                                last_print_time = current_time
+                    except Exception as e:
+                        print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
+                        raise
         else:
             # Single-threaded fallback
             game_results = [worker_func(i) for i in range(config.num_games_per_iteration)]
@@ -663,13 +864,22 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
 # =============================================================================
 
 def train_network(network: BrandubhNet, buffer: ReplayBuffer, 
-                  optimizer: optim.Optimizer, config: TrainingConfig) -> Dict[str, float]:
+                  optimizer: optim.Optimizer, config: TrainingConfig, 
+                  attacker_boost: float = 1.0, defender_boost: float = 1.0) -> Dict[str, float]:
     """
     Train the neural network on samples from the replay buffer.
     
     Note: This function compiles the network with torch.compile() for faster
     training (forward + backward passes). The compiled version is only used
     within this function and doesn't affect the original network object.
+    
+    Args:
+        network: Neural network to train
+        buffer: Replay buffer with training samples
+        optimizer: Optimizer for network parameters
+        config: Training configuration
+        attacker_boost: Loss boost factor for attacker-won games
+        defender_boost: Loss boost factor for defender-won games
     
     Returns:
         dict with 'policy_loss', 'value_loss', 'total_loss'
@@ -711,13 +921,20 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
                                       torch.log_softmax(pred_policies, dim=1), dim=1)
             value_loss_per_sample = (pred_values.squeeze(1) - values.squeeze(1)) ** 2
             
-            # Apply boost factor to attacker-won games
-            if config.attacker_win_loss_boost != 1.0:
+            # Apply dynamic boost factors based on which side won
+            # Attacker-won games get attacker_boost, defender-won games get defender_boost
+            if attacker_boost != 1.0 or defender_boost != 1.0:
                 boost_weights = torch.where(attacker_won_flags, 
-                                           config.attacker_win_loss_boost, 
-                                           1.0)
-                policy_loss_per_sample = policy_loss_per_sample * boost_weights
-                value_loss_per_sample = value_loss_per_sample * boost_weights
+                                           attacker_boost, 
+                                           defender_boost)
+                
+                # Normalize by mean weight to keep effective learning rate stable
+                # This prevents gradient explosion when boost factors are very different
+                mean_weight = torch.mean(boost_weights)
+                normalized_weights = boost_weights / mean_weight
+                
+                policy_loss_per_sample = policy_loss_per_sample * normalized_weights
+                value_loss_per_sample = value_loss_per_sample * normalized_weights
             
             # Aggregate losses
             policy_loss = torch.mean(policy_loss_per_sample)
@@ -1276,7 +1493,16 @@ def train(config: TrainingConfig, resume_from: str = None):
     print(f"LR decay per iteration: {config.lr_decay}")
     print(f"Weight decay (L2): {config.weight_decay}")
     print(f"Value loss weight: {config.value_loss_weight}")
-    print(f"Attacker win loss boost: {config.attacker_win_loss_boost}x")
+    
+    # Loss boosting
+    print("\n--- Loss Boosting ---")
+    if config.use_dynamic_boosting:
+        print("Mode: Dynamic (adaptive based on win rates)")
+        print(f"  Smoothing alpha: {config.dynamic_boost_alpha}")
+        print(f"  Boost range: [{config.dynamic_boost_min}, {config.dynamic_boost_max}]")
+    else:
+        print("Mode: Static")
+        print(f"  Attacker boost: {config.attacker_win_loss_boost}x")
     print(f"Draw penalties: attacker={config.draw_penalty_attacker}, defender={config.draw_penalty_defender}")
     
     # Calculate training data statistics
@@ -1388,6 +1614,19 @@ def train(config: TrainingConfig, resume_from: str = None):
     # Initialize replay buffer
     replay_buffer = ReplayBuffer(config.replay_buffer_size)
     
+    # Initialize win rate tracker for dynamic boosting
+    if config.use_dynamic_boosting:
+        win_rate_tracker = WinRateTracker(
+            alpha=config.dynamic_boost_alpha,
+            min_boost=config.dynamic_boost_min,
+            max_boost=config.dynamic_boost_max
+        )
+        print(f"Using dynamic loss boosting (alpha={config.dynamic_boost_alpha}, "
+              f"range=[{config.dynamic_boost_min}, {config.dynamic_boost_max}])")
+    else:
+        win_rate_tracker = None
+        print(f"Using static loss boosting (attacker={config.attacker_win_loss_boost}x)")
+    
     # ELO tracking - cumulative ELO relative to initial random network
     cumulative_elo = 0.0  # Start at 0 (random network baseline)
     
@@ -1411,8 +1650,14 @@ def train(config: TrainingConfig, resume_from: str = None):
     # Use maxtasksperchild to periodically recycle workers and free resources
     worker_pool = None
     if config.num_workers > 1:
-        print(f"Creating persistent worker pool with {config.num_workers} workers...")
-        worker_pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
+        # Cap actual worker processes at a reasonable level to avoid resource contention
+        # Each worker will process multiple games from the queue
+        actual_workers = min(config.num_workers, mp.cpu_count(), 64)  # Cap at 64 workers max
+        if actual_workers < config.num_workers:
+            print(f"Note: Using {actual_workers} worker processes (capped from {config.num_workers}) to avoid resource contention")
+            print(f"      Each worker will process ~{config.num_games_per_iteration // actual_workers} games from the queue")
+        print(f"Creating persistent worker pool with {actual_workers} workers...")
+        worker_pool = mp.Pool(processes=actual_workers, maxtasksperchild=50)
     
     try:
         # Main training loop
@@ -1434,9 +1679,42 @@ def train(config: TrainingConfig, resume_from: str = None):
             new_buffer = generate_self_play_data(agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
             
+            # Count wins from the new buffer to update win rate tracker
+            # We track by counting unique games (not samples, as augmentation creates multiple samples per game)
+            attacker_game_wins = 0
+            defender_game_wins = 0
+            
+            # Simple approach: count how many samples are from attacker-won vs defender-won games
+            # This is approximate but works well with the smoothing in the tracker
+            attacker_samples = sum(1 for _, _, _, won in new_buffer.buffer if won)
+            defender_samples = len(new_buffer.buffer) - attacker_samples
+            
+            # Estimate game counts (accounting for data augmentation)
+            if config.use_data_augmentation:
+                attacker_game_wins = attacker_samples // 8 // 50  # Rough estimate: 8x augmentation, ~50 moves/game
+                defender_game_wins = defender_samples // 8 // 50
+            else:
+                attacker_game_wins = attacker_samples // 50
+                defender_game_wins = defender_samples // 50
+            
+            # Ensure at least some count to avoid zero divisions in tracker
+            attacker_game_wins = max(1, attacker_game_wins)
+            defender_game_wins = max(1, defender_game_wins)
+            
+            # Update win rate tracker with new games
+            if config.use_dynamic_boosting:
+                win_rate_tracker.update(attacker_game_wins, defender_game_wins)
+                attacker_boost, defender_boost = win_rate_tracker.get_boost_factors()
+                attacker_rate, defender_rate = win_rate_tracker.get_win_rates()
+                print(f"Win rates (smoothed): Attacker {attacker_rate:.1%}, Defender {defender_rate:.1%}")
+                print(f"Dynamic loss boosts: Attacker {attacker_boost:.2f}x, Defender {defender_boost:.2f}x")
+            else:
+                attacker_boost = config.attacker_win_loss_boost
+                defender_boost = 1.0
+            
             # Add to main replay buffer
-            for state, policy, value in new_buffer.buffer:
-                replay_buffer.add(state, policy, value)
+            for state, policy, value, attacker_won in new_buffer.buffer:
+                replay_buffer.add(state, policy, value, attacker_won)
             
             print(f"Replay buffer size: {len(replay_buffer)}")
             print(f"Self-play time: {selfplay_time:.1f}s")
@@ -1445,7 +1723,9 @@ def train(config: TrainingConfig, resume_from: str = None):
             if len(replay_buffer) >= config.min_buffer_size:
                 print(f"\n[2/4] Training network for {config.num_epochs} epochs...")
                 training_start = time.time()
-                losses = train_network(network, replay_buffer, optimizer, config)
+                losses = train_network(network, replay_buffer, optimizer, config,
+                                     attacker_boost=attacker_boost,
+                                     defender_boost=defender_boost)
                 training_time = time.time() - training_start
                 
                 print(f"Training time: {training_time:.1f}s")
@@ -1602,14 +1882,14 @@ if __name__ == "__main__":
     
     
     DEFAULT_ITERATIONS = 1000
-    DEFAULT_GAMES = 512
+    DEFAULT_GAMES = 128 # 512
     # DEFAULT_SIMULATIONS = 100  # Deprecated, use role-specific defaults
-    DEFAULT_SIMS_ATTACKER_SELFPLAY = 1000
-    DEFAULT_SIMS_DEFENDER_SELFPLAY = 400
-    DEFAULT_SIMS_ATTACKER_EVAL = 600
-    DEFAULT_SIMS_DEFENDER_EVAL = 600
+    DEFAULT_SIMS_ATTACKER_SELFPLAY = 10 #1000
+    DEFAULT_SIMS_DEFENDER_SELFPLAY = 10 # 400
+    DEFAULT_SIMS_ATTACKER_EVAL = 10 # 600
+    DEFAULT_SIMS_DEFENDER_EVAL = 10 # 600
     DEFAULT_BATCH_SIZE = 256
-    DEFAULT_LEARNING_RATE = 5e-4*(DEFAULT_BATCH_SIZE/256)
+    DEFAULT_LEARNING_RATE = 1e-3*(DEFAULT_BATCH_SIZE/256)
     DEFAULT_EPOCHS = 10
     DEFAULT_BATCHES_PER_EPOCH = 100
     DEFAULT_EVAL_VS_RANDOM = 64
@@ -1622,8 +1902,8 @@ if __name__ == "__main__":
     DEFAULT_TEMPERATURE_THRESHOLD = "king"
     
     # Network architecture
-    DEFAULT_RES_BLOCKS = 4
-    DEFAULT_CHANNELS = 64
+    DEFAULT_RES_BLOCKS = 2 # 6
+    DEFAULT_CHANNELS = 12 # 128
     
     # Replay buffer
     DEFAULT_REPLAY_BUFFER_SIZE = 5_000_000
@@ -1634,7 +1914,14 @@ if __name__ == "__main__":
     DEFAULT_LR_DECAY = 0.99
     DEFAULT_WEIGHT_DECAY = 1e-4
     DEFAULT_VALUE_LOSS_WEIGHT = 20.0
-    DEFAULT_ATTACKER_WIN_LOSS_BOOST = 10.0  # No boost by default
+    
+    # Dynamic loss boosting
+    DEFAULT_USE_DYNAMIC_BOOSTING = True
+    DEFAULT_DYNAMIC_BOOST_ALPHA = 0.1
+    DEFAULT_DYNAMIC_BOOST_MIN = 0.2
+    DEFAULT_DYNAMIC_BOOST_MAX = 5.0
+    DEFAULT_ATTACKER_WIN_LOSS_BOOST = 1.0  # Static boost (only used if dynamic disabled)
+    
     DEFAULT_DRAW_PENALTY_ATTACKER = +0.5  # Draw counts as attacker win, but discouraged.
     DEFAULT_DRAW_PENALTY_DEFENDER = -0.9  # Draw = loss for defender, but slightly encouraged.
     
@@ -1684,8 +1971,21 @@ if __name__ == "__main__":
                        help=f"L2 regularization weight decay (default: {DEFAULT_WEIGHT_DECAY})")
     parser.add_argument("--value-loss-weight", type=float, default=DEFAULT_VALUE_LOSS_WEIGHT,
                        help=f"Weight for value loss relative to policy loss (default: {DEFAULT_VALUE_LOSS_WEIGHT})")
+    
+    # Dynamic boosting arguments
+    parser.add_argument("--use-dynamic-boosting", action="store_true", default=DEFAULT_USE_DYNAMIC_BOOSTING,
+                       help=f"Use dynamic loss boosting based on win rates (default: {DEFAULT_USE_DYNAMIC_BOOSTING})")
+    parser.add_argument("--no-dynamic-boosting", action="store_false", dest="use_dynamic_boosting",
+                       help="Disable dynamic boosting (use static boost)")
+    parser.add_argument("--dynamic-boost-alpha", type=float, default=DEFAULT_DYNAMIC_BOOST_ALPHA,
+                       help=f"Smoothing factor for win rate tracking (default: {DEFAULT_DYNAMIC_BOOST_ALPHA})")
+    parser.add_argument("--dynamic-boost-min", type=float, default=DEFAULT_DYNAMIC_BOOST_MIN,
+                       help=f"Minimum boost factor (default: {DEFAULT_DYNAMIC_BOOST_MIN})")
+    parser.add_argument("--dynamic-boost-max", type=float, default=DEFAULT_DYNAMIC_BOOST_MAX,
+                       help=f"Maximum boost factor (default: {DEFAULT_DYNAMIC_BOOST_MAX})")
     parser.add_argument("--attacker-win-loss-boost", type=float, default=DEFAULT_ATTACKER_WIN_LOSS_BOOST,
-                       help=f"Boost factor for losses from attacker-won games (default: {DEFAULT_ATTACKER_WIN_LOSS_BOOST})")
+                       help=f"Static boost for attacker wins (only if dynamic disabled, default: {DEFAULT_ATTACKER_WIN_LOSS_BOOST})")
+    
     parser.add_argument("--draw-penalty-attacker", type=float, default=DEFAULT_DRAW_PENALTY_ATTACKER,
                        help=f"Value penalty for attacker draws (default: {DEFAULT_DRAW_PENALTY_ATTACKER})")
     parser.add_argument("--draw-penalty-defender", type=float, default=DEFAULT_DRAW_PENALTY_DEFENDER,
@@ -1765,7 +2065,14 @@ if __name__ == "__main__":
     config.lr_decay = args.lr_decay
     config.weight_decay = args.weight_decay
     config.value_loss_weight = args.value_loss_weight
+    
+    # Dynamic boosting
+    config.use_dynamic_boosting = args.use_dynamic_boosting
+    config.dynamic_boost_alpha = args.dynamic_boost_alpha
+    config.dynamic_boost_min = args.dynamic_boost_min
+    config.dynamic_boost_max = args.dynamic_boost_max
     config.attacker_win_loss_boost = args.attacker_win_loss_boost
+    
     config.draw_penalty_attacker = args.draw_penalty_attacker
     config.draw_penalty_defender = args.draw_penalty_defender
     config.num_epochs = args.epochs
