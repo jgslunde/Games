@@ -704,30 +704,23 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
         cleanup_temp_file = False
     
     try:
-        # Create worker function with partial
-        worker_func = partial(
-            _play_self_play_game_worker,
-            temp_network_path,
-            config.num_res_blocks,
-            config.num_channels,
-            config.num_mcts_sims_attacker,
-            config.num_mcts_sims_defender,
-            config.c_puct,
-            config.temperature,
-            config.temperature_threshold,
-            # Game rule parameters - added after game_idx position
-        )
-        
-        # Wrapper to add game rules to each call
-        def worker_with_rules(game_idx):
-            return worker_func(game_idx, config.king_capture_pieces, config.king_can_capture, config.throne_is_hostile, config.throne_enabled)
+        # Create a list of argument tuples for each worker call
+        # Each tuple contains all arguments needed for _play_self_play_game_worker
+        worker_args = [
+            (temp_network_path, config.num_res_blocks, config.num_channels,
+             config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
+             config.c_puct, config.temperature, config.temperature_threshold,
+             i, config.king_capture_pieces, config.king_can_capture,
+             config.throne_is_hostile, config.throne_enabled)
+            for i in range(config.num_games_per_iteration)
+        ]
         
         # Play games in parallel
         if config.num_workers > 1:
             if pool is not None:
-                # Use provided persistent pool
+                # Use provided persistent pool with starmap
                 try:
-                    game_results = list(pool.imap_unordered(worker_with_rules, range(config.num_games_per_iteration), chunksize=1))
+                    game_results = list(pool.starmap(_play_self_play_game_worker, worker_args, chunksize=1))
                 except Exception as e:
                     # Re-raise to ensure proper error propagation
                     print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
@@ -736,13 +729,13 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
                 # Create temporary pool (for backward compatibility)
                 with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
                     try:
-                        game_results = list(temp_pool.imap_unordered(worker_with_rules, range(config.num_games_per_iteration), chunksize=1))
+                        game_results = list(temp_pool.starmap(_play_self_play_game_worker, worker_args, chunksize=1))
                     except Exception as e:
                         print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
                         raise
         else:
             # Single-threaded fallback
-            game_results = [worker_with_rules(i) for i in range(config.num_games_per_iteration)]
+            game_results = [_play_self_play_game_worker(*args) for args in worker_args]
     finally:
         # Clean up temporary file
         if cleanup_temp_file:
@@ -1905,8 +1898,8 @@ if __name__ == "__main__":
     DEFAULT_TEMPERATURE_THRESHOLD = "king"
     
     # Network architecture
-    DEFAULT_RES_BLOCKS = 6
-    DEFAULT_CHANNELS = 128
+    DEFAULT_RES_BLOCKS = 4
+    DEFAULT_CHANNELS = 64
     
     # Replay buffer
     DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
