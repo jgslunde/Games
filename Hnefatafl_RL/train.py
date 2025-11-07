@@ -264,14 +264,18 @@ class WinRateTracker:
         defender_rate = self.defender_wins_smooth / total_wins
         
         # Boost is inversely proportional to win rate
-        # If attacker wins 10% of games, they get 10x more boost than defenders
+        # If attacker wins 10% of games, they get more boost than defenders
         # Clamp to reasonable range to prevent extreme values
-        attacker_boost = defender_rate / attacker_rate if attacker_rate > 0 else self.max_boost
-        defender_boost = attacker_rate / defender_rate if defender_rate > 0 else self.max_boost
-        
-        # Clamp to [min_boost, max_boost]
-        attacker_boost = np.clip(attacker_boost, self.min_boost, self.max_boost)
-        defender_boost = np.clip(defender_boost, self.min_boost, self.max_boost)
+        eps = 1e-6
+        safe_attacker_rate = max(attacker_rate, eps)
+        safe_defender_rate = max(defender_rate, eps)
+        ratio = safe_defender_rate / safe_attacker_rate
+        ratio = np.clip(ratio, self.min_boost, self.max_boost)
+
+        # We apply the square root so the effective ratio after normalization
+        # matches the intended ratio instead of being squared.
+        attacker_boost = np.sqrt(ratio)
+        defender_boost = 1.0 / attacker_boost
         
         return attacker_boost, defender_boost
     
@@ -1655,7 +1659,11 @@ def train(config: TrainingConfig, resume_from: str = None):
                 attacker_boost, defender_boost = win_rate_tracker.get_boost_factors()
                 attacker_rate, defender_rate = win_rate_tracker.get_win_rates()
                 print(f"Win rates (smoothed): Attacker {attacker_rate:.1%}, Defender {defender_rate:.1%}")
-                print(f"Dynamic loss boosts: Attacker {attacker_boost:.2f}x, Defender {defender_boost:.2f}x")
+                ratio = attacker_boost / defender_boost if defender_boost > 0 else float('inf')
+                print(
+                    f"Dynamic loss boosts: Attacker {attacker_boost:.2f}x, "
+                    f"Defender {defender_boost:.2f}x (ratio {ratio:.2f}x)"
+                )
             else:
                 attacker_boost = config.attacker_win_loss_boost
                 defender_boost = 1.0
@@ -1830,15 +1838,15 @@ if __name__ == "__main__":
     
     
     DEFAULT_ITERATIONS = 1000
-    DEFAULT_GAMES = 512
+    DEFAULT_GAMES = 256
     # DEFAULT_SIMULATIONS = 100  # Deprecated, use role-specific defaults
-    DEFAULT_SIMS_ATTACKER_SELFPLAY = 600
-    DEFAULT_SIMS_DEFENDER_SELFPLAY = 200
-    DEFAULT_SIMS_ATTACKER_EVAL = 300
-    DEFAULT_SIMS_DEFENDER_EVAL = 300
+    DEFAULT_SIMS_ATTACKER_SELFPLAY = 200
+    DEFAULT_SIMS_DEFENDER_SELFPLAY = 100
+    DEFAULT_SIMS_ATTACKER_EVAL = 150
+    DEFAULT_SIMS_DEFENDER_EVAL = 150
     DEFAULT_BATCH_SIZE = 256
     DEFAULT_LEARNING_RATE = 1e-3*(DEFAULT_BATCH_SIZE/256)
-    DEFAULT_EPOCHS = 10
+    DEFAULT_EPOCHS = 4
     DEFAULT_BATCHES_PER_EPOCH = 100
     DEFAULT_EVAL_VS_RANDOM = 64
     DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
@@ -1850,11 +1858,11 @@ if __name__ == "__main__":
     DEFAULT_TEMPERATURE_THRESHOLD = "king"
     
     # Network architecture
-    DEFAULT_RES_BLOCKS = 6
-    DEFAULT_CHANNELS = 128
+    DEFAULT_RES_BLOCKS = 3
+    DEFAULT_CHANNELS = 32
     
     # Replay buffer
-    DEFAULT_REPLAY_BUFFER_SIZE = 5_000_000
+    DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
     DEFAULT_MIN_BUFFER_SIZE = 10*DEFAULT_BATCH_SIZE
     DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
     
