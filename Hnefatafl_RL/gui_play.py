@@ -62,6 +62,7 @@ SUCCESS_COLOR = (46, 204, 113)   # Green
 DANGER_COLOR = (231, 76, 60)     # Red
 HIGHLIGHT_COLOR = (52, 152, 219) # Blue highlight
 MOVE_HIGHLIGHT = (46, 204, 113, 100) # Semi-transparent green
+PROBABILITY_TEXT_COLOR = (138, 43, 226)  # Purple (visible on all backgrounds)
 
 # Board settings
 WINDOW_SIZE = 900
@@ -124,6 +125,7 @@ class TaflGUI:
         self.font_medium = pygame.font.Font(None, 32)
         self.font_small = pygame.font.Font(None, 24)
         self.font_tiny = pygame.font.Font(None, 18)
+        self.font_probability = pygame.font.Font(None, 22)  # Slightly larger for probabilities
         
         # Initial evaluation
         if self.network:
@@ -330,9 +332,9 @@ class TaflGUI:
                             s.fill(SUCCESS_COLOR)
                             self.screen.blit(s, (x, y))
                             
-                            # Draw probability text ABOVE the piece
-                            prob_text = self.font_tiny.render(f"{prob*100:.1f}%", True, WHITE)
-                            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + 12))
+                            # Draw probability text in center of square
+                            prob_text = self.font_probability.render(f"{prob*100:.0f}%", True, PROBABILITY_TEXT_COLOR)
+                            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + self.square_size//2))
                             self.screen.blit(prob_text, text_rect)
             elif self.move_probs_from_selected is not None:
                 # Show move destination probabilities
@@ -351,9 +353,9 @@ class TaflGUI:
                             s.fill(SUCCESS_COLOR)
                             self.screen.blit(s, (x, y))
                             
-                            # Draw probability text ABOVE where piece would be
-                            prob_text = self.font_tiny.render(f"{prob*100:.1f}%", True, WHITE)
-                            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + 12))
+                            # Draw probability text in center of square
+                            prob_text = self.font_probability.render(f"{prob*100:.0f}%", True, PROBABILITY_TEXT_COLOR)
+                            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + self.square_size//2))
                             self.screen.blit(prob_text, text_rect)
         
         # Draw pieces
@@ -657,7 +659,7 @@ def main():
     parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut"],
                        help="Game variant to play: brandubh (7x7) or tablut (9x9) (default: brandubh)")
     parser.add_argument("--simulations", type=int, default=100, 
-                       help="Number of MCTS simulations (default: 100)")
+                       help="Number of MCTS simulations/depth for AI evaluation (default: 100)")
     parser.add_argument("--c-puct", type=float, default=1.4,
                        help="MCTS exploration constant (default: 1.4)")
     
