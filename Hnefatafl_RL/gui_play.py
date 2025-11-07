@@ -221,6 +221,10 @@ class TaflGUI:
     
     def _compute_piece_selection_probs(self):
         """Compute aggregated move probabilities for each piece."""
+        if not self.network or self.policy_probs is None:
+            self.piece_selection_probs = None
+            return
+            
         self.piece_selection_probs = np.zeros((self.board_size, self.board_size), dtype=np.float32)
         
         for r in range(self.board_size):
@@ -246,7 +250,7 @@ class TaflGUI:
     
     def _compute_move_probs_from_selected(self):
         """Compute move probabilities from selected piece."""
-        if self.selected_piece is None:
+        if self.selected_piece is None or not self.network or self.policy_probs is None:
             self.move_probs_from_selected = None
             return
         
@@ -290,10 +294,11 @@ class TaflGUI:
                 else:
                     color = BOARD_DARK
                 
-                # Special squares
-                if (row, col) == (3, 3):  # Throne
-                    color = CORNER_COLOR
-                elif (row, col) in [(0, 0), (0, 6), (6, 0), (6, 6)]:  # Corners
+                # Special squares - dynamically determine based on board size
+                center = self.board_size // 2
+                if (row, col) == (center, center):  # Throne at center
+                    color = THRONE_COLOR
+                elif (row, col) in self.game.corners:  # Corners from game
                     color = CORNER_COLOR
                 
                 pygame.draw.rect(self.screen, color, (x, y, self.square_size, self.square_size))
