@@ -999,7 +999,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 # =============================================================================
 
 def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
-                                num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx):
+                                num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
+                                move_encoder_class_name=None):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1013,6 +1014,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
         c_puct: MCTS exploration constant
         nn_plays_attacker: Whether NN plays as attacker
         game_idx: Game index (unused, for pool.map)
+        move_encoder_class_name: String name of move encoder module (e.g., "network.MoveEncoder" or "network_tablut.TablutMoveEncoder")
     
     Returns:
         1 if NN wins, 0 otherwise

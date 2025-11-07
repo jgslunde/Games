@@ -171,47 +171,50 @@ class MCTSNode:
 
 class MCTS:
     """
-    Monte Carlo Tree Search with neural network guidance.
+    Monte Carlo Tree Search with neural network evaluation.
+    Generic implementation that works with any game and move encoder.
     """
     
     def __init__(self, network, num_simulations: int = 100, c_puct: float = 1.4, 
-                 device: str = 'cpu', dirichlet_alpha: float = 0.3, dirichlet_epsilon: float = 0.25,
-                 add_dirichlet_noise: bool = False):
+                 device: str = 'cpu', dirichlet_alpha: float = 0.3, 
+                 dirichlet_epsilon: float = 0.25, add_dirichlet_noise: bool = False,
+                 move_encoder_class=None):
         """
         Initialize MCTS.
         
         Args:
-            network: BrandubhNet instance
-            num_simulations: number of MCTS simulations per move
-            c_puct: exploration constant
+            network: neural network for evaluating positions
+            num_simulations: number of simulations per search
+            c_puct: exploration constant for PUCT
             device: 'cpu' or 'cuda'
             dirichlet_alpha: concentration parameter for Dirichlet noise
-            dirichlet_epsilon: weight of Dirichlet noise (0.25 = 25% noise, 75% network prior)
-            add_dirichlet_noise: whether to add Dirichlet noise to root node
+            dirichlet_epsilon: weight of Dirichlet noise at root
+            add_dirichlet_noise: whether to add exploration noise
+            move_encoder_class: MoveEncoder class for encoding/decoding moves
+                               (if None, imports from network module for backward compatibility)
         """
         self.network = network
-        self.network.eval()
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.device = device
-        self.network.to(device)
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
         self.add_dirichlet_noise = add_dirichlet_noise
+        self.move_encoder_class = move_encoder_class
         
-        # Root node from last search (for accessing statistics)
-        self.root = None
-        
-        # Timing statistics (accumulated across searches)
+        # Performance tracking
         self.timing_stats = {
             'selection': 0.0,
-            'terminal_eval': 0.0,
             'network_eval': 0.0,
             'expansion': 0.0,
             'backup': 0.0,
+            'terminal_eval': 0.0,
+            'get_legal_moves': 0.0,
             'game_clone': 0.0,
-            'get_legal_moves': 0.0
         }
+        
+        # For debugging
+        self.root = None
     
     def reset_timing_stats(self):
         """Reset timing statistics."""
@@ -300,7 +303,19 @@ class MCTS:
             value: estimated value for current player
         """
         import time
-        from network import MoveEncoder
+        
+        # Get MoveEncoder class (backward compatible)
+        if self.move_encoder_class is None:
+            # Try to infer from network module name
+            network_module = self.network.__class__.__module__
+            if 'tablut' in network_module.lower():
+                from network_tablut import TablutMoveEncoder
+                move_encoder = TablutMoveEncoder
+            else:
+                from network import MoveEncoder
+                move_encoder = MoveEncoder
+        else:
+            move_encoder = self.move_encoder_class
         
         # Get state representation
         state = game.get_state()
@@ -316,7 +331,7 @@ class MCTS:
         
         # Mask illegal moves
         t0 = time.perf_counter()
-        legal_mask = MoveEncoder.get_legal_move_mask(game)
+        legal_mask = move_encoder.get_legal_move_mask(game)
         policy_logits = policy_logits * legal_mask + (1 - legal_mask) * (-1e8)
         
         # Convert to probabilities
@@ -324,7 +339,7 @@ class MCTS:
         
         # Extract probabilities for legal moves only
         legal_moves = game.get_legal_moves()
-        move_indices = [MoveEncoder.encode_move(move) for move in legal_moves]
+        move_indices = [move_encoder.encode_move(move) for move in legal_moves]
         legal_probs = policy_probs[move_indices]
         self.timing_stats['get_legal_moves'] += time.perf_counter() - t0
         
@@ -424,6 +439,12 @@ class RandomRolloutMCTS:
                     action = actions[np.random.randint(len(actions))]
                     node = node.children[action]
                     search_path.append(node)
+                    
+                    # Lazy initialization: create game state if not already done
+                    if node.game is None:
+                        parent = search_path[-2]
+                        node.game = parent.game.clone()
+                        node.game.make_move(action)
             
             # Simulation: random rollout
             value = self._rollout(node.game)

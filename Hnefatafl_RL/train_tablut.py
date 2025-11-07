@@ -1,7 +1,7 @@
 """
-Training script for Brandubh (7x7 Tafl) using AlphaZero.
+Training script for Tablut (9x9 Tafl) using AlphaZero.
 
-This script configures and runs the training pipeline specifically for Brandubh.
+This script configures and runs the training pipeline specifically for Tablut.
 For other board sizes or game variants, create a similar training script.
 """
 
@@ -11,10 +11,10 @@ import multiprocessing as mp
 # Import the generic training module
 from train import TrainingConfig, train
 
-# Import Brandubh-specific classes
-from brandubh import Brandubh
-from network import BrandubhNet, MoveEncoder
-from agent import Agent as BrandubhAgent  # Use generic Agent
+# Import Tablut-specific classes
+from tablut import Tablut
+from network_tablut import TablutNet, TablutMoveEncoder
+from agent import Agent as TablutAgent  # Use generic Agent
 
 
 # Custom type for temperature_threshold argument
@@ -95,7 +95,7 @@ DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1  # Evaluate every iteration until 100% win 
 
 # Checkpointing
 DEFAULT_SAVE_FREQUENCY = 1
-DEFAULT_CHECKPOINT_DIR = "checkpoints"
+DEFAULT_CHECKPOINT_DIR = "checkpoints_tablut"
 
 
 # =============================================================================
@@ -103,7 +103,7 @@ DEFAULT_CHECKPOINT_DIR = "checkpoints"
 # =============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Brandubh AlphaZero")
+    parser = argparse.ArgumentParser(description="Train Tablut AlphaZero")
     
     # Core training parameters
     parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS,
@@ -226,11 +226,11 @@ if __name__ == "__main__":
     config = TrainingConfig()
     
     # Set game-specific configuration
-    config.game_class = Brandubh
-    config.network_class = BrandubhNet
-    config.agent_class = BrandubhAgent
-    config.move_encoder_class = MoveEncoder
-    config.board_size = 7  # Brandubh is 7x7
+    config.game_class = Tablut
+    config.network_class = TablutNet
+    config.agent_class = TablutAgent
+    config.move_encoder_class = TablutMoveEncoder
+    config.board_size = 9  # Tablut is 9x9
     
     # Core training parameters
     config.num_iterations = args.iterations

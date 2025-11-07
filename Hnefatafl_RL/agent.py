@@ -1,22 +1,29 @@
 """
-Agent wrapper for playing Brandubh using MCTS with neural network.
+Generic agent wrapper for playing Tafl games (Brandubh, Tablut, etc.) using MCTS with neural network.
 """
 
 import torch
 import numpy as np
-from typing import Tuple
-
-from brandubh import Brandubh
-from network import BrandubhNet
-from mcts import MCTS, RandomRolloutMCTS
+from typing import Tuple, Optional, Any
 
 
-class BrandubhAgent:
+try:
+    from mcts import MCTS, RandomRolloutMCTS
+except ImportError:
+    # Allow module to be imported even if mcts is not available
+    MCTS = None
+    RandomRolloutMCTS = None
+
+
+class Agent:
     """
-    Agent that uses MCTS with neural network to play Brandubh.
+    Generic agent that uses MCTS with neural network to play Tafl games.
+    Works with any game (Brandubh, Tablut, etc.) and network architecture.
     """
     
-    def __init__(self, network: BrandubhNet = None, num_simulations: int = 100, 
+    def __init__(self, network: Optional[Any] = None, network_class: Optional[type] = None,
+                 move_encoder_class: Optional[type] = None,
+                 num_simulations: int = 100, 
                  c_puct: float = 1.4, device: str = 'cpu', 
                  add_dirichlet_noise: bool = False, dirichlet_alpha: float = 0.3, 
                  dirichlet_epsilon: float = 0.25):
@@ -24,7 +31,9 @@ class BrandubhAgent:
         Initialize agent.
         
         Args:
-            network: trained BrandubhNet (if None, creates untrained network)
+            network: trained network instance (if None and network_class provided, creates untrained network)
+            network_class: class to instantiate if network is None (e.g., BrandubhNet, TablutNet)
+            move_encoder_class: MoveEncoder class for encoding/decoding moves (e.g., MoveEncoder, TablutMoveEncoder)
             num_simulations: number of MCTS simulations per move
             c_puct: exploration constant
             device: 'cpu' or 'cuda'
@@ -32,20 +41,21 @@ class BrandubhAgent:
             dirichlet_alpha: concentration parameter for Dirichlet noise
             dirichlet_epsilon: weight of Dirichlet noise
         """
-        if network is None:
-            network = BrandubhNet()
+        if network is None and network_class is not None:
+            network = network_class()
         
         self.network = network
         self.mcts = MCTS(network, num_simulations, c_puct, device, 
-                        dirichlet_alpha, dirichlet_epsilon, add_dirichlet_noise)
+                        dirichlet_alpha, dirichlet_epsilon, add_dirichlet_noise,
+                        move_encoder_class=move_encoder_class)
         self.device = device
     
-    def select_move(self, game: Brandubh, temperature: float = 0.0) -> Tuple[int, int, int, int]:
+    def select_move(self, game, temperature: float = 0.0) -> Tuple[int, int, int, int]:
         """
         Select a move for the current game state.
         
         Args:
-            game: current game state
+            game: current game state (any Tafl game)
             temperature: sampling temperature (0 = deterministic)
         
         Returns:
@@ -64,9 +74,9 @@ class BrandubhAgent:
 
 
 class RandomAgent:
-    """Simple random agent for baseline comparison."""
+    """Simple random agent for baseline comparison. Works with any Tafl game."""
     
-    def select_move(self, game: Brandubh, temperature: float = 0.0) -> Tuple[int, int, int, int]:
+    def select_move(self, game, temperature: float = 0.0) -> Optional[Tuple[int, int, int, int]]:
         """Select a random legal move."""
         legal_moves = game.get_legal_moves()
         if not legal_moves:
@@ -76,7 +86,7 @@ class RandomAgent:
 
 
 class MCTSAgent:
-    """Agent using MCTS with random rollouts (no neural network)."""
+    """Agent using MCTS with random rollouts (no neural network). Works with any Tafl game."""
     
     def __init__(self, num_simulations: int = 100):
         """
@@ -87,24 +97,25 @@ class MCTSAgent:
         """
         self.mcts = RandomRolloutMCTS(num_simulations)
     
-    def select_move(self, game: Brandubh, temperature: float = 0.0) -> Tuple[int, int, int, int]:
+    def select_move(self, game, temperature: float = 0.0) -> Optional[Tuple[int, int, int, int]]:
         """Select a move using MCTS with random rollouts."""
         return self.mcts.select_move(game, temperature)
 
 
-def play_game(agent1, agent2, display: bool = True) -> int:
+def play_game(agent1, agent2, game_class, display: bool = True) -> int:
     """
     Play a game between two agents.
     
     Args:
         agent1: agent playing as attackers
         agent2: agent playing as defenders
+        game_class: game class to instantiate (e.g., Brandubh, Tablut)
         display: whether to print the game
     
     Returns:
         winner: 0 for attackers, 1 for defenders
     """
-    game = Brandubh()
+    game = game_class()
     agents = [agent1, agent2]
     move_count = 0
     
@@ -159,13 +170,14 @@ def play_game(agent1, agent2, display: bool = True) -> int:
     return game.winner
 
 
-def evaluate_agents(agent1, agent2, num_games: int = 10) -> dict:
+def evaluate_agents(agent1, agent2, game_class, num_games: int = 10) -> dict:
     """
     Evaluate two agents against each other.
     
     Args:
         agent1: first agent
         agent2: second agent
+        game_class: game class to instantiate (e.g., Brandubh, Tablut)
         num_games: number of games to play
     
     Returns:
@@ -181,14 +193,14 @@ def evaluate_agents(agent1, agent2, num_games: int = 10) -> dict:
     for i in range(num_games):
         # Alternate who plays attackers
         if i % 2 == 0:
-            winner = play_game(agent1, agent2, display=False)
+            winner = play_game(agent1, agent2, game_class, display=False)
             if winner == 0:
                 agent1_wins += 1
                 agent1_attacker_wins += 1
             else:
                 agent2_wins += 1
         else:
-            winner = play_game(agent2, agent1, display=False)
+            winner = play_game(agent2, agent1, game_class, display=False)
             if winner == 0:
                 agent2_wins += 1
                 agent2_attacker_wins += 1
@@ -215,27 +227,44 @@ def evaluate_agents(agent1, agent2, num_games: int = 10) -> dict:
     }
 
 
+# Backward compatibility: Create aliases with game-specific names
+BrandubhAgent = Agent
+TablutAgent = Agent
+
+
 if __name__ == "__main__":
-    print("Brandubh Agent Module")
+    print("Generic Tafl Agent Module")
     print("=" * 50)
-    print("\nCreating agents...")
     
-    # Create agents
-    random_agent = RandomAgent()
-    print("✓ Random agent created")
-    
-    mcts_agent = MCTSAgent(num_simulations=50)
-    print("✓ MCTS agent created (50 simulations)")
-    
-    # Note: Neural network agent requires PyTorch to be installed
+    # Try to import Brandubh for testing
     try:
-        nn_agent = BrandubhAgent(num_simulations=25)
-        print("✓ Neural network agent created (25 simulations)")
+        from brandubh import Brandubh
+        from network import BrandubhNet, MoveEncoder
         
-        print("\nTesting neural network agent vs random...")
-        play_game(nn_agent, random_agent, display=True)
+        print("\nTesting with Brandubh (7x7)...")
+        print("Creating agents...")
         
-    except Exception as e:
-        print(f"✗ Could not create neural network agent: {e}")
-        print("\nTesting MCTS agent vs random instead...")
-        play_game(mcts_agent, random_agent, display=True)
+        # Create agents
+        random_agent = RandomAgent()
+        print("✓ Random agent created")
+        
+        mcts_agent = MCTSAgent(num_simulations=10)
+        print("✓ MCTS agent created (10 simulations)")
+        
+        # Note: Neural network agent requires PyTorch to be installed
+        try:
+            nn_agent = Agent(network_class=BrandubhNet, move_encoder_class=MoveEncoder, num_simulations=10)
+            print("✓ Neural network agent created (10 simulations)")
+            
+            print("\nTesting neural network agent vs random...")
+            play_game(nn_agent, random_agent, Brandubh, display=True)
+            
+        except Exception as e:
+            print(f"✗ Could not create neural network agent: {e}")
+            print("\nTesting MCTS agent vs random instead...")
+            play_game(mcts_agent, random_agent, Brandubh, display=True)
+            
+    except ImportError:
+        print("\nBrandubh not available. Skipping tests.")
+        print("To test with a specific game, import it and call:")
+        print("  play_game(agent1, agent2, GameClass, display=True)")
