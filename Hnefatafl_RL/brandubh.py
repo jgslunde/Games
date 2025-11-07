@@ -31,11 +31,35 @@ DEFENDER_PLAYER = 1
 
 
 class Brandubh:
-    def __init__(self):
+    def __init__(self, 
+                 king_capture_pieces: int = 2,
+                 king_can_capture: bool = True,
+                 throne_is_hostile: bool = False):
+        """
+        Initialize Brandubh game with tunable rules.
+        
+        Args:
+            king_capture_pieces: Number of pieces required to capture the king (2, 3, or 4).
+                - 2: King captured between two attackers (standard custodian capture)
+                - 3: King must be surrounded on 3 sides
+                - 4: King must be surrounded on all 4 sides
+            king_can_capture: Whether the king can participate in capturing enemy pieces.
+            throne_is_hostile: Whether the throne (center square) acts as a hostile square
+                             for captures (like corners do).
+        """
         self.board = np.zeros((7, 7), dtype=np.int8)
         self.current_player = ATTACKER_PLAYER  # Attackers start
         self.game_over = False
         self.winner = None
+        
+        # Tunable rules
+        self.king_capture_pieces = king_capture_pieces
+        self.king_can_capture = king_can_capture
+        self.throne_is_hostile = throne_is_hostile
+        
+        # Validate rules
+        if king_capture_pieces not in [2, 3, 4]:
+            raise ValueError("king_capture_pieces must be 2, 3, or 4")
         
         # Special squares
         self.throne = (3, 3)
@@ -247,22 +271,84 @@ class Brandubh:
         if enemy == EMPTY or self._is_friendly(piece, enemy):
             return
         
-        # Check if enemy is a king
-        nr2, nc2 = nr + dr, nc + dc
+        target_is_king = enemy == KING
         
-        if not (0 <= nr2 < 7 and 0 <= nc2 < 7):
-            return
+        # Handle king capture based on rules
+        if target_is_king:
+            # For 2-piece capture, check if we complete a sandwich in THIS direction
+            if self.king_capture_pieces == 2:
+                nr2, nc2 = nr + dr, nc + dc
+                if 0 <= nr2 < 7 and 0 <= nc2 < 7 and self.board[nr2, nc2] == ATTACKER:
+                    # Complete sandwich in this direction
+                    self.board[nr, nc] = EMPTY
+                    self.game_over = True
+                    self.winner = ATTACKER_PLAYER
+            else:
+                # For 3 or 4 piece captures, check all sides
+                if self._is_king_captured(nr, nc):
+                    self.board[nr, nc] = EMPTY
+                    self.game_over = True
+                    self.winner = ATTACKER_PLAYER
+        else:
+            # Regular piece capture - check opposite side
+            nr2, nc2 = nr + dr, nc + dc
+            
+            if not (0 <= nr2 < 7 and 0 <= nc2 < 7):
+                return
+            
+            opposite = self.board[nr2, nc2]
+            is_hostile_square = self._is_hostile_square(nr2, nc2)
+            
+            if self._is_friendly(piece, opposite) or is_hostile_square:
+                self.board[nr, nc] = EMPTY
+    
+    def _is_king_captured(self, king_r: int, king_c: int) -> bool:
+        """
+        Check if king at (king_r, king_c) is captured based on current rules.
         
-        # Can be captured against friendly piece, throne, or corner
-        opposite = self.board[nr2, nc2]
-        is_hostile_square = (nr2, nc2) == self.throne or (nr2, nc2) in self.corner_set
+        Returns:
+            True if king is captured, False otherwise
+        """
+        if self.king_capture_pieces == 2:
+            # Standard custodian capture - need attackers on opposite sides
+            # Check horizontal
+            if (0 <= king_c - 1 and self.board[king_r, king_c - 1] == ATTACKER and
+                king_c + 1 < 7 and self.board[king_r, king_c + 1] == ATTACKER):
+                return True
+            # Check vertical
+            if (0 <= king_r - 1 and self.board[king_r - 1, king_c] == ATTACKER and
+                king_r + 1 < 7 and self.board[king_r + 1, king_c] == ATTACKER):
+                return True
+            return False
+            
+        elif self.king_capture_pieces == 3:
+            # Need attackers on 3 out of 4 sides
+            attacker_count = 0
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = king_r + dr, king_c + dc
+                if 0 <= nr < 7 and 0 <= nc < 7 and self.board[nr, nc] == ATTACKER:
+                    attacker_count += 1
+            return attacker_count >= 3
+            
+        elif self.king_capture_pieces == 4:
+            # Need attackers on all 4 sides
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = king_r + dr, king_c + dc
+                if not (0 <= nr < 7 and 0 <= nc < 7) or self.board[nr, nc] != ATTACKER:
+                    return False
+            return True
         
-        if self._is_friendly(piece, opposite) or is_hostile_square:
-            target_is_king = enemy == KING
-            self.board[nr, nc] = EMPTY
-            if target_is_king:
-                self.game_over = True
-                self.winner = ATTACKER_PLAYER
+        return False
+    
+    def _is_hostile_square(self, r: int, c: int) -> bool:
+        """Check if a square is hostile for capturing purposes."""
+        # Corners are always hostile
+        if (r, c) in self.corner_set:
+            return True
+        # Throne is hostile only if the rule is enabled
+        if self.throne_is_hostile and (r, c) == self.throne:
+            return True
+        return False
     
     def _is_friendly(self, piece1: int, piece2: int) -> bool:
         """Check if two pieces are on the same team."""
@@ -272,6 +358,10 @@ class Brandubh:
         if piece1 == ATTACKER:
             return piece2 == ATTACKER
         else:  # piece1 is DEFENDER or KING
+            # If king cannot capture and piece1 is king, only king is friendly with itself
+            if not self.king_can_capture and piece1 == KING:
+                return piece2 == KING
+            # Otherwise defenders and king are friendly
             return piece2 in [DEFENDER, KING]
     
     def _check_game_over(self):
@@ -310,6 +400,10 @@ class Brandubh:
         new_game.position_history = self.position_history.copy()
         new_game.move_count = self.move_count
         new_game.king_has_left_throne = self.king_has_left_throne
+        # Copy rule parameters
+        new_game.king_capture_pieces = self.king_capture_pieces
+        new_game.king_can_capture = self.king_can_capture
+        new_game.throne_is_hostile = self.throne_is_hostile
         return new_game
     
     def __str__(self) -> str:

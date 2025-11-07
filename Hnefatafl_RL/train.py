@@ -40,6 +40,11 @@ from agent import BrandubhAgent
 class TrainingConfig:
     """Configuration for training."""
     
+    # Game rules (tunable)
+    king_capture_pieces = 2           # Pieces required to capture king (2, 3, or 4)
+    king_can_capture = True           # Whether king can help capture enemy pieces
+    throne_is_hostile = False         # Whether throne counts as hostile square for captures
+    
     # Self-play
     num_iterations = 100              # Number of training iterations
     num_games_per_iteration = 100     # Self-play games per iteration
@@ -383,7 +388,8 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float) -> List[
 # =============================================================================
 
 def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, 
-                                num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_threshold, game_idx):
+                                num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_threshold, game_idx,
+                                king_capture_pieces, king_can_capture, throne_is_hostile):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -398,6 +404,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         temperature: Sampling temperature
         temperature_threshold: Move number threshold for temperature
         game_idx: Game index (unused, for pool.map)
+        king_capture_pieces: Number of pieces required to capture king (2, 3, or 4)
+        king_can_capture: Whether king can help capture enemy pieces
+        throne_is_hostile: Whether throne counts as hostile square
     
     Returns:
         dict with game data and MCTS timing information
@@ -416,7 +425,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         # Add small random delay to stagger torch.compile cache access across workers
         # This prevents "Failed to load artifact" warnings from cache contention
         # Keep delay small to avoid serializing worker startup
-        delay = np.random.uniform(0, 0.5)  # Max 0.5 seconds
+        delay = np.random.uniform(0.0, 10.0)  # Max 0.5 seconds
         time.sleep(delay)
         
         # Import inside worker to avoid issues with multiprocessing
@@ -440,8 +449,12 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         mcts_attacker.reset_timing_stats()
         mcts_defender.reset_timing_stats()
         
-        # Play game
-        game = Brandubh()
+        # Play game with configured rules
+        game = Brandubh(
+            king_capture_pieces=king_capture_pieces,
+            king_can_capture=king_can_capture,
+            throne_is_hostile=throne_is_hostile
+        )
         states = []
         policies = []
         players = []
@@ -571,7 +584,11 @@ def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
     Returns:
         dict with 'states', 'policies', 'winner', 'players', 'num_moves'
     """
-    game = Brandubh()
+    game = Brandubh(
+        king_capture_pieces=config.king_capture_pieces,
+        king_can_capture=config.king_can_capture,
+        throne_is_hostile=config.throne_is_hostile
+    )
     states = []
     policies = []
     players = []
@@ -688,15 +705,20 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
             config.num_mcts_sims_defender,
             config.c_puct,
             config.temperature,
-            config.temperature_threshold
+            config.temperature_threshold,
+            # Game rule parameters - added after game_idx position
         )
+        
+        # Wrapper to add game rules to each call
+        def worker_with_rules(game_idx):
+            return worker_func(game_idx, config.king_capture_pieces, config.king_can_capture, config.throne_is_hostile)
         
         # Play games in parallel
         if config.num_workers > 1:
             if pool is not None:
                 # Use provided persistent pool
                 try:
-                    game_results = list(pool.imap_unordered(worker_func, range(config.num_games_per_iteration), chunksize=1))
+                    game_results = list(pool.imap_unordered(worker_with_rules, range(config.num_games_per_iteration), chunksize=1))
                 except Exception as e:
                     # Re-raise to ensure proper error propagation
                     print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
@@ -705,13 +727,13 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
                 # Create temporary pool (for backward compatibility)
                 with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
                     try:
-                        game_results = list(temp_pool.imap_unordered(worker_func, range(config.num_games_per_iteration), chunksize=1))
+                        game_results = list(temp_pool.imap_unordered(worker_with_rules, range(config.num_games_per_iteration), chunksize=1))
                     except Exception as e:
                         print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
                         raise
         else:
             # Single-threaded fallback
-            game_results = [worker_func(i) for i in range(config.num_games_per_iteration)]
+            game_results = [worker_with_rules(i) for i in range(config.num_games_per_iteration)]
     finally:
         # Clean up temporary file
         if cleanup_temp_file:
@@ -1419,6 +1441,18 @@ def train(config: TrainingConfig, resume_from: str = None):
     print(f"Games per iteration: {config.num_games_per_iteration}")
     print(f"Parallel workers: {config.num_workers}")
     
+    # Game rules
+    print("\n--- Game Rules ---")
+    print(f"King capture pieces: {config.king_capture_pieces}")
+    capture_desc = {
+        2: "(standard custodian - 2 opposite attackers)",
+        3: "(3 out of 4 sides surrounded)",
+        4: "(all 4 sides surrounded)"
+    }
+    print(f"  {capture_desc.get(config.king_capture_pieces, '')}")
+    print(f"King can capture: {config.king_can_capture}")
+    print(f"Throne is hostile: {config.throne_is_hostile}")
+    
     # Network architecture
     print("\n--- Network Architecture ---")
     print(f"Residual blocks: {config.num_res_blocks}")
@@ -1838,15 +1872,15 @@ if __name__ == "__main__":
     
     
     DEFAULT_ITERATIONS = 1000
-    DEFAULT_GAMES = 256
+    DEFAULT_GAMES = 512
     # DEFAULT_SIMULATIONS = 100  # Deprecated, use role-specific defaults
-    DEFAULT_SIMS_ATTACKER_SELFPLAY = 200
-    DEFAULT_SIMS_DEFENDER_SELFPLAY = 100
-    DEFAULT_SIMS_ATTACKER_EVAL = 150
-    DEFAULT_SIMS_DEFENDER_EVAL = 150
+    DEFAULT_SIMS_ATTACKER_SELFPLAY = 300
+    DEFAULT_SIMS_DEFENDER_SELFPLAY = 300
+    DEFAULT_SIMS_ATTACKER_EVAL = 300
+    DEFAULT_SIMS_DEFENDER_EVAL = 300
     DEFAULT_BATCH_SIZE = 256
     DEFAULT_LEARNING_RATE = 1e-3*(DEFAULT_BATCH_SIZE/256)
-    DEFAULT_EPOCHS = 4
+    DEFAULT_EPOCHS = 10
     DEFAULT_BATCHES_PER_EPOCH = 100
     DEFAULT_EVAL_VS_RANDOM = 64
     DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
@@ -1858,8 +1892,8 @@ if __name__ == "__main__":
     DEFAULT_TEMPERATURE_THRESHOLD = "king"
     
     # Network architecture
-    DEFAULT_RES_BLOCKS = 3
-    DEFAULT_CHANNELS = 32
+    DEFAULT_RES_BLOCKS = 6
+    DEFAULT_CHANNELS = 128
     
     # Replay buffer
     DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
