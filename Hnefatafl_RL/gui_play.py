@@ -125,7 +125,7 @@ class TaflGUI:
         self.font_medium = pygame.font.Font(None, 32)
         self.font_small = pygame.font.Font(None, 24)
         self.font_tiny = pygame.font.Font(None, 18)
-        self.font_probability = pygame.font.Font(None, 22)  # Slightly larger for probabilities
+        self.font_probability = pygame.font.Font(None, 26)  # Larger for probabilities (was 22)
         
         # Initial evaluation
         if self.network:
@@ -313,7 +313,8 @@ class TaflGUI:
             y = self.board_offset_y + row * self.square_size
             pygame.draw.rect(self.screen, SUCCESS_COLOR, (x, y, self.square_size, self.square_size), 5)
         
-        # Draw policy probabilities overlay (only if network is loaded)
+        # Draw policy probabilities overlay (only if network is loaded) - just the semi-transparent overlay
+        prob_texts_to_draw = []  # Store probability texts to draw after pieces
         if self.network and self.piece_selection_probs is not None:
             if self.selected_piece is None:
                 # Show piece selection probabilities
@@ -332,10 +333,8 @@ class TaflGUI:
                             s.fill(SUCCESS_COLOR)
                             self.screen.blit(s, (x, y))
                             
-                            # Draw probability text in center of square
-                            prob_text = self.font_probability.render(f"{prob*100:.0f}%", True, PROBABILITY_TEXT_COLOR)
-                            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + self.square_size//2))
-                            self.screen.blit(prob_text, text_rect)
+                            # Store probability text to draw later (after pieces)
+                            prob_texts_to_draw.append((prob, x, y))
             elif self.move_probs_from_selected is not None:
                 # Show move destination probabilities
                 max_prob = np.max(self.move_probs_from_selected) if np.max(self.move_probs_from_selected) > 0 else 1.0
@@ -353,10 +352,8 @@ class TaflGUI:
                             s.fill(SUCCESS_COLOR)
                             self.screen.blit(s, (x, y))
                             
-                            # Draw probability text in center of square
-                            prob_text = self.font_probability.render(f"{prob*100:.0f}%", True, PROBABILITY_TEXT_COLOR)
-                            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + self.square_size//2))
-                            self.screen.blit(prob_text, text_rect)
+                            # Store probability text to draw later (after pieces)
+                            prob_texts_to_draw.append((prob, x, y))
         
         # Draw pieces
         for row in range(self.board_size):
@@ -385,6 +382,12 @@ class TaflGUI:
                         (x + self.piece_radius//2, y)
                     ]
                     pygame.draw.lines(self.screen, BLACK, False, crown_points, 2)
+        
+        # Draw probability texts AFTER pieces so they appear on top
+        for prob, x, y in prob_texts_to_draw:
+            prob_text = self.font_probability.render(f"{prob*100:.0f}%", True, PROBABILITY_TEXT_COLOR)
+            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + self.square_size//2))
+            self.screen.blit(prob_text, text_rect)
     
     def _draw_info_panel(self):
         """Draw information panel on the right side with improved aesthetics."""
