@@ -12,7 +12,7 @@ Rules:
 - Attackers win by capturing the king
 - Defenders win by moving the king to a corner
 - Pieces are captured by surrounding them on two opposite sides (custodian capture)
-- King needs to be surrounded on all 4 sides (or 3 sides + throne)
+- King is captured like any other piece (between two hostile tiles)
 - Special squares: throne (center) and corners
 """
 
@@ -248,11 +248,6 @@ class Brandubh:
             return
         
         # Check if enemy is a king
-        if enemy == KING:
-            self._check_king_capture(nr, nc)
-            return
-        
-        # Regular piece: check if surrounded on opposite side
         nr2, nc2 = nr + dr, nc + dc
         
         if not (0 <= nr2 < 7 and 0 <= nc2 < 7):
@@ -263,30 +258,11 @@ class Brandubh:
         is_hostile_square = (nr2, nc2) == self.throne or (nr2, nc2) in self.corner_set
         
         if self._is_friendly(piece, opposite) or is_hostile_square:
+            target_is_king = enemy == KING
             self.board[nr, nc] = EMPTY
-    
-    def _check_king_capture(self, r: int, c: int):
-        """Check if the king at (r, c) is captured."""
-        # King must be surrounded on all 4 sides
-        adjacent_hostile = 0
-        
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nr, nc = r + dr, c + dc
-            
-            if not (0 <= nr < 7 and 0 <= nc < 7):
-                adjacent_hostile += 1  # Edge counts as hostile
-                continue
-            
-            piece = self.board[nr, nc]
-            is_hostile_square = (nr, nc) == self.throne or (nr, nc) in self.corner_set
-            
-            if piece == ATTACKER or is_hostile_square:
-                adjacent_hostile += 1
-        
-        if adjacent_hostile == 4:
-            self.board[r, c] = EMPTY
-            self.game_over = True
-            self.winner = ATTACKER_PLAYER
+            if target_is_king:
+                self.game_over = True
+                self.winner = ATTACKER_PLAYER
     
     def _is_friendly(self, piece1: int, piece2: int) -> bool:
         """Check if two pieces are on the same team."""
@@ -307,7 +283,7 @@ class Brandubh:
                 self.winner = DEFENDER_PLAYER
                 return
         
-        # Check if king is captured (already handled in _check_king_capture)
+    # Check if king was captured during the previous move resolution
         if KING not in self.board:
             self.game_over = True
             self.winner = ATTACKER_PLAYER
