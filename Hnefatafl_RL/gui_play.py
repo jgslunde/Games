@@ -306,31 +306,31 @@ class TaflGUI:
             y = self.board_offset_y + row * self.square_size
             pygame.draw.rect(self.screen, SUCCESS_COLOR, (x, y, self.square_size, self.square_size), 5)
         
-        # Draw policy probabilities overlay
-        if self.selected_piece is None:
-            # Show piece selection probabilities
-            max_prob = np.max(self.piece_selection_probs) if np.max(self.piece_selection_probs) > 0 else 1.0
-            for row in range(self.board_size):
-                for col in range(self.board_size):
-                    prob = self.piece_selection_probs[row, col]
-                    if prob > 0.001:
-                        x = self.board_offset_x + col * self.square_size
-                        y = self.board_offset_y + row * self.square_size
-                        
-                        # Draw semi-transparent overlay
-                        alpha = int(255 * (prob / max_prob) * 0.5)
-                        s = pygame.Surface((self.square_size, self.square_size))
-                        s.set_alpha(alpha)
-                        s.fill(SUCCESS_COLOR)
-                        self.screen.blit(s, (x, y))
-                        
-                        # Draw probability text ABOVE the piece
-                        prob_text = self.font_tiny.render(f"{prob*100:.1f}%", True, WHITE)
-                        text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + 12))
-                        self.screen.blit(prob_text, text_rect)
-        else:
-            # Show move destination probabilities
-            if self.move_probs_from_selected is not None:
+        # Draw policy probabilities overlay (only if network is loaded)
+        if self.network and self.piece_selection_probs is not None:
+            if self.selected_piece is None:
+                # Show piece selection probabilities
+                max_prob = np.max(self.piece_selection_probs) if np.max(self.piece_selection_probs) > 0 else 1.0
+                for row in range(self.board_size):
+                    for col in range(self.board_size):
+                        prob = self.piece_selection_probs[row, col]
+                        if prob > 0.001:
+                            x = self.board_offset_x + col * self.square_size
+                            y = self.board_offset_y + row * self.square_size
+                            
+                            # Draw semi-transparent overlay
+                            alpha = int(255 * (prob / max_prob) * 0.5)
+                            s = pygame.Surface((self.square_size, self.square_size))
+                            s.set_alpha(alpha)
+                            s.fill(SUCCESS_COLOR)
+                            self.screen.blit(s, (x, y))
+                            
+                            # Draw probability text ABOVE the piece
+                            prob_text = self.font_tiny.render(f"{prob*100:.1f}%", True, WHITE)
+                            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + 12))
+                            self.screen.blit(prob_text, text_rect)
+            elif self.move_probs_from_selected is not None:
+                # Show move destination probabilities
                 max_prob = np.max(self.move_probs_from_selected) if np.max(self.move_probs_from_selected) > 0 else 1.0
                 for row in range(self.board_size):
                     for col in range(self.board_size):
