@@ -34,7 +34,8 @@ class Brandubh:
     def __init__(self, 
                  king_capture_pieces: int = 2,
                  king_can_capture: bool = True,
-                 throne_is_hostile: bool = False):
+                 throne_is_hostile: bool = False,
+                 throne_enabled: bool = True):
         """
         Initialize Brandubh game with tunable rules.
         
@@ -45,7 +46,9 @@ class Brandubh:
                 - 4: King must be surrounded on all 4 sides
             king_can_capture: Whether the king can participate in capturing enemy pieces.
             throne_is_hostile: Whether the throne (center square) acts as a hostile square
-                             for captures (like corners do).
+                             for captures (like corners do). Only applies if throne_enabled=True.
+            throne_enabled: Whether the throne exists and restricts movement (only king can 
+                          move to throne). If False, center square acts like any other square.
         """
         self.board = np.zeros((7, 7), dtype=np.int8)
         self.current_player = ATTACKER_PLAYER  # Attackers start
@@ -56,6 +59,7 @@ class Brandubh:
         self.king_capture_pieces = king_capture_pieces
         self.king_can_capture = king_can_capture
         self.throne_is_hostile = throne_is_hostile
+        self.throne_enabled = throne_enabled
         
         # Validate rules
         if king_capture_pieces not in [2, 3, 4]:
@@ -201,11 +205,18 @@ class Brandubh:
                 if self.board[nr, nc] != EMPTY:
                     break
                 
-                # Only king can move to corners and throne
+                # Only king can move to corners (always restricted)
+                # Only king can move to throne (if throne is enabled)
                 is_king = self.board[r, c] == KING
-                is_special = (nr, nc) == self.throne or (nr, nc) in self.corner_set
+                is_corner = (nr, nc) in self.corner_set
+                is_throne = (nr, nc) == self.throne
                 
-                if is_special and not is_king:
+                # Block non-king from corners (always)
+                if is_corner and not is_king:
+                    break
+                
+                # Block non-king from throne (only if throne is enabled)
+                if is_throne and self.throne_enabled and not is_king:
                     break
                 
                 moves.append((r, c, nr, nc))
@@ -345,8 +356,8 @@ class Brandubh:
         # Corners are always hostile
         if (r, c) in self.corner_set:
             return True
-        # Throne is hostile only if the rule is enabled
-        if self.throne_is_hostile and (r, c) == self.throne:
+        # Throne is hostile only if throne is enabled AND throne_is_hostile rule is set
+        if self.throne_enabled and self.throne_is_hostile and (r, c) == self.throne:
             return True
         return False
     
@@ -404,6 +415,7 @@ class Brandubh:
         new_game.king_capture_pieces = self.king_capture_pieces
         new_game.king_can_capture = self.king_can_capture
         new_game.throne_is_hostile = self.throne_is_hostile
+        new_game.throne_enabled = self.throne_enabled
         return new_game
     
     def __str__(self) -> str:

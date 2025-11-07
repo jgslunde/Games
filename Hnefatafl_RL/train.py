@@ -44,6 +44,7 @@ class TrainingConfig:
     king_capture_pieces = 2           # Pieces required to capture king (2, 3, or 4)
     king_can_capture = True           # Whether king can help capture enemy pieces
     throne_is_hostile = False         # Whether throne counts as hostile square for captures
+    throne_enabled = True             # Whether throne exists and blocks non-king movement
     
     # Self-play
     num_iterations = 100              # Number of training iterations
@@ -389,7 +390,7 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float) -> List[
 
 def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, 
                                 num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_threshold, game_idx,
-                                king_capture_pieces, king_can_capture, throne_is_hostile):
+                                king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -402,6 +403,12 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         temperature: Sampling temperature
+        temperature_threshold: Move threshold or "king" for king-based threshold
+        game_idx: Game index for seeding
+        king_capture_pieces: Number of pieces to capture king
+        king_can_capture: Whether king can capture
+        throne_is_hostile: Whether throne is hostile for captures
+        throne_enabled: Whether throne exists and blocks movement
         temperature_threshold: Move number threshold for temperature
         game_idx: Game index (unused, for pool.map)
         king_capture_pieces: Number of pieces required to capture king (2, 3, or 4)
@@ -453,7 +460,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         game = Brandubh(
             king_capture_pieces=king_capture_pieces,
             king_can_capture=king_can_capture,
-            throne_is_hostile=throne_is_hostile
+            throne_is_hostile=throne_is_hostile,
+            throne_enabled=throne_enabled
         )
         states = []
         policies = []
@@ -587,7 +595,8 @@ def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
     game = Brandubh(
         king_capture_pieces=config.king_capture_pieces,
         king_can_capture=config.king_can_capture,
-        throne_is_hostile=config.throne_is_hostile
+        throne_is_hostile=config.throne_is_hostile,
+        throne_enabled=config.throne_enabled
     )
     states = []
     policies = []
@@ -711,7 +720,7 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
         
         # Wrapper to add game rules to each call
         def worker_with_rules(game_idx):
-            return worker_func(game_idx, config.king_capture_pieces, config.king_can_capture, config.throne_is_hostile)
+            return worker_func(game_idx, config.king_capture_pieces, config.king_can_capture, config.throne_is_hostile, config.throne_enabled)
         
         # Play games in parallel
         if config.num_workers > 1:
@@ -1451,7 +1460,11 @@ def train(config: TrainingConfig, resume_from: str = None):
     }
     print(f"  {capture_desc.get(config.king_capture_pieces, '')}")
     print(f"King can capture: {config.king_can_capture}")
-    print(f"Throne is hostile: {config.throne_is_hostile}")
+    print(f"Throne enabled: {config.throne_enabled}")
+    if config.throne_enabled:
+        print(f"Throne is hostile: {config.throne_is_hostile}")
+    else:
+        print(f"  (Throne disabled - center square acts as normal square)")
     
     # Network architecture
     print("\n--- Network Architecture ---")
@@ -1918,6 +1931,12 @@ if __name__ == "__main__":
     # MCTS exploration
     DEFAULT_C_PUCT = 1.4
     
+    # Game rules
+    DEFAULT_KING_CAPTURE_PIECES = 2  # 2, 3, or 4 pieces needed to capture king
+    DEFAULT_KING_CAN_CAPTURE = True  # Whether king participates in captures
+    DEFAULT_THRONE_IS_HOSTILE = False  # Whether throne acts as hostile square
+    DEFAULT_THRONE_ENABLED = True  # Whether throne exists and blocks movement
+    
     # Evaluation
     DEFAULT_EVAL_GAMES = 128
     DEFAULT_EVAL_WIN_RATE = 0.52
@@ -1999,6 +2018,22 @@ if __name__ == "__main__":
     parser.add_argument("--temperature-threshold", type=temperature_threshold_type, default=DEFAULT_TEMPERATURE_THRESHOLD,
                        help=f"Move number after which temperature=0, or 'king' to drop when king leaves throne (default: {DEFAULT_TEMPERATURE_THRESHOLD})")
     
+    # Game rules
+    parser.add_argument("--king-capture-pieces", type=int, default=DEFAULT_KING_CAPTURE_PIECES, choices=[2, 3, 4],
+                       help=f"Number of pieces needed to capture king: 2 (standard), 3 (3/4 sides), 4 (all sides) (default: {DEFAULT_KING_CAPTURE_PIECES})")
+    parser.add_argument("--king-can-capture", action="store_true", default=DEFAULT_KING_CAN_CAPTURE,
+                       help=f"King can participate in captures (default: {DEFAULT_KING_CAN_CAPTURE})")
+    parser.add_argument("--king-cannot-capture", action="store_false", dest="king_can_capture",
+                       help="King cannot participate in captures")
+    parser.add_argument("--throne-is-hostile", action="store_true", default=DEFAULT_THRONE_IS_HOSTILE,
+                       help=f"Throne acts as hostile square for captures (default: {DEFAULT_THRONE_IS_HOSTILE})")
+    parser.add_argument("--throne-not-hostile", action="store_false", dest="throne_is_hostile",
+                       help="Throne does not act as hostile square")
+    parser.add_argument("--throne-enabled", action="store_true", default=DEFAULT_THRONE_ENABLED,
+                       help=f"Throne exists and blocks non-king movement (default: {DEFAULT_THRONE_ENABLED})")
+    parser.add_argument("--throne-disabled", action="store_false", dest="throne_enabled",
+                       help="Throne disabled - center square acts as normal square")
+    
     # Replay buffer
     parser.add_argument("--replay-buffer-size", type=int, default=DEFAULT_REPLAY_BUFFER_SIZE,
                        help=f"Maximum replay buffer size (default: {DEFAULT_REPLAY_BUFFER_SIZE})")
@@ -2076,6 +2111,12 @@ if __name__ == "__main__":
     config.c_puct = args.c_puct
     config.temperature = args.temperature
     config.temperature_threshold = args.temperature_threshold
+    
+    # Game rules
+    config.king_capture_pieces = args.king_capture_pieces
+    config.king_can_capture = args.king_can_capture
+    config.throne_is_hostile = args.throne_is_hostile
+    config.throne_enabled = args.throne_enabled
     
     # Replay buffer
     config.replay_buffer_size = args.replay_buffer_size
