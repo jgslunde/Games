@@ -1,5 +1,7 @@
 """
-Interactive Brandubh GUI with neural network evaluation display.
+Interactive Tafl GUI with neural network evaluation display.
+
+Supports both Brandubh (7x7) and Tablut (9x9) variants.
 
 Displays:
 - Board state
@@ -13,10 +15,11 @@ Controls:
 - Press 'R' to reset game
 
 Usage:
-    python gui_play.py <checkpoint_path> [--simulations N] [--c-puct C]
+    python gui_play.py <checkpoint_path> [--game {brandubh,tablut}] [--simulations N] [--c-puct C]
     
 Example:
     python gui_play.py checkpoints/best_model.pth
+    python gui_play.py checkpoints/best_model.pth --game tablut
     python gui_play.py checkpoints/best_model.pth --simulations 200 --c-puct 1.5
 """
 
@@ -28,6 +31,7 @@ import pygame
 from typing import Optional, Tuple, List
 
 from brandubh import Brandubh, EMPTY, ATTACKER, DEFENDER, KING
+from tablut import Tablut
 from network import BrandubhNet, MoveEncoder
 
 
@@ -48,22 +52,33 @@ BRIGHT_GREEN = (0, 255, 0)  # Bright green for probability text - contrasts with
 
 # Board settings
 WINDOW_SIZE = 900
-BOARD_SIZE = 7
 INFO_PANEL_WIDTH = 300
 BOARD_AREA_SIZE = WINDOW_SIZE - INFO_PANEL_WIDTH
-SQUARE_SIZE = BOARD_AREA_SIZE // BOARD_SIZE
-BOARD_OFFSET_X = (BOARD_AREA_SIZE - SQUARE_SIZE * BOARD_SIZE) // 2
-BOARD_OFFSET_Y = (WINDOW_SIZE - SQUARE_SIZE * BOARD_SIZE) // 2
-
-# Piece sizes
-PIECE_RADIUS = SQUARE_SIZE // 3
+# self.board_size, self.square_size, offsets, and self.piece_radius will be set per instance
 
 
-class BrandubhGUI:
-    def __init__(self, checkpoint_path: str, num_simulations: int = 100, c_puct: float = 1.4):
+class TaflGUI:
+    def __init__(self, checkpoint_path: str, game_type: str = 'brandubh', num_simulations: int = 100, c_puct: float = 1.4):
         pygame.init()
         self.screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
-        pygame.display.set_caption("Brandubh - Neural Network Evaluation")
+        
+        # Initialize game
+        if game_type.lower() == 'tablut':
+            self.game = Tablut()
+            self.board_size = 9
+            game_name = "Tablut"
+        else:  # default to brandubh
+            self.game = Brandubh()
+            self.board_size = 7
+            game_name = "Brandubh"
+        
+        # Calculate board drawing constants based on board size
+        self.square_size = BOARD_AREA_SIZE // self.board_size
+        self.board_offset_x = (BOARD_AREA_SIZE - self.square_size * self.board_size) // 2
+        self.board_offset_y = (WINDOW_SIZE - self.square_size * self.board_size) // 2
+        self.piece_radius = self.square_size // 3
+        
+        pygame.display.set_caption(f"{game_name} - Neural Network Evaluation")
         self.clock = pygame.time.Clock()
         
         # Load neural network
@@ -74,8 +89,7 @@ class BrandubhGUI:
         self.c_puct = c_puct
         self.mcts = None  # Will be created when needed
         
-        # Game state
-        self.game = Brandubh()
+        # Selected piece state
         self.selected_piece = None  # (row, col) of selected piece
         self.legal_moves_from_selected = []  # List of legal moves from selected piece
         
@@ -187,10 +201,10 @@ class BrandubhGUI:
     
     def _compute_piece_selection_probs(self):
         """Compute aggregated move probabilities for each piece."""
-        self.piece_selection_probs = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
+        self.piece_selection_probs = np.zeros((self.board_size, self.board_size), dtype=np.float32)
         
-        for r in range(BOARD_SIZE):
-            for c in range(BOARD_SIZE):
+        for r in range(self.board_size):
+            for c in range(self.board_size):
                 piece = self.game.board[r, c]
                 
                 # Check if this piece belongs to current player
@@ -216,7 +230,7 @@ class BrandubhGUI:
             self.move_probs_from_selected = None
             return
         
-        self.move_probs_from_selected = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
+        self.move_probs_from_selected = np.zeros((self.board_size, self.board_size), dtype=np.float32)
         
         from_r, from_c = self.selected_piece
         for move in self.legal_moves_from_selected:
@@ -226,16 +240,16 @@ class BrandubhGUI:
     
     def _board_to_screen(self, row: int, col: int) -> Tuple[int, int]:
         """Convert board coordinates to screen coordinates (center of square)."""
-        x = BOARD_OFFSET_X + col * SQUARE_SIZE + SQUARE_SIZE // 2
-        y = BOARD_OFFSET_Y + row * SQUARE_SIZE + SQUARE_SIZE // 2
+        x = self.board_offset_x + col * self.square_size + self.square_size // 2
+        y = self.board_offset_y + row * self.square_size + self.square_size // 2
         return x, y
     
     def _screen_to_board(self, x: int, y: int) -> Optional[Tuple[int, int]]:
         """Convert screen coordinates to board coordinates."""
-        col = (x - BOARD_OFFSET_X) // SQUARE_SIZE
-        row = (y - BOARD_OFFSET_Y) // SQUARE_SIZE
+        col = (x - self.board_offset_x) // self.square_size
+        row = (y - self.board_offset_y) // self.square_size
         
-        if 0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE:
+        if 0 <= row < self.board_size and 0 <= col < self.board_size:
             return row, col
         return None
     
@@ -245,10 +259,10 @@ class BrandubhGUI:
         self.screen.fill(WHITE)
         
         # Draw squares
-        for row in range(BOARD_SIZE):
-            for col in range(BOARD_SIZE):
-                x = BOARD_OFFSET_X + col * SQUARE_SIZE
-                y = BOARD_OFFSET_Y + row * SQUARE_SIZE
+        for row in range(self.board_size):
+            for col in range(self.board_size):
+                x = self.board_offset_x + col * self.square_size
+                y = self.board_offset_y + row * self.square_size
                 
                 # Square color (checkerboard)
                 if (row + col) % 2 == 0:
@@ -262,64 +276,64 @@ class BrandubhGUI:
                 elif (row, col) in [(0, 0), (0, 6), (6, 0), (6, 6)]:  # Corners
                     color = GOLD
                 
-                pygame.draw.rect(self.screen, color, (x, y, SQUARE_SIZE, SQUARE_SIZE))
-                pygame.draw.rect(self.screen, BLACK, (x, y, SQUARE_SIZE, SQUARE_SIZE), 1)
+                pygame.draw.rect(self.screen, color, (x, y, self.square_size, self.square_size))
+                pygame.draw.rect(self.screen, BLACK, (x, y, self.square_size, self.square_size), 1)
         
         # Highlight selected piece
         if self.selected_piece is not None:
             row, col = self.selected_piece
-            x = BOARD_OFFSET_X + col * SQUARE_SIZE
-            y = BOARD_OFFSET_Y + row * SQUARE_SIZE
-            pygame.draw.rect(self.screen, GREEN, (x, y, SQUARE_SIZE, SQUARE_SIZE), 5)
+            x = self.board_offset_x + col * self.square_size
+            y = self.board_offset_y + row * self.square_size
+            pygame.draw.rect(self.screen, GREEN, (x, y, self.square_size, self.square_size), 5)
         
         # Draw policy probabilities overlay
         if self.selected_piece is None:
             # Show piece selection probabilities
             max_prob = np.max(self.piece_selection_probs) if np.max(self.piece_selection_probs) > 0 else 1.0
-            for row in range(BOARD_SIZE):
-                for col in range(BOARD_SIZE):
+            for row in range(self.board_size):
+                for col in range(self.board_size):
                     prob = self.piece_selection_probs[row, col]
                     if prob > 0.001:
-                        x = BOARD_OFFSET_X + col * SQUARE_SIZE
-                        y = BOARD_OFFSET_Y + row * SQUARE_SIZE
+                        x = self.board_offset_x + col * self.square_size
+                        y = self.board_offset_y + row * self.square_size
                         
                         # Draw semi-transparent overlay
                         alpha = int(255 * (prob / max_prob) * 0.5)
-                        s = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE))
+                        s = pygame.Surface((self.square_size, self.square_size))
                         s.set_alpha(alpha)
                         s.fill(LIGHT_GREEN)
                         self.screen.blit(s, (x, y))
                         
                         # Draw probability text ABOVE the piece
                         prob_text = self.font_bold.render(f"{prob*100:.1f}%", True, BRIGHT_GREEN)
-                        text_rect = prob_text.get_rect(center=(x + SQUARE_SIZE//2, y + 12))
+                        text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + 12))
                         self.screen.blit(prob_text, text_rect)
         else:
             # Show move destination probabilities
             if self.move_probs_from_selected is not None:
                 max_prob = np.max(self.move_probs_from_selected) if np.max(self.move_probs_from_selected) > 0 else 1.0
-                for row in range(BOARD_SIZE):
-                    for col in range(BOARD_SIZE):
+                for row in range(self.board_size):
+                    for col in range(self.board_size):
                         prob = self.move_probs_from_selected[row, col]
                         if prob > 0.001:
-                            x = BOARD_OFFSET_X + col * SQUARE_SIZE
-                            y = BOARD_OFFSET_Y + row * SQUARE_SIZE
+                            x = self.board_offset_x + col * self.square_size
+                            y = self.board_offset_y + row * self.square_size
                             
                             # Draw semi-transparent overlay
                             alpha = int(255 * (prob / max_prob) * 0.5)
-                            s = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE))
+                            s = pygame.Surface((self.square_size, self.square_size))
                             s.set_alpha(alpha)
                             s.fill(LIGHT_GREEN)
                             self.screen.blit(s, (x, y))
                             
                             # Draw probability text ABOVE where piece would be
                             prob_text = self.font_bold.render(f"{prob*100:.1f}%", True, BRIGHT_GREEN)
-                            text_rect = prob_text.get_rect(center=(x + SQUARE_SIZE//2, y + 12))
+                            text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + 12))
                             self.screen.blit(prob_text, text_rect)
         
         # Draw pieces
-        for row in range(BOARD_SIZE):
-            for col in range(BOARD_SIZE):
+        for row in range(self.board_size):
+            for col in range(self.board_size):
                 piece = self.game.board[row, col]
                 if piece == EMPTY:
                     continue
@@ -327,21 +341,21 @@ class BrandubhGUI:
                 x, y = self._board_to_screen(row, col)
                 
                 if piece == ATTACKER:
-                    pygame.draw.circle(self.screen, BLACK, (x, y), PIECE_RADIUS)
-                    pygame.draw.circle(self.screen, WHITE, (x, y), PIECE_RADIUS, 2)
+                    pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius)
+                    pygame.draw.circle(self.screen, WHITE, (x, y), self.piece_radius, 2)
                 elif piece == DEFENDER:
-                    pygame.draw.circle(self.screen, WHITE, (x, y), PIECE_RADIUS)
-                    pygame.draw.circle(self.screen, BLACK, (x, y), PIECE_RADIUS, 2)
+                    pygame.draw.circle(self.screen, WHITE, (x, y), self.piece_radius)
+                    pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius, 2)
                 elif piece == KING:
-                    pygame.draw.circle(self.screen, GOLD, (x, y), PIECE_RADIUS)
-                    pygame.draw.circle(self.screen, BLACK, (x, y), PIECE_RADIUS, 2)
+                    pygame.draw.circle(self.screen, GOLD, (x, y), self.piece_radius)
+                    pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius, 2)
                     # Draw crown
                     crown_points = [
-                        (x - PIECE_RADIUS//2, y),
-                        (x - PIECE_RADIUS//3, y - PIECE_RADIUS//3),
+                        (x - self.piece_radius//2, y),
+                        (x - self.piece_radius//3, y - self.piece_radius//3),
                         (x, y),
-                        (x + PIECE_RADIUS//3, y - PIECE_RADIUS//3),
-                        (x + PIECE_RADIUS//2, y)
+                        (x + self.piece_radius//3, y - self.piece_radius//3),
+                        (x + self.piece_radius//2, y)
                     ]
                     pygame.draw.lines(self.screen, BLACK, False, crown_points, 2)
     
@@ -572,8 +586,10 @@ class BrandubhGUI:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Brandubh GUI with Neural Network Evaluation")
+    parser = argparse.ArgumentParser(description="Tafl Game GUI with Neural Network Evaluation")
     parser.add_argument("checkpoint", type=str, help="Path to model checkpoint (.pth file)")
+    parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut"],
+                       help="Game variant to play: brandubh (7x7) or tablut (9x9) (default: brandubh)")
     parser.add_argument("--simulations", type=int, default=100, 
                        help="Number of MCTS simulations (default: 100)")
     parser.add_argument("--c-puct", type=float, default=1.4,
@@ -581,7 +597,7 @@ def main():
     
     args = parser.parse_args()
     
-    gui = BrandubhGUI(args.checkpoint, num_simulations=args.simulations, c_puct=args.c_puct)
+    gui = TaflGUI(args.checkpoint, game_type=args.game, num_simulations=args.simulations, c_puct=args.c_puct)
     gui.run()
 
 
