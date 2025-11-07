@@ -35,20 +35,33 @@ from tablut import Tablut
 from network import BrandubhNet, MoveEncoder
 
 
-# Colors
+# Colors - Updated palette for better aesthetics
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
-BROWN = (139, 90, 43)
-LIGHT_BROWN = (205, 133, 63)
-RED = (220, 20, 60)
-BLUE = (30, 144, 255)
-GOLD = (255, 215, 0)
-GREEN = (50, 205, 50)
-LIGHT_GREEN = (144, 238, 144)
-GRAY = (128, 128, 128)
-LIGHT_GRAY = (211, 211, 211)
-DARK_ORANGE = (204, 85, 0)  # Darker orange for probability text
-BRIGHT_GREEN = (0, 255, 0)  # Bright green for probability text - contrasts with brown
+# Board colors - warmer, richer tones
+BOARD_DARK = (101, 67, 33)      # Dark wood
+BOARD_LIGHT = (205, 170, 125)   # Light wood
+BOARD_BORDER = (70, 50, 30)     # Dark border
+# Special squares
+CORNER_COLOR = (255, 215, 0)    # Gold for corners
+THRONE_COLOR = (255, 235, 205)  # Light gold for throne
+# Piece colors
+ATTACKER_COLOR = (40, 40, 40)   # Dark gray/black
+ATTACKER_OUTLINE = (20, 20, 20)
+DEFENDER_COLOR = (240, 240, 240) # Off-white
+DEFENDER_OUTLINE = (180, 180, 180)
+KING_COLOR = (218, 165, 32)      # Goldenrod
+KING_OUTLINE = (184, 134, 11)    # Dark goldenrod
+# UI colors
+PANEL_BG = (45, 52, 62)          # Dark blue-gray
+PANEL_ACCENT = (58, 68, 82)      # Lighter blue-gray
+TEXT_PRIMARY = (236, 240, 241)   # Off-white text
+TEXT_SECONDARY = (149, 165, 166) # Gray text
+ACCENT_COLOR = (52, 152, 219)    # Blue accent
+SUCCESS_COLOR = (46, 204, 113)   # Green
+DANGER_COLOR = (231, 76, 60)     # Red
+HIGHLIGHT_COLOR = (52, 152, 219) # Blue highlight
+MOVE_HIGHLIGHT = (46, 204, 113, 100) # Semi-transparent green
 
 # Board settings
 WINDOW_SIZE = 900
@@ -58,7 +71,7 @@ BOARD_AREA_SIZE = WINDOW_SIZE - INFO_PANEL_WIDTH
 
 
 class TaflGUI:
-    def __init__(self, checkpoint_path: str, game_type: str = 'brandubh', num_simulations: int = 100, c_puct: float = 1.4):
+    def __init__(self, checkpoint_path: Optional[str] = None, game_type: str = 'brandubh', num_simulations: int = 100, c_puct: float = 1.4):
         pygame.init()
         self.screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
         
@@ -78,11 +91,15 @@ class TaflGUI:
         self.board_offset_y = (WINDOW_SIZE - self.square_size * self.board_size) // 2
         self.piece_radius = self.square_size // 3
         
-        pygame.display.set_caption(f"{game_name} - Neural Network Evaluation")
-        self.clock = pygame.time.Clock()
+        # Load neural network (optional)
+        self.network = None
+        if checkpoint_path:
+            self.network = self._load_network(checkpoint_path)
+            pygame.display.set_caption(f"{game_name} - AI Evaluation")
+        else:
+            pygame.display.set_caption(f"{game_name}")
         
-        # Load neural network
-        self.network = self._load_network(checkpoint_path)
+        self.clock = pygame.time.Clock()
         
         # MCTS settings
         self.num_simulations = num_simulations
@@ -103,14 +120,14 @@ class TaflGUI:
         self.move_probs_from_selected = None  # Probabilities for moves from selected piece
         
         # Fonts
-        self.font_large = pygame.font.Font(None, 36)
-        self.font_medium = pygame.font.Font(None, 28)
-        self.font_small = pygame.font.Font(None, 20)
-        self.font_bold = pygame.font.Font(None, 24)  # Bold-ish font for probabilities
-        self.font_bold.set_bold(True)
+        self.font_large = pygame.font.Font(None, 48)
+        self.font_medium = pygame.font.Font(None, 32)
+        self.font_small = pygame.font.Font(None, 24)
+        self.font_tiny = pygame.font.Font(None, 18)
         
         # Initial evaluation
-        self._evaluate_position()
+        if self.network:
+            self._evaluate_position()
     
     def _load_network(self, checkpoint_path: str) -> BrandubhNet:
         """Load neural network from checkpoint."""
@@ -142,6 +159,9 @@ class TaflGUI:
     
     def _evaluate_position(self):
         """Evaluate current position with neural network or MCTS."""
+        if not self.network:
+            return  # No evaluation if no network loaded
+        
         if self.use_mcts:
             self._evaluate_with_mcts()
         else:
@@ -266,15 +286,15 @@ class TaflGUI:
                 
                 # Square color (checkerboard)
                 if (row + col) % 2 == 0:
-                    color = LIGHT_BROWN
+                    color = BOARD_LIGHT
                 else:
-                    color = BROWN
+                    color = BOARD_DARK
                 
                 # Special squares
                 if (row, col) == (3, 3):  # Throne
-                    color = GOLD
+                    color = CORNER_COLOR
                 elif (row, col) in [(0, 0), (0, 6), (6, 0), (6, 6)]:  # Corners
-                    color = GOLD
+                    color = CORNER_COLOR
                 
                 pygame.draw.rect(self.screen, color, (x, y, self.square_size, self.square_size))
                 pygame.draw.rect(self.screen, BLACK, (x, y, self.square_size, self.square_size), 1)
@@ -284,7 +304,7 @@ class TaflGUI:
             row, col = self.selected_piece
             x = self.board_offset_x + col * self.square_size
             y = self.board_offset_y + row * self.square_size
-            pygame.draw.rect(self.screen, GREEN, (x, y, self.square_size, self.square_size), 5)
+            pygame.draw.rect(self.screen, SUCCESS_COLOR, (x, y, self.square_size, self.square_size), 5)
         
         # Draw policy probabilities overlay
         if self.selected_piece is None:
@@ -301,11 +321,11 @@ class TaflGUI:
                         alpha = int(255 * (prob / max_prob) * 0.5)
                         s = pygame.Surface((self.square_size, self.square_size))
                         s.set_alpha(alpha)
-                        s.fill(LIGHT_GREEN)
+                        s.fill(SUCCESS_COLOR)
                         self.screen.blit(s, (x, y))
                         
                         # Draw probability text ABOVE the piece
-                        prob_text = self.font_bold.render(f"{prob*100:.1f}%", True, BRIGHT_GREEN)
+                        prob_text = self.font_tiny.render(f"{prob*100:.1f}%", True, WHITE)
                         text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + 12))
                         self.screen.blit(prob_text, text_rect)
         else:
@@ -323,11 +343,11 @@ class TaflGUI:
                             alpha = int(255 * (prob / max_prob) * 0.5)
                             s = pygame.Surface((self.square_size, self.square_size))
                             s.set_alpha(alpha)
-                            s.fill(LIGHT_GREEN)
+                            s.fill(SUCCESS_COLOR)
                             self.screen.blit(s, (x, y))
                             
                             # Draw probability text ABOVE where piece would be
-                            prob_text = self.font_bold.render(f"{prob*100:.1f}%", True, BRIGHT_GREEN)
+                            prob_text = self.font_tiny.render(f"{prob*100:.1f}%", True, WHITE)
                             text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + 12))
                             self.screen.blit(prob_text, text_rect)
         
@@ -347,7 +367,7 @@ class TaflGUI:
                     pygame.draw.circle(self.screen, WHITE, (x, y), self.piece_radius)
                     pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius, 2)
                 elif piece == KING:
-                    pygame.draw.circle(self.screen, GOLD, (x, y), self.piece_radius)
+                    pygame.draw.circle(self.screen, KING_COLOR, (x, y), self.piece_radius)
                     pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius, 2)
                     # Draw crown
                     crown_points = [
@@ -360,129 +380,165 @@ class TaflGUI:
                     pygame.draw.lines(self.screen, BLACK, False, crown_points, 2)
     
     def _draw_info_panel(self):
-        """Draw information panel on the right side."""
+        """Draw information panel on the right side with improved aesthetics."""
         panel_x = BOARD_AREA_SIZE
         
         # Background
-        pygame.draw.rect(self.screen, LIGHT_GRAY, (panel_x, 0, INFO_PANEL_WIDTH, WINDOW_SIZE))
-        pygame.draw.line(self.screen, BLACK, (panel_x, 0), (panel_x, WINDOW_SIZE), 2)
+        pygame.draw.rect(self.screen, PANEL_BG, (panel_x, 0, INFO_PANEL_WIDTH, WINDOW_SIZE))
         
-        y_offset = 20
+        y_offset = 30
         
-        # Title
-        title = self.font_large.render("Network Eval", True, BLACK)
-        self.screen.blit(title, (panel_x + 20, y_offset))
-        y_offset += 50
+        # Title with gradient effect
+        if self.network:
+            title_text = "AI Analysis"
+        else:
+            title_text = "Game Info"
+        title = self.font_large.render(title_text, True, TEXT_PRIMARY)
+        title_rect = title.get_rect(center=(panel_x + INFO_PANEL_WIDTH//2, y_offset))
+        self.screen.blit(title, title_rect)
+        y_offset += 60
         
-        # Evaluation mode
-        mode_text = "MCTS" if self.use_mcts else "Raw Network"
-        mode_label = self.font_small.render(f"Mode: {mode_text}", True, BLACK)
-        self.screen.blit(mode_label, (panel_x + 20, y_offset))
+        # Divider
+        pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
+                        (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
         y_offset += 30
         
-        # Current player
+        # Current player section
         player_text = "Attacker" if self.game.current_player == 0 else "Defender"
-        player_color = BLACK if self.game.current_player == 0 else WHITE
-        player_label = self.font_medium.render(f"Turn: {player_text}", True, BLACK)
+        player_label = self.font_medium.render("Current Turn:", True, TEXT_SECONDARY)
         self.screen.blit(player_label, (panel_x + 20, y_offset))
-        
-        # Draw colored circle for current player
-        pygame.draw.circle(self.screen, player_color, (panel_x + 200, y_offset + 15), 15)
-        pygame.draw.circle(self.screen, BLACK, (panel_x + 200, y_offset + 15), 15, 2)
-        y_offset += 50
-        
-        # Value evaluation
-        pygame.draw.line(self.screen, BLACK, (panel_x + 20, y_offset), (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
-        y_offset += 20
-        
-        value_label = self.font_medium.render("Position Value:", True, BLACK)
-        self.screen.blit(value_label, (panel_x + 20, y_offset))
         y_offset += 35
         
-        # Value bar
-        bar_width = INFO_PANEL_WIDTH - 60
-        bar_height = 30
-        bar_x = panel_x + 30
-        bar_y = y_offset
+        # Player indicator with piece
+        piece_x = panel_x + INFO_PANEL_WIDTH // 2
+        piece_y = y_offset + 25
+        radius = 20
         
-        # Background bar
-        pygame.draw.rect(self.screen, LIGHT_GRAY, (bar_x, bar_y, bar_width, bar_height))
-        pygame.draw.rect(self.screen, BLACK, (bar_x, bar_y, bar_width, bar_height), 2)
+        # Draw piece shadow
+        pygame.draw.circle(self.screen, (0, 0, 0, 50), (piece_x + 2, piece_y + 2), radius)
         
-        # Value bar (positive = good for current player)
-        value_normalized = (self.value + 1) / 2  # Convert from [-1, 1] to [0, 1]
-        value_normalized = max(0, min(1, value_normalized))
+        if self.game.current_player == 0:  # Attacker
+            pygame.draw.circle(self.screen, ATTACKER_COLOR, (piece_x, piece_y), radius)
+            pygame.draw.circle(self.screen, ATTACKER_OUTLINE, (piece_x, piece_y), radius, 2)
+        else:  # Defender
+            pygame.draw.circle(self.screen, DEFENDER_COLOR, (piece_x, piece_y), radius)
+            pygame.draw.circle(self.screen, DEFENDER_OUTLINE, (piece_x, piece_y), radius, 2)
         
-        if value_normalized > 0.5:
-            # Good for current player
-            fill_start = bar_x + bar_width // 2
-            fill_width = int((value_normalized - 0.5) * 2 * (bar_width // 2))
-            pygame.draw.rect(self.screen, GREEN, (fill_start, bar_y, fill_width, bar_height))
-        else:
-            # Bad for current player
-            fill_width = int((0.5 - value_normalized) * 2 * (bar_width // 2))
-            fill_start = bar_x + bar_width // 2 - fill_width
-            pygame.draw.rect(self.screen, RED, (fill_start, bar_y, fill_width, bar_height))
+        player_name = self.font_medium.render(player_text, True, TEXT_PRIMARY)
+        name_rect = player_name.get_rect(center=(piece_x, piece_y + 40))
+        self.screen.blit(player_name, name_rect)
+        y_offset += 100
         
-        # Center line
-        pygame.draw.line(self.screen, BLACK, (bar_x + bar_width//2, bar_y), (bar_x + bar_width//2, bar_y + bar_height), 2)
-        
-        # Value text
-        value_text = self.font_medium.render(f"{self.value:+.3f}", True, BLACK)
-        text_rect = value_text.get_rect(center=(bar_x + bar_width//2, bar_y + bar_height + 20))
-        self.screen.blit(value_text, text_rect)
-        y_offset += 70
+        # Network evaluation section (only if network loaded)
+        if self.network and self.value is not None:
+            pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
+                            (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
+            y_offset += 30
+            
+            # Evaluation mode
+            mode_text = "MCTS" if self.use_mcts else "Raw Network"
+            mode_label = self.font_small.render(f"Mode: {mode_text}", True, TEXT_SECONDARY)
+            self.screen.blit(mode_label, (panel_x + 20, y_offset))
+            y_offset += 40
+            
+            # Value evaluation
+            value_label = self.font_medium.render("Position Value:", True, TEXT_PRIMARY)
+            self.screen.blit(value_label, (panel_x + 20, y_offset))
+            y_offset += 40
+            
+            # Value bar
+            bar_width = INFO_PANEL_WIDTH - 40
+            bar_height = 35
+            bar_x = panel_x + 20
+            bar_y = y_offset
+            
+            # Rounded background bar
+            pygame.draw.rect(self.screen, PANEL_ACCENT, (bar_x, bar_y, bar_width, bar_height), border_radius=5)
+            
+            # Value bar (positive = good for current player)
+            value_normalized = (self.value + 1) / 2  # Convert from [-1, 1] to [0, 1]
+            value_normalized = max(0, min(1, value_normalized))
+            
+            if value_normalized > 0.5:
+                # Good for current player
+                fill_start = bar_x + bar_width // 2
+                fill_width = int((value_normalized - 0.5) * 2 * (bar_width // 2))
+                if fill_width > 0:
+                    pygame.draw.rect(self.screen, SUCCESS_COLOR, (fill_start, bar_y, fill_width, bar_height), border_radius=5)
+            else:
+                # Bad for current player
+                fill_width = int((0.5 - value_normalized) * 2 * (bar_width // 2))
+                fill_start = bar_x + bar_width // 2 - fill_width
+                if fill_width > 0:
+                    pygame.draw.rect(self.screen, DANGER_COLOR, (fill_start, bar_y, fill_width, bar_height), border_radius=5)
+            
+            # Center marker
+            center_x = bar_x + bar_width // 2
+            pygame.draw.line(self.screen, TEXT_PRIMARY, (center_x, bar_y), (center_x, bar_y + bar_height), 2)
+            
+            # Value text
+            value_text = self.font_medium.render(f"{self.value:+.3f}", True, TEXT_PRIMARY)
+            text_rect = value_text.get_rect(center=(bar_x + bar_width//2, bar_y + bar_height + 25))
+            self.screen.blit(value_text, text_rect)
+            y_offset += 80
         
         # Instructions
-        pygame.draw.line(self.screen, BLACK, (panel_x + 20, y_offset), (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
-        y_offset += 20
+        pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
+                        (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
+        y_offset += 25
+        
+        instructions_title = self.font_medium.render("Controls:", True, TEXT_PRIMARY)
+        self.screen.blit(instructions_title, (panel_x + 20, y_offset))
+        y_offset += 35
         
         instructions = [
-            "Instructions:",
+            "• Click piece to select",
+            "• Click square to move",
+            "• Right-click to deselect",
             "",
-            "Click a piece to",
-            "select it.",
-            "",
-            "Green overlay shows",
-            "preferred moves.",
-            "",
-            "Click destination",
-            "to move.",
-            "",
-            "Press 'M' to toggle",
-            "MCTS/Raw Network.",
-            "",
-            "Press 'R' to reset.",
-            "",
-            "Right-click to",
-            "deselect.",
+            "• Press R to reset game",
         ]
         
+        if self.network:
+            instructions.extend([
+                "• Press M to toggle",
+                "  MCTS/Raw Network",
+            ])
+        
         for line in instructions:
-            text = self.font_small.render(line, True, BLACK)
-            self.screen.blit(text, (panel_x + 20, y_offset))
-            y_offset += 25
+            text = self.font_small.render(line, True, TEXT_SECONDARY)
+            self.screen.blit(text, (panel_x + 25, y_offset))
+            y_offset += 28
         
         # Game status
         if self.game.game_over:
             y_offset += 20
-            pygame.draw.line(self.screen, BLACK, (panel_x + 20, y_offset), (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
-            y_offset += 20
+            pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
+                            (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
+            y_offset += 30
             
-            status_text = self.font_large.render("GAME OVER", True, RED)
-            text_rect = status_text.get_rect(center=(panel_x + INFO_PANEL_WIDTH//2, y_offset + 20))
+            # Game over banner
+            banner_y = y_offset
+            banner_height = 80
+            pygame.draw.rect(self.screen, PANEL_ACCENT, 
+                           (panel_x + 10, banner_y, INFO_PANEL_WIDTH - 20, banner_height), border_radius=10)
+            
+            status_text = self.font_large.render("GAME OVER", True, DANGER_COLOR)
+            text_rect = status_text.get_rect(center=(panel_x + INFO_PANEL_WIDTH//2, banner_y + 25))
             self.screen.blit(status_text, text_rect)
-            y_offset += 60
             
             if self.game.winner == 0:
                 winner_text = "Attackers Win!"
+                winner_color = ATTACKER_OUTLINE
             elif self.game.winner == 1:
                 winner_text = "Defenders Win!"
+                winner_color = KING_COLOR
             else:
                 winner_text = "Draw!"
+                winner_color = TEXT_SECONDARY
             
-            winner = self.font_medium.render(winner_text, True, BLACK)
-            text_rect = winner.get_rect(center=(panel_x + INFO_PANEL_WIDTH//2, y_offset))
+            winner = self.font_medium.render(winner_text, True, winner_color)
+            text_rect = winner.get_rect(center=(panel_x + INFO_PANEL_WIDTH//2, banner_y + 55))
             self.screen.blit(winner, text_rect)
     
     def _handle_click(self, pos: Tuple[int, int], button: int):
@@ -560,14 +616,18 @@ class TaflGUI:
                     self._handle_click(event.pos, event.button)
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_r:
-                        # Reset game
-                        self.game = Brandubh()
+                        # Reset game - create appropriate game type
+                        if self.board_size == 9:
+                            self.game = Tablut()
+                        else:
+                            self.game = Brandubh()
                         self.selected_piece = None
                         self.legal_moves_from_selected = []
                         self.move_probs_from_selected = None
-                        self._evaluate_position()
-                    elif event.key == pygame.K_m:
-                        # Toggle MCTS mode
+                        if self.network:
+                            self._evaluate_position()
+                    elif event.key == pygame.K_m and self.network:
+                        # Toggle MCTS mode (only if network loaded)
                         self.use_mcts = not self.use_mcts
                         print(f"Switched to {'MCTS' if self.use_mcts else 'Raw Network'} evaluation")
                         if self.use_mcts:
@@ -586,8 +646,9 @@ class TaflGUI:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tafl Game GUI with Neural Network Evaluation")
-    parser.add_argument("checkpoint", type=str, help="Path to model checkpoint (.pth file)")
+    parser = argparse.ArgumentParser(description="Tafl Game GUI with Optional AI Evaluation")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                       help="Path to model checkpoint (.pth file). If not provided, plays without AI evaluation.")
     parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut"],
                        help="Game variant to play: brandubh (7x7) or tablut (9x9) (default: brandubh)")
     parser.add_argument("--simulations", type=int, default=100, 
