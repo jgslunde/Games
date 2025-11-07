@@ -1597,6 +1597,7 @@ def train(config: TrainingConfig, resume_from: str = None):
     print(f"Win rate threshold: {config.eval_win_rate:.1%}")
     print(f"Eval vs random frequency: every {config.eval_vs_random_frequency} iteration(s)")
     print(f"Eval vs random games: {config.eval_vs_random_games} per color ({config.eval_vs_random_games * 2} total)")
+    print("Note: Will stop evaluating vs random once 100% win rate is achieved")
     
     # Checkpointing
     print("\n--- Checkpointing ---")
@@ -1673,6 +1674,9 @@ def train(config: TrainingConfig, resume_from: str = None):
     
     # ELO tracking - cumulative ELO relative to initial random network
     cumulative_elo = 0.0  # Start at 0 (random network baseline)
+    
+    # Track if 100% win rate vs random has been achieved
+    achieved_100_percent_vs_random = False
     
     # Training metrics
     training_history = {
@@ -1786,9 +1790,9 @@ def train(config: TrainingConfig, resume_from: str = None):
                       f"minimum {config.min_buffer_size}")
                 training_time = 0
             
-            # 3. Evaluate vs random player
-            if (iteration + 1) % config.eval_vs_random_frequency == 0:
-                print(f"\n[3/4] Evaluating vs Random player...")
+            # 3. Evaluate vs random player (only if 100% win rate not yet achieved)
+            if not achieved_100_percent_vs_random and (iteration + 1) % config.eval_vs_random_frequency == 0:
+                print("\n[3/4] Evaluating vs Random player...")
                 eval_random_start = time.time()
                 random_eval = evaluate_vs_random(network, config, 
                                                 num_games=config.eval_vs_random_games,
@@ -1799,6 +1803,17 @@ def train(config: TrainingConfig, resume_from: str = None):
                 training_history['vs_random_elo'].append(random_eval['elo_diff'])
                 training_history['vs_random_attacker_wins'].append(random_eval['attacker_wins'])
                 training_history['vs_random_defender_wins'].append(random_eval['defender_wins'])
+                
+                # Check if 100% win rate achieved
+                if random_eval['win_rate'] >= 1.0:
+                    achieved_100_percent_vs_random = True
+                    print("\n" + "=" * 70)
+                    print("🎉 MILESTONE: Achieved 100% win rate vs random player!")
+                    print("No longer evaluating vs random for remaining iterations.")
+                    print("=" * 70)
+            elif achieved_100_percent_vs_random:
+                print("\n[3/4] Skipping random evaluation (100% win rate already achieved)")
+                eval_random_time = 0
             else:
                 print(f"\n[3/4] Skipping random evaluation (every {config.eval_vs_random_frequency} iterations)")
                 eval_random_time = 0
