@@ -11,6 +11,7 @@ Example:
     python play.py checkpoints/best_model.pth checkpoints/checkpoint_iter_5.pth
     python play.py model1.pth model2.pth --game tablut --simulations 200
     python play.py model1.pth model2.pth --king-capture-pieces 4 --throne-is-hostile
+    python play.py model1.pth model2.pth --num-games 10 --swap-colors  # 20 games total
 """
 
 import argparse
@@ -157,26 +158,54 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True):
     return game.winner, move_count
 
 
-def play_multiple_games(agent1, agent2, game_class, rules, num_games=10):
+def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True):
     """
     Play multiple games and collect statistics.
+    
+    Args:
+        agent1: First agent
+        agent2: Second agent
+        game_class: Game class to use
+        rules: Dictionary of game rules
+        num_games: Number of games to play
+        alternate_colors: If True, agents alternate colors each game. 
+                         If False, each pairing is played twice (once per color)
     """
     attacker_wins = 0
     defender_wins = 0
     draws = 0
     total_moves = 0
     
-    print(f"\nPlaying {num_games} games...\n")
+    if alternate_colors:
+        print(f"\nPlaying {num_games} games (alternating colors)...\n")
+        games_to_play = num_games
+    else:
+        print(f"\nPlaying {num_games * 2} games (each pairing played twice with colors swapped)...\n")
+        games_to_play = num_games * 2
     
-    for i in range(num_games):
-        # Alternate who plays attacker/defender for fairness
-        if i % 2 == 0:
-            winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=False)
+    for i in range(games_to_play):
+        # Determine which agent plays which color
+        if alternate_colors:
+            # Alternate who plays attacker/defender
+            if i % 2 == 0:
+                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=False)
+            else:
+                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=False)
+                # Flip winner perspective since agents swapped roles
+                if winner is not None:
+                    winner = 1 - winner
         else:
-            winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=False)
-            # Flip winner perspective since agents swapped roles
-            if winner is not None:
-                winner = 1 - winner
+            # Play each pairing twice: once with agent1 as attacker, once with agent2 as attacker
+            game_in_pair = i % 2
+            if game_in_pair == 0:
+                # Agent1 as attacker, Agent2 as defender
+                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=False)
+            else:
+                # Agent2 as attacker, Agent1 as defender
+                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=False)
+                # Flip winner perspective since agents swapped roles
+                if winner is not None:
+                    winner = 1 - winner
         
         if winner == 0:
             attacker_wins += 1
@@ -187,17 +216,17 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10):
         
         total_moves += moves
         
-        if (i + 1) % 10 == 0 or num_games <= 10:
-            print(f"Completed {i + 1}/{num_games} games...")
+        if (i + 1) % 10 == 0 or games_to_play <= 10:
+            print(f"Completed {i + 1}/{games_to_play} games...")
     
     print("\n" + "=" * 50)
     print("Statistics:")
     print("=" * 50)
-    print(f"Total games: {num_games}")
-    print(f"Agent 1 wins: {attacker_wins} ({100 * attacker_wins / num_games:.1f}%)")
-    print(f"Agent 2 wins: {defender_wins} ({100 * defender_wins / num_games:.1f}%)")
-    print(f"Draws: {draws} ({100 * draws / num_games:.1f}%)")
-    print(f"Average game length: {total_moves / num_games:.1f} moves")
+    print(f"Total games: {games_to_play}")
+    print(f"Agent 1 wins: {attacker_wins} ({100 * attacker_wins / games_to_play:.1f}%)")
+    print(f"Agent 2 wins: {defender_wins} ({100 * defender_wins / games_to_play:.1f}%)")
+    print(f"Draws: {draws} ({100 * draws / games_to_play:.1f}%)")
+    print(f"Average game length: {total_moves / games_to_play:.1f} moves")
     print("=" * 50)
 
 
@@ -214,28 +243,32 @@ def main():
     parser.add_argument("--c-puct", type=float, default=1.4,
                        help="MCTS exploration constant (default: 1.4)")
     parser.add_argument("--num-games", type=int, default=1,
-                       help="Number of games to play (default: 1). Agents alternate colors.")
+                       help="Number of games to play (default: 1).")
     parser.add_argument("--no-display", action="store_true",
                        help="Don't display board state during play")
+    parser.add_argument("--swap-colors", action="store_true",
+                       help="Play each game twice with colors swapped. With --num-games N, "
+                            "plays 2N games total (N pairings × 2 colors). "
+                            "Default behavior alternates colors between games.")
     
     # Game rule arguments (optional - will use checkpoint config by default)
-    parser.add_argument("--king-capture-pieces", type=int, default=None,
+    parser.add_argument("--king-capture-pieces", type=int, default=None, choices=[2, 3, 4],
                        help="Number of pieces required to capture king: 2, 3, or 4. "
                             "If not specified, uses rules from checkpoint.")
-    parser.add_argument("--king-can-capture", action="store_true", default=None,
-                       help="Whether king can help capture enemy pieces")
-    parser.add_argument("--no-king-can-capture", dest="king_can_capture", action="store_false",
-                       help="King cannot help capture enemy pieces")
-    parser.add_argument("--throne-is-hostile", action="store_true", default=None,
-                       help="Whether throne counts as hostile square for captures")
-    parser.add_argument("--no-throne-is-hostile", dest="throne_is_hostile", action="store_false",
-                       help="Throne is not hostile")
-    parser.add_argument("--throne-enabled", action="store_true", default=None,
-                       help="Whether throne exists and blocks non-king movement")
-    parser.add_argument("--no-throne-enabled", dest="throne_enabled", action="store_false",
-                       help="Disable throne (center acts as normal square)")
+    parser.add_argument("--king-can-capture", action="store_true", dest="king_can_capture_flag", default=None,
+                       help="King CAN help capture enemy pieces (overrides checkpoint)")
+    parser.add_argument("--king-cannot-capture", action="store_false", dest="king_can_capture_flag",
+                       help="King CANNOT help capture enemy pieces (overrides checkpoint)")
+    parser.add_argument("--throne-is-hostile", action="store_true", dest="throne_is_hostile_flag", default=None,
+                       help="Throne IS hostile for captures (overrides checkpoint)")
+    parser.add_argument("--throne-not-hostile", action="store_false", dest="throne_is_hostile_flag",
+                       help="Throne is NOT hostile for captures (overrides checkpoint)")
+    parser.add_argument("--throne-enabled", action="store_true", dest="throne_enabled_flag", default=None,
+                       help="Throne IS enabled - blocks movement (overrides checkpoint)")
+    parser.add_argument("--throne-disabled", action="store_false", dest="throne_enabled_flag",
+                       help="Throne is DISABLED - center is normal square (overrides checkpoint)")
     parser.add_argument("--force-rules", action="store_true",
-                       help="Force use of command-line rules even if checkpoints have different rules")
+                       help="Use command-line rules for any unspecified options (instead of checkpoint defaults)")
     
     args = parser.parse_args()
     
@@ -243,19 +276,30 @@ def main():
     force_rules = None
     if args.force_rules or any([
         args.king_capture_pieces is not None,
-        args.king_can_capture is not None,
-        args.throne_is_hostile is not None,
-        args.throne_enabled is not None
+        args.king_can_capture_flag is not None,
+        args.throne_is_hostile_flag is not None,
+        args.throne_enabled_flag is not None
     ]):
-        force_rules = {}
+        # Start with defaults when forcing rules
+        if args.force_rules:
+            force_rules = {
+                'king_capture_pieces': 2,
+                'king_can_capture': True,
+                'throne_is_hostile': False,
+                'throne_enabled': True,
+            }
+        else:
+            force_rules = {}
+        
+        # Override with any explicitly specified values
         if args.king_capture_pieces is not None:
             force_rules['king_capture_pieces'] = args.king_capture_pieces
-        if args.king_can_capture is not None:
-            force_rules['king_can_capture'] = args.king_can_capture
-        if args.throne_is_hostile is not None:
-            force_rules['throne_is_hostile'] = args.throne_is_hostile
-        if args.throne_enabled is not None:
-            force_rules['throne_enabled'] = args.throne_enabled
+        if args.king_can_capture_flag is not None:
+            force_rules['king_can_capture'] = args.king_can_capture_flag
+        if args.throne_is_hostile_flag is not None:
+            force_rules['throne_is_hostile'] = args.throne_is_hostile_flag
+        if args.throne_enabled_flag is not None:
+            force_rules['throne_enabled'] = args.throne_enabled_flag
     
     # Load checkpoints
     print("Loading checkpoints...\n")
@@ -281,12 +325,15 @@ def main():
     game_class = Tablut if args.game.lower() == 'tablut' else Brandubh
     
     # Play games
-    if args.num_games == 1:
+    if args.num_games == 1 and not args.swap_colors:
         # Single game with display (unless --no-display)
         play_game_between_agents(agent1, agent2, game_class, rules, display=not args.no_display)
     else:
         # Multiple games
-        play_multiple_games(agent1, agent2, game_class, rules, num_games=args.num_games)
+        alternate_colors = not args.swap_colors
+        play_multiple_games(agent1, agent2, game_class, rules, 
+                          num_games=args.num_games, 
+                          alternate_colors=alternate_colors)
 
 
 if __name__ == "__main__":

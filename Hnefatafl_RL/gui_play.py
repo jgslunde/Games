@@ -730,23 +730,51 @@ def main():
                        help="MCTS exploration constant (default: 1.4)")
     
     # Game rule arguments (optional - will be overridden by checkpoint config if present)
-    parser.add_argument("--king-capture-pieces", type=int, default=2,
-                       help="Number of pieces required to capture king: 2, 3, or 4 (default: 2). "
+    parser.add_argument("--king-capture-pieces", type=int, default=None, choices=[2, 3, 4],
+                       help="Number of pieces required to capture king: 2, 3, or 4. "
                             "Note: If loading a checkpoint, rules from checkpoint will be used unless --force-rules is set.")
-    parser.add_argument("--king-can-capture", action="store_true", default=True,
-                       help="Whether king can help capture enemy pieces (default: True)")
-    parser.add_argument("--no-king-can-capture", dest="king_can_capture", action="store_false",
-                       help="King cannot help capture enemy pieces")
-    parser.add_argument("--throne-is-hostile", action="store_true", default=False,
-                       help="Whether throne counts as hostile square for captures (default: False)")
-    parser.add_argument("--throne-enabled", action="store_true", default=True,
-                       help="Whether throne exists and blocks non-king movement (default: True)")
-    parser.add_argument("--no-throne-enabled", dest="throne_enabled", action="store_false",
-                       help="Disable throne (center acts as normal square)")
+    parser.add_argument("--king-can-capture", action="store_true", dest="king_can_capture_flag", default=None,
+                       help="King CAN help capture enemy pieces (overrides checkpoint)")
+    parser.add_argument("--king-cannot-capture", action="store_false", dest="king_can_capture_flag",
+                       help="King CANNOT help capture enemy pieces (overrides checkpoint)")
+    parser.add_argument("--throne-is-hostile", action="store_true", dest="throne_is_hostile_flag", default=None,
+                       help="Throne IS hostile for captures (overrides checkpoint)")
+    parser.add_argument("--throne-not-hostile", action="store_false", dest="throne_is_hostile_flag",
+                       help="Throne is NOT hostile for captures (overrides checkpoint)")
+    parser.add_argument("--throne-enabled", action="store_true", dest="throne_enabled_flag", default=None,
+                       help="Throne IS enabled - blocks movement (overrides checkpoint)")
+    parser.add_argument("--throne-disabled", action="store_false", dest="throne_enabled_flag",
+                       help="Throne is DISABLED - center is normal square (overrides checkpoint)")
     parser.add_argument("--force-rules", action="store_true",
-                       help="Force use of command-line rules even if checkpoint has different rules")
+                       help="Use command-line rules for any unspecified options (instead of checkpoint defaults)")
     
     args = parser.parse_args()
+    
+    # Determine final rules to use
+    # If force_rules is set, start with defaults and override with any specified values
+    # Otherwise, just pass the specified values and let checkpoint fill in the rest
+    if args.force_rules:
+        # Start with default rules
+        king_capture_pieces = 2
+        king_can_capture = True
+        throne_is_hostile = False
+        throne_enabled = True
+        
+        # Override with any explicitly specified values
+        if args.king_capture_pieces is not None:
+            king_capture_pieces = args.king_capture_pieces
+        if args.king_can_capture_flag is not None:
+            king_can_capture = args.king_can_capture_flag
+        if args.throne_is_hostile_flag is not None:
+            throne_is_hostile = args.throne_is_hostile_flag
+        if args.throne_enabled_flag is not None:
+            throne_enabled = args.throne_enabled_flag
+    else:
+        # Use None for unspecified values, let checkpoint provide defaults
+        king_capture_pieces = args.king_capture_pieces if args.king_capture_pieces is not None else 2
+        king_can_capture = args.king_can_capture_flag if args.king_can_capture_flag is not None else True
+        throne_is_hostile = args.throne_is_hostile_flag if args.throne_is_hostile_flag is not None else False
+        throne_enabled = args.throne_enabled_flag if args.throne_enabled_flag is not None else True
     
     # Print info about rule precedence
     if args.checkpoint and not args.force_rules:
@@ -754,8 +782,8 @@ def main():
         print("Use --force-rules to override with command-line arguments")
     
     gui = TaflGUI(args.checkpoint, game_type=args.game, num_simulations=args.simulations, c_puct=args.c_puct,
-                  king_capture_pieces=args.king_capture_pieces, king_can_capture=args.king_can_capture,
-                  throne_is_hostile=args.throne_is_hostile, throne_enabled=args.throne_enabled,
+                  king_capture_pieces=king_capture_pieces, king_can_capture=king_can_capture,
+                  throne_is_hostile=throne_is_hostile, throne_enabled=throne_enabled,
                   force_rules=args.force_rules)
     gui.run()
 
