@@ -69,9 +69,10 @@ MOVE_HIGHLIGHT = (46, 204, 113, 100) # Semi-transparent green
 PROBABILITY_TEXT_COLOR = (138, 43, 226)  # Purple (visible on all backgrounds)
 
 # Board settings
-WINDOW_SIZE = 900
-INFO_PANEL_WIDTH = 300
-BOARD_AREA_SIZE = WINDOW_SIZE - INFO_PANEL_WIDTH
+WINDOW_WIDTH = 1350  # 50% wider than original 900
+WINDOW_HEIGHT = 1080  # 20% taller than original 900
+INFO_PANEL_WIDTH = 450  # Proportionally wider (50% more than 300)
+BOARD_AREA_WIDTH = WINDOW_WIDTH - INFO_PANEL_WIDTH
 # self.board_size, self.square_size, offsets, and self.piece_radius will be set per instance
 
 
@@ -80,7 +81,7 @@ class TaflGUI:
                  king_capture_pieces: int = 2, king_can_capture: bool = True, 
                  throne_is_hostile: bool = False, throne_enabled: bool = True, force_rules: bool = False):
         pygame.init()
-        self.screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         
         # Store game rules (may be overridden by checkpoint)
         self.game_type = game_type.lower()
@@ -111,9 +112,9 @@ class TaflGUI:
             game_name = "Brandubh"
         
         # Calculate board drawing constants based on board size
-        self.square_size = BOARD_AREA_SIZE // self.board_size
-        self.board_offset_x = (BOARD_AREA_SIZE - self.square_size * self.board_size) // 2
-        self.board_offset_y = (WINDOW_SIZE - self.square_size * self.board_size) // 2
+        self.square_size = BOARD_AREA_WIDTH // self.board_size
+        self.board_offset_x = (BOARD_AREA_WIDTH - self.square_size * self.board_size) // 2
+        self.board_offset_y = (WINDOW_HEIGHT - self.square_size * self.board_size) // 2
         self.piece_radius = self.square_size // 3
         
         # Load neural network (optional)
@@ -485,10 +486,10 @@ class TaflGUI:
     
     def _draw_info_panel(self):
         """Draw information panel on the right side with improved aesthetics."""
-        panel_x = BOARD_AREA_SIZE
+        panel_x = BOARD_AREA_WIDTH
         
         # Background
-        pygame.draw.rect(self.screen, PANEL_BG, (panel_x, 0, INFO_PANEL_WIDTH, WINDOW_SIZE))
+        pygame.draw.rect(self.screen, PANEL_BG, (panel_x, 0, INFO_PANEL_WIDTH, WINDOW_HEIGHT))
         
         y_offset = 30
         
