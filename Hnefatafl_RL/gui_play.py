@@ -12,7 +12,11 @@ Controls:
 - Click piece to select, click destination to move
 - Right-click to deselect
 - Press 'M' to toggle between Raw Network and MCTS evaluation
+- Press 'V' to toggle value display on/off
+- Press 'P' to toggle percentage display on/off
+- Press 'A' to make AI move for current player
 - Press 'R' to reset game
+- Or use clickable buttons in the info panel
 
 Usage:
     python gui_play.py <checkpoint_path> [--game {brandubh,tablut}] [--simulations N] [--c-puct C]
@@ -133,6 +137,10 @@ class TaflGUI:
         
         # Evaluation mode toggle
         self.use_mcts = False  # Toggle between raw network and MCTS evaluation
+        
+        # Display toggles
+        self.show_value = True  # Toggle to show/hide value evaluation
+        self.show_percentages = True  # Toggle to show/hide percentages on board
         
         # Network evaluation
         self.policy_probs = None
@@ -317,6 +325,39 @@ class TaflGUI:
             move_idx = MoveEncoder.encode_move(move)
             self.move_probs_from_selected[to_r, to_c] = self.policy_probs[move_idx]
     
+    def _make_ai_move(self):
+        """Make the AI select and execute a move for the current player."""
+        if self.game.game_over or not self.network:
+            return
+        
+        # Create agent if needed
+        if self.mcts is None:
+            from agent import Agent
+            self.mcts = Agent(self.network, num_simulations=self.num_simulations, 
+                            c_puct=self.c_puct, device='cpu',
+                            add_dirichlet_noise=False)
+        
+        print(f"AI making move for {'Attackers' if self.game.current_player == 0 else 'Defenders'}...")
+        
+        # Get AI move (temperature=0 for best move)
+        move = self.mcts.select_move(self.game, temperature=0.0)
+        
+        if move is not None:
+            from_r, from_c, to_r, to_c = move
+            print(f"  AI selected: ({from_r},{from_c}) → ({to_r},{to_c})")
+            
+            # Make the move
+            self.game.make_move(move)
+            self.selected_piece = None
+            self.legal_moves_from_selected = []
+            self.move_probs_from_selected = None
+            
+            # Re-evaluate position
+            if not self.game.game_over:
+                self._evaluate_position()
+        else:
+            print("  No legal moves available!")
+    
     def _board_to_screen(self, row: int, col: int) -> Tuple[int, int]:
         """Convert board coordinates to screen coordinates (center of square)."""
         x = self.board_offset_x + col * self.square_size + self.square_size // 2
@@ -366,9 +407,9 @@ class TaflGUI:
             y = self.board_offset_y + row * self.square_size
             pygame.draw.rect(self.screen, SUCCESS_COLOR, (x, y, self.square_size, self.square_size), 5)
         
-        # Draw policy probabilities overlay (only if network is loaded) - just the semi-transparent overlay
+        # Draw policy probabilities overlay (only if network is loaded and percentages are enabled)
         prob_texts_to_draw = []  # Store probability texts to draw after pieces
-        if self.network and self.piece_selection_probs is not None:
+        if self.network and self.piece_selection_probs is not None and self.show_percentages:
             if self.selected_piece is None:
                 # Show piece selection probabilities
                 max_prob = np.max(self.piece_selection_probs) if np.max(self.piece_selection_probs) > 0 else 1.0
@@ -493,7 +534,7 @@ class TaflGUI:
         y_offset += 100
         
         # Network evaluation section (only if network loaded)
-        if self.network and self.value is not None:
+        if self.network and self.value is not None and self.show_value:
             pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
                             (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
             y_offset += 30
@@ -566,12 +607,81 @@ class TaflGUI:
             instructions.extend([
                 "• Press M to toggle",
                 "  MCTS/Raw Network",
+                "• Press V to toggle value",
+                "• Press P to toggle %",
+                "• Press A for AI move",
             ])
         
         for line in instructions:
             text = self.font_small.render(line, True, TEXT_SECONDARY)
             self.screen.blit(text, (panel_x + 25, y_offset))
             y_offset += 28
+        
+        # Interactive buttons section (only if network loaded and game not over)
+        if self.network and not self.game.game_over:
+            y_offset += 20
+            pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
+                            (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
+            y_offset += 25
+            
+            buttons_title = self.font_medium.render("AI Controls:", True, TEXT_PRIMARY)
+            self.screen.blit(buttons_title, (panel_x + 20, y_offset))
+            y_offset += 35
+            
+            # Make AI Move button
+            button_width = INFO_PANEL_WIDTH - 40
+            button_height = 45
+            button_x = panel_x + 20
+            button_y = y_offset
+            
+            # Store button rect for click detection
+            self.ai_move_button = pygame.Rect(button_x, button_y, button_width, button_height)
+            
+            # Draw button
+            button_color = ACCENT_COLOR
+            pygame.draw.rect(self.screen, button_color, self.ai_move_button, border_radius=8)
+            pygame.draw.rect(self.screen, TEXT_PRIMARY, self.ai_move_button, 2, border_radius=8)
+            
+            button_text = self.font_medium.render("Make AI Move", True, TEXT_PRIMARY)
+            text_rect = button_text.get_rect(center=self.ai_move_button.center)
+            self.screen.blit(button_text, text_rect)
+            y_offset += button_height + 20
+            
+            # Toggle buttons in a row
+            toggle_button_width = (INFO_PANEL_WIDTH - 50) // 2
+            toggle_button_height = 40
+            
+            # Show Value toggle button
+            value_button_x = panel_x + 20
+            value_button_y = y_offset
+            self.value_toggle_button = pygame.Rect(value_button_x, value_button_y, toggle_button_width, toggle_button_height)
+            
+            value_bg_color = SUCCESS_COLOR if self.show_value else PANEL_ACCENT
+            pygame.draw.rect(self.screen, value_bg_color, self.value_toggle_button, border_radius=6)
+            pygame.draw.rect(self.screen, TEXT_PRIMARY, self.value_toggle_button, 2, border_radius=6)
+            
+            value_text = self.font_small.render("Value", True, TEXT_PRIMARY)
+            value_text_rect = value_text.get_rect(center=self.value_toggle_button.center)
+            self.screen.blit(value_text, value_text_rect)
+            
+            # Show Percentages toggle button
+            pct_button_x = value_button_x + toggle_button_width + 10
+            pct_button_y = y_offset
+            self.pct_toggle_button = pygame.Rect(pct_button_x, pct_button_y, toggle_button_width, toggle_button_height)
+            
+            pct_bg_color = SUCCESS_COLOR if self.show_percentages else PANEL_ACCENT
+            pygame.draw.rect(self.screen, pct_bg_color, self.pct_toggle_button, border_radius=6)
+            pygame.draw.rect(self.screen, TEXT_PRIMARY, self.pct_toggle_button, 2, border_radius=6)
+            
+            pct_text = self.font_small.render("Show %", True, TEXT_PRIMARY)
+            pct_text_rect = pct_text.get_rect(center=self.pct_toggle_button.center)
+            self.screen.blit(pct_text, pct_text_rect)
+            y_offset += toggle_button_height + 15
+        else:
+            # No buttons to track if network not loaded or game over
+            self.ai_move_button = None
+            self.value_toggle_button = None
+            self.pct_toggle_button = None
         
         # Game status
         if self.game.game_over:
@@ -608,6 +718,25 @@ class TaflGUI:
         """Handle mouse click."""
         if self.game.game_over:
             return
+        
+        # Check if click is on a button (only left click)
+        if button == 1 and self.network:
+            # Check AI Move button
+            if hasattr(self, 'ai_move_button') and self.ai_move_button and self.ai_move_button.collidepoint(pos):
+                self._make_ai_move()
+                return
+            
+            # Check Value toggle button
+            if hasattr(self, 'value_toggle_button') and self.value_toggle_button and self.value_toggle_button.collidepoint(pos):
+                self.show_value = not self.show_value
+                print(f"Value display: {'ON' if self.show_value else 'OFF'}")
+                return
+            
+            # Check Percentage toggle button
+            if hasattr(self, 'pct_toggle_button') and self.pct_toggle_button and self.pct_toggle_button.collidepoint(pos):
+                self.show_percentages = not self.show_percentages
+                print(f"Percentage display: {'ON' if self.show_percentages else 'OFF'}")
+                return
         
         board_pos = self._screen_to_board(pos[0], pos[1])
         if board_pos is None:
@@ -708,6 +837,17 @@ class TaflGUI:
                         # Re-evaluate current position with new mode
                         if not self.game.game_over:
                             self._evaluate_position()
+                    elif event.key == pygame.K_v and self.network:
+                        # Toggle value display
+                        self.show_value = not self.show_value
+                        print(f"Value display: {'ON' if self.show_value else 'OFF'}")
+                    elif event.key == pygame.K_p and self.network:
+                        # Toggle percentage display
+                        self.show_percentages = not self.show_percentages
+                        print(f"Percentage display: {'ON' if self.show_percentages else 'OFF'}")
+                    elif event.key == pygame.K_a and self.network and not self.game.game_over:
+                        # Make AI move
+                        self._make_ai_move()
             
             self._draw_board()
             self._draw_info_panel()
