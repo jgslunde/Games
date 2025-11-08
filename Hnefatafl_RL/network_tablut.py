@@ -107,6 +107,25 @@ class TablutNet(nn.Module):
         value = torch.tanh(self.fc_value2(v))
         
         return policy_logits, value
+    
+    def optimize_for_inference(self, use_compile: bool = True, compile_mode: str = 'default'):
+        """
+        Optimize network for fast CPU inference using torch.compile.
+        
+        Args:
+            use_compile: whether to use torch.compile (PyTorch 2.0+)
+            compile_mode: compilation mode ('default', 'reduce-overhead', 'max-autotune')
+        
+        Returns:
+            optimized network (may be the same object or compiled version)
+        """
+        self.eval()
+        
+        # Use torch.compile if available and requested (PyTorch 2.0+)
+        if use_compile and hasattr(torch, 'compile'):
+            self = torch.compile(self, mode=compile_mode)
+        
+        return self
 
 
 class TablutMoveEncoder:

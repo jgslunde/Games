@@ -70,7 +70,7 @@ class Tablut:
         self.corners = [(0, 0), (0, 8), (8, 0), (8, 8)]
         self.corner_set = set(self.corners)
         
-        # Position history for repetition detection (3-fold repetition = draw)
+        # Position history for repetition detection (3-fold repetition = illegal move)
         self.position_history = []
         self.move_count = 0
         
@@ -121,7 +121,7 @@ class Tablut:
         self.position_history.append(self._get_position_hash())
     
     def _check_repetition_draw(self) -> bool:
-        """Check if the current position has occurred 3 times (draw by repetition)."""
+        """Check if the current position has occurred 3 times (illegal to cause third repetition)."""
         if len(self.position_history) < 6:  # Need at least 6 moves for 3-fold repetition
             return False
         

@@ -38,7 +38,7 @@ except ImportError:
 
 from brandubh import Brandubh
 from network import BrandubhNet, MoveEncoder
-from agent import BrandubhAgent
+from agent import Agent
 
 
 # =============================================================================
@@ -425,7 +425,8 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
 
 def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, 
                                 num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_threshold, game_idx,
-                                king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size):
+                                king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
+                                network_module, network_class_name, game_module, game_class_name):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -443,6 +444,10 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         king_capture_pieces: Number of pieces to capture king
         king_can_capture: Whether king can capture
         throne_is_hostile: Whether throne is hostile for captures
+        network_module: Module name for network (e.g., 'network', 'network_tablut')
+        network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
+        game_module: Module name for game (e.g., 'brandubh', 'tablut')
+        game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
         throne_enabled: Whether throne exists and blocks movement
         temperature_threshold: Move number threshold for temperature
         game_idx: Game index (unused, for pool.map)
@@ -464,35 +469,52 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         # Set torch to use only 1 thread per worker to avoid conflicts
         torch.set_num_threads(1)
         
-        # Add small random delay to stagger torch.compile cache access across workers
-        # This prevents "Failed to load artifact" warnings from cache contention
-        # Keep delay small to avoid serializing worker startup
-        delay = np.random.uniform(0.0, 10.0)  # Max 0.5 seconds
-        time.sleep(delay)
+        # Set per-worker compilation cache to avoid lock contention
+        # Each worker gets its own cache directory, so no delays needed
+        import tempfile
+        worker_cache_dir = os.path.join(tempfile.gettempdir(), f'torchinductor_{os.getpid()}')
+        os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
         
-        # Import inside worker to avoid issues with multiprocessing
-        from brandubh import Brandubh
-        from network import BrandubhNet, MoveEncoder
+        # Import dynamically based on config
+        import importlib
+        game_mod = importlib.import_module(game_module)
+        GameClass = getattr(game_mod, game_class_name)
+        
+        network_mod = importlib.import_module(network_module)
+        NetworkClass = getattr(network_mod, network_class_name)
+        
+        # Import MoveEncoder from the same network module
+        # For Brandubh: MoveEncoder from network.py
+        # For Tablut: TablutMoveEncoder from network_tablut.py
+        if 'tablut' in network_module.lower():
+            MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
+        else:
+            MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
+        
         from mcts import MCTS
         
         # Reconstruct network on CPU and load from file
-        network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+        network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels)
         checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
         network.load_state_dict(checkpoint['model_state_dict'])
         network.to('cpu')
         network.eval()
+        
         # Optimize for CPU inference with compilation for 2.5-2.75x speedup
-        # Worker startup is staggered to prevent cache contention warnings
+        # Each worker has its own cache directory, so no contention
         network = network.optimize_for_inference(use_compile=True, compile_mode='default')
         
         # Create MCTS instances for each player (with different simulation counts)
-        mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu')
-        mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu')
+        # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
+        mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu', 
+                            move_encoder_class=MoveEncoderClass)
+        mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu',
+                            move_encoder_class=MoveEncoderClass)
         mcts_attacker.reset_timing_stats()
         mcts_defender.reset_timing_stats()
         
         # Play game with configured rules
-        game = Brandubh(
+        game = GameClass(
             king_capture_pieces=king_capture_pieces,
             king_can_capture=king_can_capture,
             throne_is_hostile=throne_is_hostile,
@@ -527,7 +549,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
             policy_size = board_size * board_size * 4 * (board_size - 1)
             policy = np.zeros(policy_size, dtype=np.float32)
             for move, prob in visit_probs.items():
-                idx = MoveEncoder.encode_move(move)
+                idx = MoveEncoderClass.encode_move(move)
                 policy[idx] = prob
             
             # Store experience
@@ -555,11 +577,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
             if move_count > 500:
                 break
         
-        # Determine draw reason
+        # Determine draw reason (only move limit can cause draws - repetitions are illegal moves)
         draw_reason = None
-        if game.winner is None:
-            draw_reason = 'repetition'
-        elif not game.game_over and move_count > 500:
+        if not game.game_over and move_count > 500:
             # Hit move limit without natural game end
             draw_reason = 'move_limit'
         
@@ -621,7 +641,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         raise RuntimeError(error_msg)
 
 
-def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
+def play_self_play_game(agent: Agent, config: TrainingConfig) -> Dict:
     """
     Play a single self-play game and collect training data.
     
@@ -689,25 +709,23 @@ def play_self_play_game(agent: BrandubhAgent, config: TrainingConfig) -> Dict:
         if move_count > 500:
             break
     
-    # Determine draw reason
+    # Determine draw reason (only move limit can cause draws - repetitions are illegal moves)
     draw_reason = None
-    if game.winner is None:
-        draw_reason = 'repetition'
-    elif not game.game_over and move_count > 500:
+    if not game.game_over and move_count > 500:
         # Hit move limit without natural game end
         draw_reason = 'move_limit'
     
     return {
         'states': states,
         'policies': policies,
-        'winner': game.winner,  # Can be 0, 1, or None (draw)
+        'winner': game.winner,  # Can be 0, 1, or None (only if move limit reached)
         'players': players,
         'num_moves': move_count,
-        'draw_reason': draw_reason  # 'repetition', 'move_limit', or None
+        'draw_reason': draw_reason  # 'move_limit' or None
     }
 
 
-def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=None, temp_network_path=None) -> ReplayBuffer:
+def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None) -> ReplayBuffer:
     """
     Generate self-play games and store in replay buffer.
     Uses multiprocessing to parallelize game generation.
@@ -747,7 +765,9 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
              config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
              config.c_puct, config.temperature, config.temperature_threshold,
              i, config.king_capture_pieces, config.king_can_capture,
-             config.throne_is_hostile, config.throne_enabled, config.board_size)
+             config.throne_is_hostile, config.throne_enabled, config.board_size,
+             config.network_class.__module__, config.network_class.__name__,
+             config.game_class.__module__, config.game_class.__name__)
             for i in range(config.num_games_per_iteration)
         ]
         
@@ -785,7 +805,6 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
     attacker_wins = 0
     defender_wins = 0
     draws = 0
-    repetition_draws = 0
     move_limit_draws = 0
     
     # MCTS timing aggregation
@@ -808,11 +827,9 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
             attacker_wins += 1
         elif winner == 1:
             defender_wins += 1
-        else:  # winner is None or move limit reached
+        else:  # winner is None (only possible if move limit reached)
             draws += 1
-            if draw_reason == 'repetition':
-                repetition_draws += 1
-            elif draw_reason == 'move_limit':
+            if draw_reason == 'move_limit':
                 move_limit_draws += 1
         
         # Aggregate MCTS timing data
@@ -827,7 +844,7 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
                                          game_data['players']):
             # Determine value from player's perspective
             if winner is None or (not game_data.get('winner') and draw_reason == 'move_limit'):
-                # Draw (either by repetition or move limit)
+                # Draw (only by move limit - repetitions are illegal moves)
                 # Apply player-specific draw penalty
                 if player == 0:  # Attacker
                     value = config.draw_penalty_attacker
@@ -858,7 +875,7 @@ def generate_self_play_data(agent: BrandubhAgent, config: TrainingConfig, pool=N
           f"{defender_wins} defender wins ({100*defender_wins/total_games:.1f}%), "
           f"{draws} draws ({100*draws/total_games:.1f}%)")
     if draws > 0:
-        print(f"  Draw breakdown: {repetition_draws} by repetition, {move_limit_draws} by move limit (500+ moves)")
+        print(f"  All draws by move limit (500+ moves): {move_limit_draws}")
     print(f"Average game length: {total_moves/total_games:.1f} moves")
     
     # Print MCTS timing breakdown
@@ -1000,7 +1017,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 
 def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
                                 num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
-                                move_encoder_class_name=None):
+                                network_module, network_class_name, game_module, game_class_name):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1014,7 +1031,10 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
         c_puct: MCTS exploration constant
         nn_plays_attacker: Whether NN plays as attacker
         game_idx: Game index (unused, for pool.map)
-        move_encoder_class_name: String name of move encoder module (e.g., "network.MoveEncoder" or "network_tablut.TablutMoveEncoder")
+        network_module: Module name for network (e.g., 'network', 'network_tablut')
+        network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
+        game_module: Module name for game (e.g., 'brandubh', 'tablut')
+        game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
     
     Returns:
         1 if NN wins, 0 otherwise
@@ -1028,40 +1048,56 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
-    # Add random delay to stagger torch.compile cache access across workers
-    # With many workers, this prevents "Failed to load artifact" warnings from cache contention
-    # Compile 4 times a second:
-    delay = game_idx/4.0
-    time.sleep(delay)
+    # Set per-worker compilation cache to avoid lock contention
+    # Each worker gets its own cache directory, so no delays needed
+    import tempfile
+    worker_cache_dir = os.path.join(tempfile.gettempdir(), f'torchinductor_{os.getpid()}')
+    os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
-    # Import inside worker
-    from network import BrandubhNet
-    from agent import BrandubhAgent, RandomAgent, play_game
+    # Import dynamically based on config
+    import importlib
+    game_mod = importlib.import_module(game_module)
+    GameClass = getattr(game_mod, game_class_name)
+    
+    network_mod = importlib.import_module(network_module)
+    NetworkClass = getattr(network_mod, network_class_name)
+    
+    # Import MoveEncoder from the same network module
+    # For Brandubh: MoveEncoder from network.py
+    # For Tablut: TablutMoveEncoder from network_tablut.py
+    if 'tablut' in network_module.lower():
+        MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
+    else:
+        MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
+    
+    from agent import Agent, RandomAgent, play_game
     
     # Reconstruct network on CPU and load from file
-    network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+    network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels)
     checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
     network.load_state_dict(checkpoint['model_state_dict'])
     network.to('cpu')
     network.eval()
+    
     # Optimize for CPU inference with compilation for 2.5-2.75x speedup
-    # Worker startup is staggered to prevent cache contention warnings
+    # Each worker has its own cache directory, so no contention
     network = network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     # Determine which simulations to use based on NN's role
     num_simulations = num_sims_attacker if nn_plays_attacker else num_sims_defender
     
     # Create agents on CPU
-    nn_agent = BrandubhAgent(network, num_simulations=num_simulations,
-                            c_puct=c_puct, device='cpu')
+    # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
+    nn_agent = Agent(network, num_simulations=num_simulations,
+                     c_puct=c_puct, device='cpu', move_encoder_class=MoveEncoderClass)
     random_agent = RandomAgent()
     
     # Play game
     if nn_plays_attacker:
-        winner = play_game(nn_agent, random_agent, display=False)
+        winner = play_game(nn_agent, random_agent, GameClass, display=False)
         return 1 if winner == 0 else 0
     else:
-        winner = play_game(random_agent, nn_agent, display=False)
+        winner = play_game(random_agent, nn_agent, GameClass, display=False)
         return 1 if winner == 1 else 0
 
 
@@ -1129,7 +1165,11 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.c_puct,
-            True  # nn_plays_attacker
+            True,  # nn_plays_attacker
+            network_module=config.network_class.__module__,
+            network_class_name=config.network_class.__name__,
+            game_module=config.game_class.__module__,
+            game_class_name=config.game_class.__name__
         )
         
         worker_func_defender = partial(
@@ -1140,7 +1180,11 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.c_puct,
-            False  # nn_plays_attacker
+            False,  # nn_plays_attacker
+            network_module=config.network_class.__module__,
+            network_class_name=config.network_class.__name__,
+            game_module=config.game_class.__module__,
+            game_class_name=config.game_class.__name__
         )
         
         # Play games in parallel
@@ -1192,7 +1236,8 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
 
 def _evaluate_networks_worker(new_network_path, old_network_path,
                              num_res_blocks, num_channels, num_sims_attacker, num_sims_defender, c_puct,
-                             new_plays_attacker, game_idx):
+                             new_plays_attacker, game_idx,
+                             network_module, network_class_name, game_module, game_class_name):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1207,6 +1252,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         c_puct: MCTS exploration constant
         new_plays_attacker: Whether new network plays as attacker
         game_idx: Game index (unused, for pool.map)
+        network_module: Module name for network (e.g., 'network', 'network_tablut')
+        network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
+        game_module: Module name for game (e.g., 'brandubh', 'tablut')
+        game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
     
     Returns:
         1 if new network wins, 0 otherwise
@@ -1220,34 +1269,48 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
-    # Add random delay to stagger torch.compile cache access across workers
-    # With many workers, this prevents "Failed to load artifact" warnings from cache contention
-    # Delay scales with game_idx to spread workers over ~10 seconds
-    max_stagger_time = 10.0  # seconds
-    delay = (game_idx % 100) * (max_stagger_time / 100) + np.random.uniform(0, 0.1)
-    time.sleep(delay)
+    # Set per-worker compilation cache to avoid lock contention
+    # Each worker gets its own cache directory, so no delays needed
+    import tempfile
+    worker_cache_dir = os.path.join(tempfile.gettempdir(), f'torchinductor_{os.getpid()}')
+    os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
-    # Import inside worker
-    from network import BrandubhNet
-    from agent import BrandubhAgent, play_game
+    # Import dynamically based on config
+    import importlib
+    game_mod = importlib.import_module(game_module)
+    GameClass = getattr(game_mod, game_class_name)
+    
+    network_mod = importlib.import_module(network_module)
+    NetworkClass = getattr(network_mod, network_class_name)
+    
+    # Import MoveEncoder from the same network module
+    # For Brandubh: MoveEncoder from network.py
+    # For Tablut: TablutMoveEncoder from network_tablut.py
+    if 'tablut' in network_module.lower():
+        MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
+    else:
+        MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
+    
+    from agent import Agent, play_game
     
     # Reconstruct networks on CPU and load from files
-    new_network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+    new_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels)
     checkpoint = torch.load(new_network_path, map_location='cpu', weights_only=False)
     new_network.load_state_dict(checkpoint['model_state_dict'])
     new_network.to('cpu')
     new_network.eval()
+    
     # Optimize for CPU inference with compilation for 2.5-2.75x speedup
-    # Worker startup is staggered to prevent cache contention warnings
+    # Each worker has its own cache directory, so no contention
     new_network = new_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
-    old_network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+    old_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels)
     checkpoint = torch.load(old_network_path, map_location='cpu', weights_only=False)
     old_network.load_state_dict(checkpoint['model_state_dict'])
     old_network.to('cpu')
     old_network.eval()
+    
     # Optimize for CPU inference with compilation for 2.5-2.75x speedup
-    # Worker startup is staggered to prevent cache contention warnings
     old_network = old_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     # Determine simulations based on roles
@@ -1256,17 +1319,20 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     old_sims = num_sims_defender if new_plays_attacker else num_sims_attacker
     
     # Create agents on CPU
-    new_agent = BrandubhAgent(new_network, num_simulations=new_sims,
-                             c_puct=c_puct, device='cpu', add_dirichlet_noise=True)
-    old_agent = BrandubhAgent(old_network, num_simulations=old_sims,
-                             c_puct=c_puct, device='cpu', add_dirichlet_noise=True)
+    # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
+    new_agent = Agent(new_network, num_simulations=new_sims,
+                      c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
+                      move_encoder_class=MoveEncoderClass)
+    old_agent = Agent(old_network, num_simulations=old_sims,
+                      c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
+                      move_encoder_class=MoveEncoderClass)
     
     # Play game
     if new_plays_attacker:
-        winner = play_game(new_agent, old_agent, display=False)
+        winner = play_game(new_agent, old_agent, GameClass, display=False)
         return 1 if winner == 0 else 0
     else:
-        winner = play_game(old_agent, new_agent, display=False)
+        winner = play_game(old_agent, new_agent, GameClass, display=False)
         return 1 if winner == 1 else 0
 
 
@@ -1334,7 +1400,11 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.c_puct,
-            True  # new_plays_attacker
+            True,  # new_plays_attacker
+            config.network_class.__module__,
+            config.network_class.__name__,
+            config.game_class.__module__,
+            config.game_class.__name__
         )
         
         worker_func_new_defender = partial(
@@ -1346,7 +1416,11 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.c_puct,
-            False  # new_plays_attacker
+            False,  # new_plays_attacker
+            config.network_class.__module__,
+            config.network_class.__name__,
+            config.game_class.__module__,
+            config.game_class.__name__
         )
         
         # Play games in parallel using pool.map for true parallelization
@@ -1715,10 +1789,10 @@ def train(config: TrainingConfig, resume_from: str = None):
             # 1. Self-play
             print("\n[1/4] Self-play game generation...")
             selfplay_start = time.time()
-            agent = BrandubhAgent(network, 
-                                 num_simulations=config.num_mcts_simulations,
-                                 c_puct=config.c_puct,
-                                 device=config.device)
+            agent = Agent(network, 
+                         num_simulations=config.num_mcts_simulations,
+                         c_puct=config.c_puct,
+                         device=config.device)
             
             new_buffer = generate_self_play_data(agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
