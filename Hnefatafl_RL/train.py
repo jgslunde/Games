@@ -1236,8 +1236,9 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
 
 def _evaluate_networks_worker(new_network_path, old_network_path,
                              num_res_blocks, num_channels, num_sims_attacker, num_sims_defender, c_puct,
-                             new_plays_attacker, game_idx,
-                             network_module, network_class_name, game_module, game_class_name):
+                             new_plays_attacker,
+                             network_module, network_class_name, game_module, game_class_name,
+                             game_idx):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1251,11 +1252,11 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         new_plays_attacker: Whether new network plays as attacker
-        game_idx: Game index (unused, for pool.map)
         network_module: Module name for network (e.g., 'network', 'network_tablut')
         network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
         game_module: Module name for game (e.g., 'brandubh', 'tablut')
         game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
+        game_idx: Game index (unused, for pool.map)
     
     Returns:
         1 if new network wins, 0 otherwise
