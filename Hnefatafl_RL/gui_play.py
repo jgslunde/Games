@@ -550,14 +550,16 @@ class TaflGUI:
             # Value evaluation
             value_label = self.font_medium.render("Position Eval:", True, TEXT_PRIMARY)
             self.screen.blit(value_label, (panel_x + 20, y_offset))
+            y_offset += 35
             
-            # Add labels for attacker/defender
-            attacker_label = self.font_small.render("Attacker", True, ATTACKER_OUTLINE)
+            # Add labels for attacker/defender (above the bar)
             defender_label = self.font_small.render("Defender", True, KING_COLOR)
-            self.screen.blit(attacker_label, (panel_x + 200, y_offset + 5))
-            self.screen.blit(defender_label, (panel_x + 20, y_offset + 5))
+            attacker_label = self.font_small.render("Attacker", True, ATTACKER_OUTLINE)
+            self.screen.blit(defender_label, (panel_x + 20, y_offset))
+            attacker_label_rect = attacker_label.get_rect(topright=(panel_x + INFO_PANEL_WIDTH - 20, y_offset))
+            self.screen.blit(attacker_label, attacker_label_rect)
             
-            y_offset += 40
+            y_offset += 25
             
             # Value bar
             bar_width = INFO_PANEL_WIDTH - 40
