@@ -130,7 +130,8 @@ class TaflGUI:
         # MCTS settings
         self.num_simulations = num_simulations
         self.c_puct = c_puct
-        self.mcts = None  # Will be created when needed
+        self.mcts = None  # MCTS object for evaluation (created when needed)
+        self.ai_agent = None  # Agent object for making AI moves (created when needed)
         
         # Selected piece state
         self.selected_piece = None  # (row, col) of selected piece
@@ -331,17 +332,17 @@ class TaflGUI:
         if self.game.game_over or not self.network:
             return
         
-        # Create agent if needed
-        if self.mcts is None:
+        # Create AI agent if needed (separate from MCTS evaluation object)
+        if self.ai_agent is None:
             from agent import Agent
-            self.mcts = Agent(self.network, num_simulations=self.num_simulations, 
+            self.ai_agent = Agent(self.network, num_simulations=self.num_simulations, 
                             c_puct=self.c_puct, device='cpu',
                             add_dirichlet_noise=False)
         
         print(f"AI making move for {'Attackers' if self.game.current_player == 0 else 'Defenders'}...")
         
         # Get AI move (temperature=0 for best move)
-        move = self.mcts.select_move(self.game, temperature=0.0)
+        move = self.ai_agent.select_move(self.game, temperature=0.0)
         
         if move is not None:
             from_r, from_c, to_r, to_c = move
@@ -547,8 +548,15 @@ class TaflGUI:
             y_offset += 40
             
             # Value evaluation
-            value_label = self.font_medium.render("Position Value:", True, TEXT_PRIMARY)
+            value_label = self.font_medium.render("Position Eval:", True, TEXT_PRIMARY)
             self.screen.blit(value_label, (panel_x + 20, y_offset))
+            
+            # Add labels for attacker/defender
+            attacker_label = self.font_small.render("Attacker", True, ATTACKER_OUTLINE)
+            defender_label = self.font_small.render("Defender", True, KING_COLOR)
+            self.screen.blit(attacker_label, (panel_x + 200, y_offset + 5))
+            self.screen.blit(defender_label, (panel_x + 20, y_offset + 5))
+            
             y_offset += 40
             
             # Value bar
@@ -560,29 +568,34 @@ class TaflGUI:
             # Rounded background bar
             pygame.draw.rect(self.screen, PANEL_ACCENT, (bar_x, bar_y, bar_width, bar_height), border_radius=5)
             
-            # Value bar (positive = good for current player)
-            value_normalized = (self.value + 1) / 2  # Convert from [-1, 1] to [0, 1]
+            # Convert value to attacker's perspective (value from network is current player's perspective)
+            attacker_value = self.value if self.game.current_player == 0 else -self.value
+            
+            # Value bar (positive = good for attacker, negative = good for defender)
+            value_normalized = (attacker_value + 1) / 2  # Convert from [-1, 1] to [0, 1]
             value_normalized = max(0, min(1, value_normalized))
             
             if value_normalized > 0.5:
-                # Good for current player
+                # Good for attacker
                 fill_start = bar_x + bar_width // 2
                 fill_width = int((value_normalized - 0.5) * 2 * (bar_width // 2))
                 if fill_width > 0:
-                    pygame.draw.rect(self.screen, SUCCESS_COLOR, (fill_start, bar_y, fill_width, bar_height), border_radius=5)
+                    # Use dark color for attacker
+                    pygame.draw.rect(self.screen, ATTACKER_OUTLINE, (fill_start, bar_y, fill_width, bar_height), border_radius=5)
             else:
-                # Bad for current player
+                # Good for defender
                 fill_width = int((0.5 - value_normalized) * 2 * (bar_width // 2))
                 fill_start = bar_x + bar_width // 2 - fill_width
                 if fill_width > 0:
-                    pygame.draw.rect(self.screen, DANGER_COLOR, (fill_start, bar_y, fill_width, bar_height), border_radius=5)
+                    # Use gold color for defender
+                    pygame.draw.rect(self.screen, KING_COLOR, (fill_start, bar_y, fill_width, bar_height), border_radius=5)
             
             # Center marker
             center_x = bar_x + bar_width // 2
             pygame.draw.line(self.screen, TEXT_PRIMARY, (center_x, bar_y), (center_x, bar_y + bar_height), 2)
             
-            # Value text
-            value_text = self.font_medium.render(f"{self.value:+.3f}", True, TEXT_PRIMARY)
+            # Value text (always from attacker's perspective)
+            value_text = self.font_medium.render(f"{attacker_value:+.3f}", True, TEXT_PRIMARY)
             text_rect = value_text.get_rect(center=(bar_x + bar_width//2, bar_y + bar_height + 25))
             self.screen.blit(value_text, text_rect)
             y_offset += 80

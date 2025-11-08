@@ -63,6 +63,48 @@ class Agent:
         """
         return self.mcts.select_move(game, temperature)
     
+    def select_move_with_stats(self, game, temperature: float = 0.0):
+        """
+        Select a move and return statistics.
+        
+        Args:
+            game: current game state
+            temperature: sampling temperature (0 = deterministic)
+        
+        Returns:
+            move: (from_row, from_col, to_row, to_col)
+            value: network value estimate from current player's perspective
+            visit_prob: proportion of MCTS visits to selected move
+        """
+        # Run MCTS search to get visit distribution
+        visit_probs = self.mcts.search(game)
+        
+        if not visit_probs:
+            # No moves available
+            legal_moves = game.get_legal_moves()
+            move = legal_moves[0] if legal_moves else None
+            return move, 0.0, 0.0
+        
+        moves = list(visit_probs.keys())
+        probs = np.array(list(visit_probs.values()))
+        
+        if temperature == 0:
+            # Choose most visited
+            move_idx = np.argmax(probs)
+            move = moves[move_idx]
+        else:
+            # Sample proportionally to visit counts
+            move_idx = np.random.choice(len(moves), p=probs)
+            move = moves[move_idx]
+        
+        visit_prob = probs[move_idx]
+        
+        # Get value estimate from root node
+        # The MCTS root stores the value from current player's perspective
+        value = self.mcts.root.mean_value if self.mcts.root else 0.0
+        
+        return move, value, visit_prob
+    
     def load_weights(self, path: str):
         """Load network weights from file."""
         self.network.load_state_dict(torch.load(path, map_location=self.device))

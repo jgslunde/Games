@@ -219,6 +219,10 @@ class Brandubh:
                 if is_throne and self.throne_enabled and not is_king:
                     break
                 
+                # Block king from returning to throne once it has left (if throne is enabled)
+                if is_throne and self.throne_enabled and is_king and self.king_has_left_throne:
+                    break
+                
                 moves.append((r, c, nr, nc))
                 nr += dr
                 nc += dc

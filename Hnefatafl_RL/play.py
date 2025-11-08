@@ -115,8 +115,8 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
         # Get current agent
         current_agent = agent1 if game.current_player == 0 else agent2
         
-        # Get move from agent
-        move = current_agent.select_move(game, temperature=temperature)
+        # Get move from agent with statistics
+        move, value, visit_prob = current_agent.select_move_with_stats(game, temperature=temperature)
         
         if move is None:
             # No legal moves - opponent wins
@@ -128,7 +128,10 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
         
         if display:
             player_name = "Attackers" if game.current_player == 0 else "Defenders"
-            print(f"Move {move_count + 1}: {player_name} move ({from_r},{from_c}) → ({to_r},{to_c})")
+            # Convert value to attacker's perspective (value is from current player's perspective)
+            attacker_value = value if game.current_player == 0 else -value
+            print(f"Move {move_count + 1}: {player_name} move ({from_r},{from_c}) → ({to_r},{to_c}) "
+                  f"[Eval: {attacker_value:+.3f}, Confidence: {visit_prob*100:.1f}%]")
         
         # Make move
         game.make_move(move)
