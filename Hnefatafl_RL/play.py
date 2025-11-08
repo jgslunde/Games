@@ -158,7 +158,7 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True):
     return game.winner, move_count
 
 
-def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True):
+def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True, display=False):
     """
     Play multiple games and collect statistics.
     
@@ -170,11 +170,21 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
         num_games: Number of games to play
         alternate_colors: If True, agents alternate colors each game. 
                          If False, each pairing is played twice (once per color)
+        display: Whether to print board state for each game
     """
-    attacker_wins = 0
-    defender_wins = 0
+    # Track wins by role and agent
+    agent1_attacker_wins = 0
+    agent1_defender_wins = 0
+    agent2_attacker_wins = 0
+    agent2_defender_wins = 0
     draws = 0
     total_moves = 0
+    
+    # Track games played in each role
+    agent1_attacker_games = 0
+    agent1_defender_games = 0
+    agent2_attacker_games = 0
+    agent2_defender_games = 0
     
     if alternate_colors:
         print(f"\nPlaying {num_games} games (alternating colors)...\n")
@@ -188,30 +198,46 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
         if alternate_colors:
             # Alternate who plays attacker/defender
             if i % 2 == 0:
-                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=False)
+                # Agent1 as attacker, Agent2 as defender
+                agent1_attacker_games += 1
+                agent2_defender_games += 1
+                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=display)
+                if winner == 0:
+                    agent1_attacker_wins += 1
+                elif winner == 1:
+                    agent2_defender_wins += 1
             else:
-                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=False)
-                # Flip winner perspective since agents swapped roles
-                if winner is not None:
-                    winner = 1 - winner
+                # Agent2 as attacker, Agent1 as defender
+                agent2_attacker_games += 1
+                agent1_defender_games += 1
+                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=display)
+                if winner == 0:
+                    agent2_attacker_wins += 1
+                elif winner == 1:
+                    agent1_defender_wins += 1
         else:
             # Play each pairing twice: once with agent1 as attacker, once with agent2 as attacker
             game_in_pair = i % 2
             if game_in_pair == 0:
                 # Agent1 as attacker, Agent2 as defender
-                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=False)
+                agent1_attacker_games += 1
+                agent2_defender_games += 1
+                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=display)
+                if winner == 0:
+                    agent1_attacker_wins += 1
+                elif winner == 1:
+                    agent2_defender_wins += 1
             else:
                 # Agent2 as attacker, Agent1 as defender
-                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=False)
-                # Flip winner perspective since agents swapped roles
-                if winner is not None:
-                    winner = 1 - winner
+                agent2_attacker_games += 1
+                agent1_defender_games += 1
+                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=display)
+                if winner == 0:
+                    agent2_attacker_wins += 1
+                elif winner == 1:
+                    agent1_defender_wins += 1
         
-        if winner == 0:
-            attacker_wins += 1
-        elif winner == 1:
-            defender_wins += 1
-        else:
+        if winner is None:
             draws += 1
         
         total_moves += moves
@@ -219,14 +245,38 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
         if (i + 1) % 10 == 0 or games_to_play <= 10:
             print(f"Completed {i + 1}/{games_to_play} games...")
     
+    # Calculate overall statistics
+    agent1_wins = agent1_attacker_wins + agent1_defender_wins
+    agent2_wins = agent2_attacker_wins + agent2_defender_wins
+    attacker_wins = agent1_attacker_wins + agent2_attacker_wins
+    defender_wins = agent1_defender_wins + agent2_defender_wins
+    
     print("\n" + "=" * 50)
     print("Statistics:")
     print("=" * 50)
     print(f"Total games: {games_to_play}")
-    print(f"Agent 1 wins: {attacker_wins} ({100 * attacker_wins / games_to_play:.1f}%)")
-    print(f"Agent 2 wins: {defender_wins} ({100 * defender_wins / games_to_play:.1f}%)")
-    print(f"Draws: {draws} ({100 * draws / games_to_play:.1f}%)")
-    print(f"Average game length: {total_moves / games_to_play:.1f} moves")
+    print(f"\nOverall Results:")
+    print(f"  Agent 1 wins: {agent1_wins} ({100 * agent1_wins / games_to_play:.1f}%)")
+    print(f"  Agent 2 wins: {agent2_wins} ({100 * agent2_wins / games_to_play:.1f}%)")
+    print(f"  Draws: {draws} ({100 * draws / games_to_play:.1f}%)")
+    
+    print(f"\nBy Role:")
+    print(f"  Attacker wins: {attacker_wins}/{games_to_play} ({100 * attacker_wins / games_to_play:.1f}%)")
+    print(f"  Defender wins: {defender_wins}/{games_to_play} ({100 * defender_wins / games_to_play:.1f}%)")
+    
+    print(f"\nAgent 1 Performance:")
+    if agent1_attacker_games > 0:
+        print(f"  As Attacker: {agent1_attacker_wins}/{agent1_attacker_games} ({100 * agent1_attacker_wins / agent1_attacker_games:.1f}%)")
+    if agent1_defender_games > 0:
+        print(f"  As Defender: {agent1_defender_wins}/{agent1_defender_games} ({100 * agent1_defender_wins / agent1_defender_games:.1f}%)")
+    
+    print(f"\nAgent 2 Performance:")
+    if agent2_attacker_games > 0:
+        print(f"  As Attacker: {agent2_attacker_wins}/{agent2_attacker_games} ({100 * agent2_attacker_wins / agent2_attacker_games:.1f}%)")
+    if agent2_defender_games > 0:
+        print(f"  As Defender: {agent2_defender_wins}/{agent2_defender_games} ({100 * agent2_defender_wins / agent2_defender_games:.1f}%)")
+    
+    print(f"\nAverage game length: {total_moves / games_to_play:.1f} moves")
     print("=" * 50)
 
 
@@ -244,8 +294,8 @@ def main():
                        help="MCTS exploration constant (default: 1.4)")
     parser.add_argument("--num-games", type=int, default=1,
                        help="Number of games to play (default: 1).")
-    parser.add_argument("--no-display", action="store_true",
-                       help="Don't display board state during play")
+    parser.add_argument("--display", action="store_true",
+                       help="Display board state during play (default: shown for single game, hidden for multiple games)")
     parser.add_argument("--swap-colors", action="store_true",
                        help="Play each game twice with colors swapped. With --num-games N, "
                             "plays 2N games total (N pairings × 2 colors). "
@@ -326,14 +376,15 @@ def main():
     
     # Play games
     if args.num_games == 1 and not args.swap_colors:
-        # Single game with display (unless --no-display)
-        play_game_between_agents(agent1, agent2, game_class, rules, display=not args.no_display)
+        # Single game - display by default (unless --display explicitly set to override)
+        display = args.display if args.display else True
+        play_game_between_agents(agent1, agent2, game_class, rules, display=display)
     else:
-        # Multiple games
-        alternate_colors = not args.swap_colors
+        # Multiple games - hide display by default (unless --display explicitly set)
         play_multiple_games(agent1, agent2, game_class, rules, 
                           num_games=args.num_games, 
-                          alternate_colors=alternate_colors)
+                          alternate_colors=not args.swap_colors,
+                          display=args.display)
 
 
 if __name__ == "__main__":
