@@ -84,7 +84,7 @@ DEFAULT_C_PUCT = 1.4
 # Game rules
 DEFAULT_KING_CAPTURE_PIECES = 2  # 2, 3, or 4 pieces needed to capture king
 DEFAULT_KING_CAN_CAPTURE = True  # Whether king participates in captures
-DEFAULT_THRONE_IS_HOSTILE = False  # Whether throne acts as hostile square
+DEFAULT_THRONE_IS_HOSTILE = True  # Whether throne acts as hostile square
 DEFAULT_THRONE_ENABLED = True  # Whether throne exists and blocks movement
 
 # Evaluation

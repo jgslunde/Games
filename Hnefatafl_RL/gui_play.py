@@ -72,17 +72,37 @@ BOARD_AREA_SIZE = WINDOW_SIZE - INFO_PANEL_WIDTH
 
 
 class TaflGUI:
-    def __init__(self, checkpoint_path: Optional[str] = None, game_type: str = 'brandubh', num_simulations: int = 100, c_puct: float = 1.4):
+    def __init__(self, checkpoint_path: Optional[str] = None, game_type: str = 'brandubh', num_simulations: int = 100, c_puct: float = 1.4,
+                 king_capture_pieces: int = 2, king_can_capture: bool = True, 
+                 throne_is_hostile: bool = False, throne_enabled: bool = True, force_rules: bool = False):
         pygame.init()
         self.screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
         
+        # Store game rules (may be overridden by checkpoint)
+        self.game_type = game_type.lower()
+        self.king_capture_pieces = king_capture_pieces
+        self.king_can_capture = king_can_capture
+        self.throne_is_hostile = throne_is_hostile
+        self.throne_enabled = throne_enabled
+        self.force_rules = force_rules
+        
         # Initialize game
-        if game_type.lower() == 'tablut':
-            self.game = Tablut()
+        if self.game_type == 'tablut':
+            self.game = Tablut(
+                king_capture_pieces=king_capture_pieces,
+                king_can_capture=king_can_capture,
+                throne_is_hostile=throne_is_hostile,
+                throne_enabled=throne_enabled
+            )
             self.board_size = 9
             game_name = "Tablut"
         else:  # default to brandubh
-            self.game = Brandubh()
+            self.game = Brandubh(
+                king_capture_pieces=king_capture_pieces,
+                king_can_capture=king_can_capture,
+                throne_is_hostile=throne_is_hostile,
+                throne_enabled=throne_enabled
+            )
             self.board_size = 7
             game_name = "Brandubh"
         
@@ -141,10 +161,43 @@ class TaflGUI:
                 config = checkpoint['config']
                 num_res_blocks = config.get('num_res_blocks', 4)
                 num_channels = config.get('num_channels', 64)
+                
+                # Update game rules from checkpoint config if available (unless force_rules is set)
+                # This ensures the GUI uses the same rules as training
+                if not self.force_rules:
+                    self.king_capture_pieces = config.get('king_capture_pieces', self.king_capture_pieces)
+                    self.king_can_capture = config.get('king_can_capture', self.king_can_capture)
+                    self.throne_is_hostile = config.get('throne_is_hostile', self.throne_is_hostile)
+                    self.throne_enabled = config.get('throne_enabled', self.throne_enabled)
+                    print("Loaded game rules from checkpoint:")
+                else:
+                    print("Using command-line rules (--force-rules):")
+                
+                # Recreate game with correct rules
+                if self.game_type == 'tablut':
+                    self.game = Tablut(
+                        king_capture_pieces=self.king_capture_pieces,
+                        king_can_capture=self.king_can_capture,
+                        throne_is_hostile=self.throne_is_hostile,
+                        throne_enabled=self.throne_enabled
+                    )
+                else:
+                    self.game = Brandubh(
+                        king_capture_pieces=self.king_capture_pieces,
+                        king_can_capture=self.king_can_capture,
+                        throne_is_hostile=self.throne_is_hostile,
+                        throne_enabled=self.throne_enabled
+                    )
+                
+                print(f"  King capture pieces: {self.king_capture_pieces}")
+                print(f"  King can capture: {self.king_can_capture}")
+                print(f"  Throne is hostile: {self.throne_is_hostile}")
+                print(f"  Throne enabled: {self.throne_enabled}")
             else:
                 # Default values
                 num_res_blocks = 4
                 num_channels = 64
+                print("Warning: No config found in checkpoint, using command-line/default rules")
             
             # Create and load network
             network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
@@ -626,11 +679,21 @@ class TaflGUI:
                     self._handle_click(event.pos, event.button)
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_r:
-                        # Reset game - create appropriate game type
+                        # Reset game - create appropriate game type with same rules
                         if self.board_size == 9:
-                            self.game = Tablut()
+                            self.game = Tablut(
+                                king_capture_pieces=self.king_capture_pieces,
+                                king_can_capture=self.king_can_capture,
+                                throne_is_hostile=self.throne_is_hostile,
+                                throne_enabled=self.throne_enabled
+                            )
                         else:
-                            self.game = Brandubh()
+                            self.game = Brandubh(
+                                king_capture_pieces=self.king_capture_pieces,
+                                king_can_capture=self.king_can_capture,
+                                throne_is_hostile=self.throne_is_hostile,
+                                throne_enabled=self.throne_enabled
+                            )
                         self.selected_piece = None
                         self.legal_moves_from_selected = []
                         self.move_probs_from_selected = None
@@ -666,9 +729,34 @@ def main():
     parser.add_argument("--c-puct", type=float, default=1.4,
                        help="MCTS exploration constant (default: 1.4)")
     
+    # Game rule arguments (optional - will be overridden by checkpoint config if present)
+    parser.add_argument("--king-capture-pieces", type=int, default=2,
+                       help="Number of pieces required to capture king: 2, 3, or 4 (default: 2). "
+                            "Note: If loading a checkpoint, rules from checkpoint will be used unless --force-rules is set.")
+    parser.add_argument("--king-can-capture", action="store_true", default=True,
+                       help="Whether king can help capture enemy pieces (default: True)")
+    parser.add_argument("--no-king-can-capture", dest="king_can_capture", action="store_false",
+                       help="King cannot help capture enemy pieces")
+    parser.add_argument("--throne-is-hostile", action="store_true", default=False,
+                       help="Whether throne counts as hostile square for captures (default: False)")
+    parser.add_argument("--throne-enabled", action="store_true", default=True,
+                       help="Whether throne exists and blocks non-king movement (default: True)")
+    parser.add_argument("--no-throne-enabled", dest="throne_enabled", action="store_false",
+                       help="Disable throne (center acts as normal square)")
+    parser.add_argument("--force-rules", action="store_true",
+                       help="Force use of command-line rules even if checkpoint has different rules")
+    
     args = parser.parse_args()
     
-    gui = TaflGUI(args.checkpoint, game_type=args.game, num_simulations=args.simulations, c_puct=args.c_puct)
+    # Print info about rule precedence
+    if args.checkpoint and not args.force_rules:
+        print("Loading checkpoint - will use rules from checkpoint config if available")
+        print("Use --force-rules to override with command-line arguments")
+    
+    gui = TaflGUI(args.checkpoint, game_type=args.game, num_simulations=args.simulations, c_puct=args.c_puct,
+                  king_capture_pieces=args.king_capture_pieces, king_can_capture=args.king_can_capture,
+                  throne_is_hostile=args.throne_is_hostile, throne_enabled=args.throne_enabled,
+                  force_rules=args.force_rules)
     gui.run()
 
 
