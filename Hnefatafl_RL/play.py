@@ -1,47 +1,127 @@
 """
-Play Brandubh with two random players.
+Play Tafl games between two AI agents loaded from checkpoints.
 Displays the game state and move history.
+
+Supports both Brandubh (7x7) and Tablut (9x9) variants.
+
+Usage:
+    python play.py <checkpoint1> <checkpoint2> [options]
+    
+Example:
+    python play.py checkpoints/best_model.pth checkpoints/checkpoint_iter_5.pth
+    python play.py model1.pth model2.pth --game tablut --simulations 200
+    python play.py model1.pth model2.pth --king-capture-pieces 4 --throne-is-hostile
 """
 
-import random
+import argparse
+import sys
+import torch
+
 from brandubh import Brandubh
+from tablut import Tablut
+from network import BrandubhNet
+from agent import Agent
 
 
-def play_random_game(display=True, delay=0):
+def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None):
     """
-    Play a game with two random players.
+    Load neural network from checkpoint and extract rules.
     
     Args:
-        display: Whether to print the board state
-        delay: Delay between moves (in seconds)
+        checkpoint_path: Path to checkpoint file
+        force_rules: Optional dict of rules to force (overrides checkpoint)
     
     Returns:
-        winner: 0 for Attackers, 1 for Defenders
+        (network, rules_dict) tuple
+    """
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        
+        # Extract config from checkpoint
+        if 'config' in checkpoint:
+            config = checkpoint['config']
+            num_res_blocks = config.get('num_res_blocks', 4)
+            num_channels = config.get('num_channels', 64)
+            
+            # Extract game rules from checkpoint (can be overridden)
+            if force_rules is None:
+                rules = {
+                    'king_capture_pieces': config.get('king_capture_pieces', 2),
+                    'king_can_capture': config.get('king_can_capture', True),
+                    'throne_is_hostile': config.get('throne_is_hostile', False),
+                    'throne_enabled': config.get('throne_enabled', True),
+                }
+            else:
+                rules = force_rules
+        else:
+            # Default values
+            num_res_blocks = 4
+            num_channels = 64
+            rules = force_rules if force_rules else {
+                'king_capture_pieces': 2,
+                'king_can_capture': True,
+                'throne_is_hostile': False,
+                'throne_enabled': True,
+            }
+        
+        # Create and load network
+        network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+        network.load_state_dict(checkpoint['model_state_dict'])
+        network.eval()
+        
+        print(f"Loaded network from {checkpoint_path}")
+        print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels")
+        
+        return network, rules
+        
+    except Exception as e:
+        print(f"Error loading checkpoint {checkpoint_path}: {e}")
+        sys.exit(1)
+
+
+def play_game_between_agents(agent1, agent2, game_class, rules, display=True):
+    """
+    Play a game between two AI agents.
+    
+    Args:
+        agent1: Agent playing as attacker
+        agent2: Agent playing as defender
+        game_class: Game class (Brandubh or Tablut)
+        rules: Dictionary of game rules
+        display: Whether to print the board state
+    
+    Returns:
+        winner: 0 for Attackers, 1 for Defenders, None for draw
         num_moves: Number of moves in the game
     """
-    game = Brandubh()
+    game = game_class(**rules)
     move_count = 0
     
     if display:
         print("=" * 50)
-        print("Starting new game of Brandubh")
+        print(f"Starting new game of {game_class.__name__}")
         print("=" * 50)
+        print(f"Rules: King capture pieces={rules['king_capture_pieces']}, "
+              f"King can capture={rules['king_can_capture']}, "
+              f"Throne hostile={rules['throne_is_hostile']}, "
+              f"Throne enabled={rules['throne_enabled']}")
         print("\nInitial board:")
         print(game)
         print("\n")
     
     while not game.game_over:
-        # Get legal moves
-        legal_moves = game.get_legal_moves()
+        # Get current agent
+        current_agent = agent1 if game.current_player == 0 else agent2
         
-        if not legal_moves:
+        # Get move from agent
+        move = current_agent.select_move(game)
+        
+        if move is None:
             # No legal moves - opponent wins
             game.game_over = True
             game.winner = 1 - game.current_player
             break
         
-        # Choose random move
-        move = random.choice(legal_moves)
         from_r, from_c, to_r, to_c = move
         
         if display:
@@ -59,59 +139,156 @@ def play_random_game(display=True, delay=0):
         # Safety check to prevent infinite games
         if move_count > 500:
             if display:
-                print("Game exceeded 500 moves - calling it a draw (Attackers win by default)")
+                print("Game exceeded 500 moves - draw by move limit")
             game.game_over = True
-            game.winner = 0
+            game.winner = None
             break
     
     if display:
         print("=" * 50)
-        winner_name = "Attackers" if game.winner == 0 else "Defenders"
-        print(f"Game Over! Winner: {winner_name}")
+        if game.winner is None:
+            print("Game Over! Result: Draw")
+        else:
+            winner_name = "Attackers" if game.winner == 0 else "Defenders"
+            print(f"Game Over! Winner: {winner_name}")
         print(f"Total moves: {move_count}")
         print("=" * 50)
     
     return game.winner, move_count
 
 
-def play_multiple_games(num_games=100):
+def play_multiple_games(agent1, agent2, game_class, rules, num_games=10):
     """
     Play multiple games and collect statistics.
     """
     attacker_wins = 0
     defender_wins = 0
+    draws = 0
     total_moves = 0
     
-    print(f"Playing {num_games} games...\n")
+    print(f"\nPlaying {num_games} games...\n")
     
     for i in range(num_games):
-        winner, moves = play_random_game(display=False)
+        # Alternate who plays attacker/defender for fairness
+        if i % 2 == 0:
+            winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=False)
+        else:
+            winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=False)
+            # Flip winner perspective since agents swapped roles
+            if winner is not None:
+                winner = 1 - winner
         
         if winner == 0:
             attacker_wins += 1
-        else:
+        elif winner == 1:
             defender_wins += 1
+        else:
+            draws += 1
         
         total_moves += moves
         
-        if (i + 1) % 10 == 0:
+        if (i + 1) % 10 == 0 or num_games <= 10:
             print(f"Completed {i + 1}/{num_games} games...")
     
     print("\n" + "=" * 50)
     print("Statistics:")
     print("=" * 50)
     print(f"Total games: {num_games}")
-    print(f"Attacker wins: {attacker_wins} ({100 * attacker_wins / num_games:.1f}%)")
-    print(f"Defender wins: {defender_wins} ({100 * defender_wins / num_games:.1f}%)")
+    print(f"Agent 1 wins: {attacker_wins} ({100 * attacker_wins / num_games:.1f}%)")
+    print(f"Agent 2 wins: {defender_wins} ({100 * defender_wins / num_games:.1f}%)")
+    print(f"Draws: {draws} ({100 * draws / num_games:.1f}%)")
     print(f"Average game length: {total_moves / num_games:.1f} moves")
     print("=" * 50)
 
 
-if __name__ == "__main__":
-    # Play a single game with display
-    print("Playing a single game with visualization:\n")
-    play_random_game(display=True)
+def main():
+    parser = argparse.ArgumentParser(description="Play Tafl games between two AI agents")
+    parser.add_argument("checkpoint1", type=str,
+                       help="Path to first checkpoint (.pth file) - plays as attacker")
+    parser.add_argument("checkpoint2", type=str,
+                       help="Path to second checkpoint (.pth file) - plays as defender")
+    parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut"],
+                       help="Game variant: brandubh (7x7) or tablut (9x9) (default: brandubh)")
+    parser.add_argument("--simulations", type=int, default=100,
+                       help="Number of MCTS simulations per move (default: 100)")
+    parser.add_argument("--c-puct", type=float, default=1.4,
+                       help="MCTS exploration constant (default: 1.4)")
+    parser.add_argument("--num-games", type=int, default=1,
+                       help="Number of games to play (default: 1). Agents alternate colors.")
+    parser.add_argument("--no-display", action="store_true",
+                       help="Don't display board state during play")
     
-    # Uncomment to play multiple games and see statistics
-    # print("\n\n")
-    # play_multiple_games(num_games=100)
+    # Game rule arguments (optional - will use checkpoint config by default)
+    parser.add_argument("--king-capture-pieces", type=int, default=None,
+                       help="Number of pieces required to capture king: 2, 3, or 4. "
+                            "If not specified, uses rules from checkpoint.")
+    parser.add_argument("--king-can-capture", action="store_true", default=None,
+                       help="Whether king can help capture enemy pieces")
+    parser.add_argument("--no-king-can-capture", dest="king_can_capture", action="store_false",
+                       help="King cannot help capture enemy pieces")
+    parser.add_argument("--throne-is-hostile", action="store_true", default=None,
+                       help="Whether throne counts as hostile square for captures")
+    parser.add_argument("--no-throne-is-hostile", dest="throne_is_hostile", action="store_false",
+                       help="Throne is not hostile")
+    parser.add_argument("--throne-enabled", action="store_true", default=None,
+                       help="Whether throne exists and blocks non-king movement")
+    parser.add_argument("--no-throne-enabled", dest="throne_enabled", action="store_false",
+                       help="Disable throne (center acts as normal square)")
+    parser.add_argument("--force-rules", action="store_true",
+                       help="Force use of command-line rules even if checkpoints have different rules")
+    
+    args = parser.parse_args()
+    
+    # Build forced rules dict if specified
+    force_rules = None
+    if args.force_rules or any([
+        args.king_capture_pieces is not None,
+        args.king_can_capture is not None,
+        args.throne_is_hostile is not None,
+        args.throne_enabled is not None
+    ]):
+        force_rules = {}
+        if args.king_capture_pieces is not None:
+            force_rules['king_capture_pieces'] = args.king_capture_pieces
+        if args.king_can_capture is not None:
+            force_rules['king_can_capture'] = args.king_can_capture
+        if args.throne_is_hostile is not None:
+            force_rules['throne_is_hostile'] = args.throne_is_hostile
+        if args.throne_enabled is not None:
+            force_rules['throne_enabled'] = args.throne_enabled
+    
+    # Load checkpoints
+    print("Loading checkpoints...\n")
+    network1, rules1 = load_checkpoint_with_rules(args.checkpoint1, force_rules)
+    network2, rules2 = load_checkpoint_with_rules(args.checkpoint2, force_rules)
+    
+    # Use rules from first checkpoint (or forced rules if specified)
+    rules = rules1
+    
+    if not force_rules and rules1 != rules2:
+        print("\nWarning: Checkpoints have different game rules!")
+        print(f"Checkpoint 1 rules: {rules1}")
+        print(f"Checkpoint 2 rules: {rules2}")
+        print("Using rules from checkpoint 1. Use --force-rules to override.")
+    
+    print(f"\nUsing rules: {rules}\n")
+    
+    # Create agents
+    agent1 = Agent(network1, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu')
+    agent2 = Agent(network2, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu')
+    
+    # Select game class
+    game_class = Tablut if args.game.lower() == 'tablut' else Brandubh
+    
+    # Play games
+    if args.num_games == 1:
+        # Single game with display (unless --no-display)
+        play_game_between_agents(agent1, agent2, game_class, rules, display=not args.no_display)
+    else:
+        # Multiple games
+        play_multiple_games(agent1, agent2, game_class, rules, num_games=args.num_games)
+
+
+if __name__ == "__main__":
+    main()
+
