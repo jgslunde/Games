@@ -80,7 +80,7 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None):
         sys.exit(1)
 
 
-def play_game_between_agents(agent1, agent2, game_class, rules, display=True):
+def play_game_between_agents(agent1, agent2, game_class, rules, display=True, temperature=0.0):
     """
     Play a game between two AI agents.
     
@@ -90,6 +90,7 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True):
         game_class: Game class (Brandubh or Tablut)
         rules: Dictionary of game rules
         display: Whether to print the board state
+        temperature: Temperature for move selection (0=deterministic)
     
     Returns:
         winner: 0 for Attackers, 1 for Defenders, None for draw
@@ -115,7 +116,7 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True):
         current_agent = agent1 if game.current_player == 0 else agent2
         
         # Get move from agent
-        move = current_agent.select_move(game)
+        move = current_agent.select_move(game, temperature=temperature)
         
         if move is None:
             # No legal moves - opponent wins
@@ -158,7 +159,7 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True):
     return game.winner, move_count
 
 
-def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True, display=False):
+def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True, display=False, temperature=0.0):
     """
     Play multiple games and collect statistics.
     
@@ -171,6 +172,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
         alternate_colors: If True, agents alternate colors each game. 
                          If False, each pairing is played twice (once per color)
         display: Whether to print board state for each game
+        temperature: Temperature for move selection (0=deterministic)
     """
     # Track wins by role and agent
     agent1_attacker_wins = 0
@@ -201,7 +203,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                 # Agent1 as attacker, Agent2 as defender
                 agent1_attacker_games += 1
                 agent2_defender_games += 1
-                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=display)
+                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=display, temperature=temperature)
                 if winner == 0:
                     agent1_attacker_wins += 1
                 elif winner == 1:
@@ -210,7 +212,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                 # Agent2 as attacker, Agent1 as defender
                 agent2_attacker_games += 1
                 agent1_defender_games += 1
-                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=display)
+                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=display, temperature=temperature)
                 if winner == 0:
                     agent2_attacker_wins += 1
                 elif winner == 1:
@@ -222,7 +224,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                 # Agent1 as attacker, Agent2 as defender
                 agent1_attacker_games += 1
                 agent2_defender_games += 1
-                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=display)
+                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=display, temperature=temperature)
                 if winner == 0:
                     agent1_attacker_wins += 1
                 elif winner == 1:
@@ -231,7 +233,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                 # Agent2 as attacker, Agent1 as defender
                 agent2_attacker_games += 1
                 agent1_defender_games += 1
-                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=display)
+                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=display, temperature=temperature)
                 if winner == 0:
                     agent2_attacker_wins += 1
                 elif winner == 1:
@@ -292,6 +294,12 @@ def main():
                        help="Number of MCTS simulations per move (default: 100)")
     parser.add_argument("--c-puct", type=float, default=1.4,
                        help="MCTS exploration constant (default: 1.4)")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                       help="Temperature for move selection (0=deterministic, higher=more random) (default: 0.0)")
+    parser.add_argument("--dirichlet-noise", action="store_true",
+                       help="Add Dirichlet noise to root node for variety (used during training)")
+    parser.add_argument("--dirichlet-alpha", type=float, default=0.3,
+                       help="Dirichlet alpha parameter (default: 0.3)")
     parser.add_argument("--num-games", type=int, default=1,
                        help="Number of games to play (default: 1).")
     parser.add_argument("--display", action="store_true",
@@ -367,9 +375,11 @@ def main():
     
     print(f"\nUsing rules: {rules}\n")
     
-    # Create agents
-    agent1 = Agent(network1, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu')
-    agent2 = Agent(network2, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu')
+    # Create agents with optional Dirichlet noise
+    agent1 = Agent(network1, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu',
+                   add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha)
+    agent2 = Agent(network2, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu',
+                   add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha)
     
     # Select game class
     game_class = Tablut if args.game.lower() == 'tablut' else Brandubh
@@ -378,13 +388,14 @@ def main():
     if args.num_games == 1 and not args.swap_colors:
         # Single game - display by default (unless --display explicitly set to override)
         display = args.display if args.display else True
-        play_game_between_agents(agent1, agent2, game_class, rules, display=display)
+        play_game_between_agents(agent1, agent2, game_class, rules, display=display, temperature=args.temperature)
     else:
         # Multiple games - hide display by default (unless --display explicitly set)
         play_multiple_games(agent1, agent2, game_class, rules, 
                           num_games=args.num_games, 
                           alternate_colors=not args.swap_colors,
-                          display=args.display)
+                          display=args.display,
+                          temperature=args.temperature)
 
 
 if __name__ == "__main__":
