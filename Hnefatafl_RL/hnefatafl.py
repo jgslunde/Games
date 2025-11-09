@@ -393,6 +393,63 @@ class Hnefatafl:
             # Otherwise defenders and king are friendly
             return piece2 in [DEFENDER, KING]
     
+    def _is_king_encircled(self) -> bool:
+        """
+        Check if the king is encircled by attackers.
+        
+        Uses flood-fill algorithm from the king's position. If the king's group
+        (king + any connected defenders/empty squares) cannot reach the edge of
+        the board without crossing attacker pieces, the king is encircled.
+        
+        This is efficient O(n) where n is the number of squares checked.
+        """
+        # Find the king's position
+        king_pos = None
+        for r in range(11):
+            for c in range(11):
+                if self.board[r, c] == KING:
+                    king_pos = (r, c)
+                    break
+            if king_pos:
+                break
+        
+        if not king_pos:
+            return False  # No king on board (already captured)
+        
+        # Flood fill from king's position
+        # Can move through empty squares, defenders, and the king
+        # Cannot move through attackers
+        visited = set()
+        stack = [king_pos]
+        visited.add(king_pos)
+        
+        while stack:
+            r, c = stack.pop()
+            
+            # If we reached an edge, king is NOT encircled
+            if r == 0 or r == 10 or c == 0 or c == 10:
+                return False
+            
+            # Check all 4 adjacent squares
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                
+                # Skip if out of bounds
+                if not (0 <= nr < 11 and 0 <= nc < 11):
+                    continue
+                
+                # Skip if already visited
+                if (nr, nc) in visited:
+                    continue
+                
+                # Can only move through non-attacker squares
+                if self.board[nr, nc] != ATTACKER:
+                    visited.add((nr, nc))
+                    stack.append((nr, nc))
+        
+        # If we exhausted the flood fill without reaching an edge, king is encircled
+        return True
+    
     def _check_game_over(self):
         """Check if the game is over."""
         # Check if king escaped to corner
@@ -404,6 +461,13 @@ class Hnefatafl:
         
         # Check if king was captured during the previous move resolution
         if KING not in self.board:
+            self.game_over = True
+            self.winner = ATTACKER_PLAYER
+            return
+        
+        # Check for encirclement (Hnefatafl-specific rule)
+        # Attackers win if they form a continuous chain surrounding the king
+        if self._is_king_encircled():
             self.game_over = True
             self.winner = ATTACKER_PLAYER
             return

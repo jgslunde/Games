@@ -486,7 +486,10 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         # Import MoveEncoder from the same network module
         # For Brandubh: MoveEncoder from network.py
         # For Tablut: TablutMoveEncoder from network_tablut.py
-        if 'tablut' in network_module.lower():
+        # For Hnefatafl: HnefataflMoveEncoder from network_hnefatafl.py
+        if 'hnefatafl' in network_module.lower():
+            MoveEncoderClass = getattr(network_mod, 'HnefataflMoveEncoder')
+        elif 'tablut' in network_module.lower():
             MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
         else:
             MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
@@ -1065,7 +1068,10 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     # Import MoveEncoder from the same network module
     # For Brandubh: MoveEncoder from network.py
     # For Tablut: TablutMoveEncoder from network_tablut.py
-    if 'tablut' in network_module.lower():
+    # For Hnefatafl: HnefataflMoveEncoder from network_hnefatafl.py
+    if 'hnefatafl' in network_module.lower():
+        MoveEncoderClass = getattr(network_mod, 'HnefataflMoveEncoder')
+    elif 'tablut' in network_module.lower():
         MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
     else:
         MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
@@ -1287,7 +1293,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Import MoveEncoder from the same network module
     # For Brandubh: MoveEncoder from network.py
     # For Tablut: TablutMoveEncoder from network_tablut.py
-    if 'tablut' in network_module.lower():
+    # For Hnefatafl: HnefataflMoveEncoder from network_hnefatafl.py
+    if 'hnefatafl' in network_module.lower():
+        MoveEncoderClass = getattr(network_mod, 'HnefataflMoveEncoder')
+    elif 'tablut' in network_module.lower():
         MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
     else:
         MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
