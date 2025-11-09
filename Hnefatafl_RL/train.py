@@ -1529,7 +1529,7 @@ def save_checkpoint(network: BrandubhNet, optimizer: optim.Optimizer,
 def load_checkpoint(filepath: str, network: BrandubhNet, 
                    optimizer: optim.Optimizer = None) -> int:
     """Load model checkpoint. Returns iteration number."""
-    checkpoint = torch.load(filepath)
+    checkpoint = torch.load(filepath, weights_only=False)
     
     network.load_state_dict(checkpoint['model_state_dict'])
     
@@ -1736,7 +1736,8 @@ def train(config: TrainingConfig, resume_from: str = None):
     best_model_path = os.path.join(config.checkpoint_dir, 'best_model.pth')
     if resume_from is not None and os.path.exists(best_model_path):
         print(f"Loading best network from {best_model_path}")
-        best_network.load_state_dict(torch.load(best_model_path, map_location=config.device))
+        checkpoint = torch.load(best_model_path, map_location=config.device, weights_only=False)
+        best_network.load_state_dict(checkpoint['model_state_dict'])
     else:
         # Starting fresh or no best model exists yet
         # Clean state dict to remove _orig_mod. prefix from compiled network
