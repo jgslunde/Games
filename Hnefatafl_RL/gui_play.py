@@ -46,13 +46,13 @@ from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
 # Colors - Updated palette for better aesthetics
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
-# Board colors - warmer, richer tones
-BOARD_DARK = (101, 67, 33)      # Dark wood
-BOARD_LIGHT = (205, 170, 125)   # Light wood
+# Board colors - fainter, washed out checkerboard
+BOARD_DARK = (160, 130, 95)     # Lighter brown (was darker)
+BOARD_LIGHT = (220, 200, 170)   # Lighter beige (was darker)
 BOARD_BORDER = (70, 50, 30)     # Dark border
 # Special squares
-CORNER_COLOR = (255, 215, 0)    # Gold for corners
-THRONE_COLOR = (255, 235, 205)  # Light gold for throne
+CORNER_COLOR = (200, 200, 200)  # Light gray for corners
+THRONE_COLOR = (200, 200, 200)  # Light gray for throne (same as corners)
 # Piece colors
 ATTACKER_COLOR = (40, 40, 40)   # Dark gray/black
 ATTACKER_OUTLINE = (20, 20, 20)
@@ -442,7 +442,8 @@ class TaflGUI:
                 
                 # Special squares - dynamically determine based on board size
                 center = self.board_size // 2
-                if (row, col) == (center, center):  # Throne at center
+                # Only show throne if throne is enabled
+                if self.throne_enabled and (row, col) == (center, center):  # Throne at center
                     color = THRONE_COLOR
                 elif (row, col) in self.game.corners:  # Corners from game
                     color = CORNER_COLOR
@@ -515,17 +516,9 @@ class TaflGUI:
                     pygame.draw.circle(self.screen, WHITE, (x, y), self.piece_radius)
                     pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius, 2)
                 elif piece == KING:
+                    # King is just yellow circle (no crown)
                     pygame.draw.circle(self.screen, KING_COLOR, (x, y), self.piece_radius)
                     pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius, 2)
-                    # Draw crown
-                    crown_points = [
-                        (x - self.piece_radius//2, y),
-                        (x - self.piece_radius//3, y - self.piece_radius//3),
-                        (x, y),
-                        (x + self.piece_radius//3, y - self.piece_radius//3),
-                        (x + self.piece_radius//2, y)
-                    ]
-                    pygame.draw.lines(self.screen, BLACK, False, crown_points, 2)
         
         # Draw probability texts AFTER pieces so they appear on top
         for prob, x, y in prob_texts_to_draw:
