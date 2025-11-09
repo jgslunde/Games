@@ -149,6 +149,7 @@ class TaflGUI:
         # Selected piece state
         self.selected_piece = None  # (row, col) of selected piece
         self.legal_moves_from_selected = []  # List of legal moves from selected piece
+        self.hovered_square = None  # (row, col) of square under mouse cursor
         
         # Evaluation mode toggle
         self.use_mcts = False  # Toggle between raw network and MCTS evaluation
@@ -451,12 +452,66 @@ class TaflGUI:
                 pygame.draw.rect(self.screen, color, (x, y, self.square_size, self.square_size))
                 pygame.draw.rect(self.screen, BLACK, (x, y, self.square_size, self.square_size), 1)
         
-        # Highlight selected piece
+        # Highlight legal move destinations when piece is selected
+        if self.selected_piece is not None:
+            for move in self.legal_moves_from_selected:
+                to_r, to_c = move[2], move[3]
+                x = self.board_offset_x + to_c * self.square_size
+                y = self.board_offset_y + to_r * self.square_size
+                
+                # Draw semi-transparent overlay for legal moves
+                s = pygame.Surface((self.square_size, self.square_size))
+                s.set_alpha(80)
+                s.fill((100, 200, 100))  # Green tint
+                self.screen.blit(s, (x, y))
+                
+                # Draw a circle in the center to indicate possible move
+                center_x = x + self.square_size // 2
+                center_y = y + self.square_size // 2
+                pygame.draw.circle(self.screen, (80, 180, 80), (center_x, center_y), 
+                                 self.square_size // 6, 3)
+        
+        # Highlight hovered square (if it belongs to current player)
+        if self.hovered_square is not None:
+            row, col = self.hovered_square
+            piece = self.game.board[row, col]
+            
+            # Check if this piece belongs to current player
+            is_current_player_piece = False
+            if self.game.current_player == 0 and piece == ATTACKER:
+                is_current_player_piece = True
+            elif self.game.current_player == 1 and piece in [DEFENDER, KING]:
+                is_current_player_piece = True
+            
+            if is_current_player_piece:
+                x = self.board_offset_x + col * self.square_size
+                y = self.board_offset_y + row * self.square_size
+                
+                # Draw semi-transparent yellow overlay for hover
+                s = pygame.Surface((self.square_size, self.square_size))
+                s.set_alpha(60)
+                s.fill((255, 255, 150))  # Light yellow
+                self.screen.blit(s, (x, y))
+                
+                # Draw border
+                pygame.draw.rect(self.screen, (255, 220, 100), 
+                               (x, y, self.square_size, self.square_size), 3)
+        
+        # Highlight selected piece with a stronger effect
         if self.selected_piece is not None:
             row, col = self.selected_piece
             x = self.board_offset_x + col * self.square_size
             y = self.board_offset_y + row * self.square_size
-            pygame.draw.rect(self.screen, SUCCESS_COLOR, (x, y, self.square_size, self.square_size), 5)
+            
+            # Draw semi-transparent blue overlay for selected piece
+            s = pygame.Surface((self.square_size, self.square_size))
+            s.set_alpha(90)
+            s.fill((100, 150, 255))  # Light blue
+            self.screen.blit(s, (x, y))
+            
+            # Draw thick border
+            pygame.draw.rect(self.screen, (50, 120, 255), 
+                           (x, y, self.square_size, self.square_size), 5)
         
         # Draw policy probabilities overlay (only if network is loaded and percentages are enabled)
         prob_texts_to_draw = []  # Store probability texts to draw after pieces
@@ -898,6 +953,10 @@ class TaflGUI:
         running = True
         
         while running:
+            # Update hovered square based on mouse position
+            mouse_pos = pygame.mouse.get_pos()
+            self.hovered_square = self._screen_to_board(mouse_pos[0], mouse_pos[1])
+            
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
