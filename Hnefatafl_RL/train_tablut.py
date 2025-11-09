@@ -43,7 +43,7 @@ DEFAULT_SIMS_ATTACKER_EVAL = 400
 DEFAULT_SIMS_DEFENDER_EVAL = 400
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_LEARNING_RATE = 1e-3*(DEFAULT_BATCH_SIZE/256)
-DEFAULT_EPOCHS = 20
+DEFAULT_EPOCHS = 10
 DEFAULT_BATCHES_PER_EPOCH = 100
 DEFAULT_EVAL_VS_RANDOM = 64
 DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
@@ -85,11 +85,11 @@ DEFAULT_C_PUCT = 1.4
 DEFAULT_KING_CAPTURE_PIECES = 2  # 2, 3, or 4 pieces needed to capture king
 DEFAULT_KING_CAN_CAPTURE = True  # Whether king participates in captures
 DEFAULT_THRONE_IS_HOSTILE = False  # Whether throne acts as hostile square
-DEFAULT_THRONE_ENABLED = True  # Whether throne exists and blocks movement
+DEFAULT_THRONE_ENABLED = False  # Whether throne exists and blocks movement
 
 # Evaluation
 DEFAULT_EVAL_GAMES = 128
-DEFAULT_EVAL_WIN_RATE = 0.52
+DEFAULT_EVAL_WIN_RATE = 0.55
 DEFAULT_EVAL_FREQUENCY = 4
 DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1  # Evaluate every iteration until 100% win rate achieved
 
