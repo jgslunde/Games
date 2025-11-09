@@ -75,8 +75,8 @@ DEFAULT_DYNAMIC_BOOST_MIN = 0.2
 DEFAULT_DYNAMIC_BOOST_MAX = 5.0
 DEFAULT_ATTACKER_WIN_LOSS_BOOST = 1.0  # Static boost (only used if dynamic disabled)
 
-DEFAULT_DRAW_PENALTY_ATTACKER = +0.5  # Draw counts as attacker win, but discouraged.
-DEFAULT_DRAW_PENALTY_DEFENDER = -0.9  # Draw = loss for defender, but slightly encouraged.
+DEFAULT_DRAW_PENALTY_ATTACKER = 0.0  # Draw value for attackers (neutral)
+DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 
 # MCTS exploration
 DEFAULT_C_PUCT = 1.4

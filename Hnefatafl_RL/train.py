@@ -104,8 +104,8 @@ class TrainingConfig:
     dynamic_boost_max = 3.0           # Maximum boost factor
     attacker_win_loss_boost = 1.0     # Static boost (only used if use_dynamic_boosting=False)
     
-    draw_penalty_attacker = -0.1      # Draw penalty for attackers
-    draw_penalty_defender = -0.3      # Draw penalty for defenders (more penalizing)
+    draw_penalty_attacker = 0.0       # Draw value for attackers (neutral)
+    draw_penalty_defender = 0.0       # Draw value for defenders (neutral)
     
     # Replay buffer
     replay_buffer_size = 50000        # Maximum samples in replay buffer

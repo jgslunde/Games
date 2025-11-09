@@ -199,12 +199,15 @@ def play_game(agent1, agent2, game_class, display: bool = True) -> int:
             if display:
                 print("Game exceeded 500 moves - draw")
             game.game_over = True
-            game.winner = 0
+            game.winner = None  # Draw
             break
     
     if display:
         print("=" * 50)
-        winner_name = "Attackers" if game.winner == 0 else "Defenders"
+        if game.winner is None:
+            winner_name = "Draw"
+        else:
+            winner_name = "Attackers" if game.winner == 0 else "Defenders"
         print(f"Game Over! Winner: {winner_name}")
         print(f"Total moves: {move_count}")
         print("=" * 50)
@@ -227,6 +230,7 @@ def evaluate_agents(agent1, agent2, game_class, num_games: int = 10) -> dict:
     """
     agent1_wins = 0
     agent2_wins = 0
+    draws = 0
     agent1_attacker_wins = 0
     agent2_attacker_wins = 0
     
@@ -236,14 +240,18 @@ def evaluate_agents(agent1, agent2, game_class, num_games: int = 10) -> dict:
         # Alternate who plays attackers
         if i % 2 == 0:
             winner = play_game(agent1, agent2, game_class, display=False)
-            if winner == 0:
+            if winner is None:
+                draws += 1
+            elif winner == 0:
                 agent1_wins += 1
                 agent1_attacker_wins += 1
             else:
                 agent2_wins += 1
         else:
             winner = play_game(agent2, agent1, game_class, display=False)
-            if winner == 0:
+            if winner is None:
+                draws += 1
+            elif winner == 0:
                 agent2_wins += 1
                 agent2_attacker_wins += 1
             else:
@@ -257,6 +265,7 @@ def evaluate_agents(agent1, agent2, game_class, num_games: int = 10) -> dict:
     print("=" * 50)
     print(f"Agent 1 wins: {agent1_wins}/{num_games} ({100*agent1_wins/num_games:.1f}%)")
     print(f"Agent 2 wins: {agent2_wins}/{num_games} ({100*agent2_wins/num_games:.1f}%)")
+    print(f"Draws: {draws}/{num_games} ({100*draws/num_games:.1f}%)")
     print(f"Agent 1 as attacker: {agent1_attacker_wins}/{num_games//2} wins")
     print(f"Agent 2 as attacker: {agent2_attacker_wins}/{num_games//2} wins")
     print("=" * 50)
@@ -264,6 +273,7 @@ def evaluate_agents(agent1, agent2, game_class, num_games: int = 10) -> dict:
     return {
         'agent1_wins': agent1_wins,
         'agent2_wins': agent2_wins,
+        'draws': draws,
         'agent1_attacker_wins': agent1_attacker_wins,
         'agent2_attacker_wins': agent2_attacker_wins,
     }
