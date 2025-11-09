@@ -85,14 +85,14 @@ class Hnefatafl:
         # King at center
         self.board[5, 5] = KING
         
-        # Defenders around king (cross pattern)
+        # Defenders around king (diamond formation - 12 defenders)
         defenders = [
-            # Adjacent to king (4 squares)
+            # Inner diamond (4 squares adjacent to king)
             (4, 5), (5, 4), (5, 6), (6, 5),
-            # One square away in cardinal directions (4 squares)
+            # Outer diamond points (4 squares)
             (3, 5), (5, 3), (5, 7), (7, 5),
-            # Two squares away in cardinal directions (4 squares)
-            (5, 2), (5, 8), (2, 5), (8, 5),
+            # Diagonal corners of diamond (4 squares)
+            (4, 4), (4, 6), (6, 4), (6, 6),
         ]
         for r, c in defenders:
             self.board[r, c] = DEFENDER
