@@ -330,31 +330,44 @@ class Tablut:
             True if king is captured, False otherwise
         """
         if self.king_capture_pieces == 2:
-            # Standard custodian capture - need attackers on opposite sides
+            # Standard custodian capture - need attackers/hostile squares on opposite sides
             # Check horizontal
-            if (0 <= king_c - 1 and self.board[king_r, king_c - 1] == ATTACKER and
-                king_c + 1 < 9 and self.board[king_r, king_c + 1] == ATTACKER):
+            left_hostile = (king_c > 0 and (self.board[king_r, king_c - 1] == ATTACKER or 
+                           self._is_hostile_square(king_r, king_c - 1)))
+            right_hostile = (king_c < 8 and (self.board[king_r, king_c + 1] == ATTACKER or 
+                            self._is_hostile_square(king_r, king_c + 1)))
+            if left_hostile and right_hostile:
                 return True
+            
             # Check vertical
-            if (0 <= king_r - 1 and self.board[king_r - 1, king_c] == ATTACKER and
-                king_r + 1 < 9 and self.board[king_r + 1, king_c] == ATTACKER):
+            top_hostile = (king_r > 0 and (self.board[king_r - 1, king_c] == ATTACKER or 
+                          self._is_hostile_square(king_r - 1, king_c)))
+            bottom_hostile = (king_r < 8 and (self.board[king_r + 1, king_c] == ATTACKER or 
+                             self._is_hostile_square(king_r + 1, king_c)))
+            if top_hostile and bottom_hostile:
                 return True
             return False
             
         elif self.king_capture_pieces == 3:
-            # Need attackers on 3 out of 4 sides
-            attacker_count = 0
+            # Need attackers/hostile squares on 3 out of 4 sides
+            hostile_count = 0
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 nr, nc = king_r + dr, king_c + dc
-                if 0 <= nr < 9 and 0 <= nc < 9 and self.board[nr, nc] == ATTACKER:
-                    attacker_count += 1
-            return attacker_count >= 3
+                if 0 <= nr < 9 and 0 <= nc < 9:
+                    if self.board[nr, nc] == ATTACKER or self._is_hostile_square(nr, nc):
+                        hostile_count += 1
+            return hostile_count >= 3
             
         elif self.king_capture_pieces == 4:
-            # Need attackers on all 4 sides
+            # Need attackers/hostile squares on all 4 sides
+            # Board edges also count as hostile in 4-piece mode
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 nr, nc = king_r + dr, king_c + dc
-                if not (0 <= nr < 9 and 0 <= nc < 9) or self.board[nr, nc] != ATTACKER:
+                # Check if out of bounds (edge of board counts as hostile in 4-piece mode)
+                if not (0 <= nr < 9 and 0 <= nc < 9):
+                    continue  # Edge is hostile, this side is satisfied
+                # Check if square has attacker or is a hostile square
+                if self.board[nr, nc] != ATTACKER and not self._is_hostile_square(nr, nc):
                     return False
             return True
         
