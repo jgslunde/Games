@@ -293,7 +293,7 @@ class Brandubh:
             # For 2-piece capture, check if we complete a sandwich in THIS direction
             if self.king_capture_pieces == 2:
                 nr2, nc2 = nr + dr, nc + dc
-                if 0 <= nr2 < 7 and 0 <= nc2 < 7 and self.board[nr2, nc2] == ATTACKER:
+                if 0 <= nr2 < 7 and 0 <= nc2 < 7 and (self.board[nr2, nc2] == ATTACKER or self._is_hostile_square(nr2, nc2)):
                     # Complete sandwich in this direction
                     self.board[nr, nc] = EMPTY
                     self.game_over = True
