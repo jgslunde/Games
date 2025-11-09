@@ -46,13 +46,13 @@ from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
 # Colors - Updated palette for better aesthetics
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
-# Board colors - fainter, washed out checkerboard
-BOARD_DARK = (160, 130, 95)     # Lighter brown (was darker)
-BOARD_LIGHT = (220, 200, 170)   # Lighter beige (was darker)
+# Board colors - specific hex colors
+BOARD_DARK = (181, 136, 99)     # #b58863 brown
+BOARD_LIGHT = (233, 195, 135)   # #e9c387 beige
 BOARD_BORDER = (70, 50, 30)     # Dark border
 # Special squares
-CORNER_COLOR = (200, 200, 200)  # Light gray for corners
-THRONE_COLOR = (200, 200, 200)  # Light gray for throne (same as corners)
+CORNER_COLOR = (123, 123, 123)  # #7b7b7b gray
+THRONE_COLOR = (123, 123, 123)  # #7b7b7b gray (same as corners)
 # Piece colors
 ATTACKER_COLOR = (40, 40, 40)   # Dark gray/black
 ATTACKER_OUTLINE = (20, 20, 20)
@@ -500,7 +500,7 @@ class TaflGUI:
                             # Store probability text to draw later (after pieces)
                             prob_texts_to_draw.append((prob, x, y))
         
-        # Draw pieces
+        # Draw pieces with 3D effect
         for row in range(self.board_size):
             for col in range(self.board_size):
                 piece = self.game.board[row, col]
@@ -510,15 +510,55 @@ class TaflGUI:
                 x, y = self._board_to_screen(row, col)
                 
                 if piece == ATTACKER:
-                    pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius)
-                    pygame.draw.circle(self.screen, WHITE, (x, y), self.piece_radius, 2)
+                    # Dark piece with 3D effect
+                    # Base color (dark gray/black)
+                    base_color = (60, 60, 60)
+                    # Shadow (bottom-right)
+                    shadow_color = (30, 30, 30)
+                    pygame.draw.circle(self.screen, shadow_color, (x + 2, y + 2), self.piece_radius)
+                    # Main piece
+                    pygame.draw.circle(self.screen, base_color, (x, y), self.piece_radius)
+                    # Highlight (top-left)
+                    highlight_color = (100, 100, 100)
+                    pygame.draw.circle(self.screen, highlight_color, 
+                                     (x - self.piece_radius//4, y - self.piece_radius//4), 
+                                     self.piece_radius//3)
+                    # Outline
+                    pygame.draw.circle(self.screen, (20, 20, 20), (x, y), self.piece_radius, 2)
+                    
                 elif piece == DEFENDER:
-                    pygame.draw.circle(self.screen, WHITE, (x, y), self.piece_radius)
-                    pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius, 2)
+                    # Light piece with 3D effect
+                    # Base color (off-white)
+                    base_color = (240, 240, 240)
+                    # Shadow (bottom-right)
+                    shadow_color = (180, 180, 180)
+                    pygame.draw.circle(self.screen, shadow_color, (x + 2, y + 2), self.piece_radius)
+                    # Main piece
+                    pygame.draw.circle(self.screen, base_color, (x, y), self.piece_radius)
+                    # Highlight (top-left)
+                    highlight_color = (255, 255, 255)
+                    pygame.draw.circle(self.screen, highlight_color, 
+                                     (x - self.piece_radius//4, y - self.piece_radius//4), 
+                                     self.piece_radius//3)
+                    # Outline
+                    pygame.draw.circle(self.screen, (160, 160, 160), (x, y), self.piece_radius, 2)
+                    
                 elif piece == KING:
-                    # King is just yellow circle (no crown)
-                    pygame.draw.circle(self.screen, KING_COLOR, (x, y), self.piece_radius)
-                    pygame.draw.circle(self.screen, BLACK, (x, y), self.piece_radius, 2)
+                    # King piece with 3D effect (yellow/gold)
+                    # Base color (goldenrod)
+                    base_color = (218, 165, 32)
+                    # Shadow (bottom-right)
+                    shadow_color = (150, 110, 20)
+                    pygame.draw.circle(self.screen, shadow_color, (x + 2, y + 2), self.piece_radius)
+                    # Main piece
+                    pygame.draw.circle(self.screen, base_color, (x, y), self.piece_radius)
+                    # Highlight (top-left)
+                    highlight_color = (255, 215, 100)
+                    pygame.draw.circle(self.screen, highlight_color, 
+                                     (x - self.piece_radius//4, y - self.piece_radius//4), 
+                                     self.piece_radius//3)
+                    # Outline
+                    pygame.draw.circle(self.screen, (140, 100, 20), (x, y), self.piece_radius, 2)
         
         # Draw probability texts AFTER pieces so they appear on top
         for prob, x, y in prob_texts_to_draw:
