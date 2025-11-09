@@ -1,7 +1,7 @@
 """
 Interactive Tafl GUI with neural network evaluation display.
 
-Supports both Brandubh (7x7) and Tablut (9x9) variants.
+Supports Brandubh (7x7), Tablut (9x9), and Hnefatafl (11x11) variants.
 
 Displays:
 - Board state
@@ -19,11 +19,12 @@ Controls:
 - Or use clickable buttons in the info panel
 
 Usage:
-    python gui_play.py <checkpoint_path> [--game {brandubh,tablut}] [--simulations N] [--c-puct C]
+    python gui_play.py <checkpoint_path> [--game {brandubh,tablut,hnefatafl}] [--simulations N] [--c-puct C]
     
 Example:
     python gui_play.py checkpoints/best_model.pth
     python gui_play.py checkpoints/best_model.pth --game tablut
+    python gui_play.py checkpoints/best_model.pth --game hnefatafl
     python gui_play.py checkpoints/best_model.pth --simulations 200 --c-puct 1.5
 """
 
@@ -36,7 +37,10 @@ from typing import Optional, Tuple, List
 
 from brandubh import Brandubh, EMPTY, ATTACKER, DEFENDER, KING
 from tablut import Tablut
+from hnefatafl import Hnefatafl
 from network import BrandubhNet, MoveEncoder
+from network_tablut import TablutNet, TablutMoveEncoder
+from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
 
 
 # Colors - Updated palette for better aesthetics
@@ -101,6 +105,15 @@ class TaflGUI:
             )
             self.board_size = 9
             game_name = "Tablut"
+        elif self.game_type == 'hnefatafl':
+            self.game = Hnefatafl(
+                king_capture_pieces=king_capture_pieces,
+                king_can_capture=king_can_capture,
+                throne_is_hostile=throne_is_hostile,
+                throne_enabled=throne_enabled
+            )
+            self.board_size = 11
+            game_name = "Hnefatafl"
         else:  # default to brandubh
             self.game = Brandubh(
                 king_capture_pieces=king_capture_pieces,
@@ -161,7 +174,25 @@ class TaflGUI:
         if self.network:
             self._evaluate_position()
     
-    def _load_network(self, checkpoint_path: str) -> BrandubhNet:
+    def _get_move_encoder(self):
+        """Get the appropriate MoveEncoder for the current game type."""
+        if self.game_type == 'tablut':
+            return TablutMoveEncoder
+        elif self.game_type == 'hnefatafl':
+            return HnefataflMoveEncoder
+        else:
+            return MoveEncoder
+    
+    def _get_policy_size(self):
+        """Get the policy size for the current game type."""
+        if self.game_type == 'tablut':
+            return 2592  # 81 * 4 * 8
+        elif self.game_type == 'hnefatafl':
+            return 4840  # 121 * 4 * 10
+        else:
+            return 1176  # 49 * 4 * 6
+    
+    def _load_network(self, checkpoint_path: str):
         """Load neural network from checkpoint."""
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
@@ -191,6 +222,13 @@ class TaflGUI:
                         throne_is_hostile=self.throne_is_hostile,
                         throne_enabled=self.throne_enabled
                     )
+                elif self.game_type == 'hnefatafl':
+                    self.game = Hnefatafl(
+                        king_capture_pieces=self.king_capture_pieces,
+                        king_can_capture=self.king_can_capture,
+                        throne_is_hostile=self.throne_is_hostile,
+                        throne_enabled=self.throne_enabled
+                    )
                 else:
                     self.game = Brandubh(
                         king_capture_pieces=self.king_capture_pieces,
@@ -209,8 +247,13 @@ class TaflGUI:
                 num_channels = 64
                 print("Warning: No config found in checkpoint, using command-line/default rules")
             
-            # Create and load network
-            network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+            # Create and load network (select appropriate network for board size)
+            if self.game_type == 'tablut':
+                network = TablutNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+            elif self.game_type == 'hnefatafl':
+                network = HnefataflNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+            else:
+                network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
             network.load_state_dict(checkpoint['model_state_dict'])
             network.eval()
             
@@ -244,7 +287,7 @@ class TaflGUI:
         self.value = value.cpu().item()
         
         # Mask illegal moves and convert to probabilities
-        legal_mask = MoveEncoder.get_legal_move_mask(self.game)
+        legal_mask = self._get_move_encoder().get_legal_move_mask(self.game)
         policy_logits = policy_logits * legal_mask + (1 - legal_mask) * (-1e8)
         
         # Softmax
@@ -261,15 +304,17 @@ class TaflGUI:
         # Create MCTS if needed
         if self.mcts is None:
             self.mcts = MCTS(self.network, num_simulations=self.num_simulations, 
-                           c_puct=self.c_puct, device='cpu')
+                           c_puct=self.c_puct, device='cpu',
+                           move_encoder_class=self._get_move_encoder())
         
         # Run MCTS search
         visit_probs = self.mcts.search(self.game.clone())
         
         # Convert visit probabilities to policy vector
-        self.policy_probs = np.zeros(1176, dtype=np.float32)
+        self.policy_probs = np.zeros(self._get_policy_size(), dtype=np.float32)
+        encoder = self._get_move_encoder()
         for move, prob in visit_probs.items():
-            move_idx = MoveEncoder.encode_move(move)
+            move_idx = encoder.encode_move(move)
             self.policy_probs[move_idx] = prob
         
         # Get value from MCTS root node
@@ -305,10 +350,11 @@ class TaflGUI:
                         continue
                 
                 # Sum probabilities of all moves from this piece
+                encoder = self._get_move_encoder()
                 total_prob = 0.0
                 for move in self.game.get_legal_moves():
                     if move[0] == r and move[1] == c:
-                        move_idx = MoveEncoder.encode_move(move)
+                        move_idx = encoder.encode_move(move)
                         total_prob += self.policy_probs[move_idx]
                 
                 self.piece_selection_probs[r, c] = total_prob
@@ -322,9 +368,10 @@ class TaflGUI:
         self.move_probs_from_selected = np.zeros((self.board_size, self.board_size), dtype=np.float32)
         
         from_r, from_c = self.selected_piece
+        encoder = self._get_move_encoder()
         for move in self.legal_moves_from_selected:
             to_r, to_c = move[2], move[3]
-            move_idx = MoveEncoder.encode_move(move)
+            move_idx = encoder.encode_move(move)
             self.move_probs_from_selected[to_r, to_c] = self.policy_probs[move_idx]
     
     def _make_ai_move(self):
@@ -337,7 +384,8 @@ class TaflGUI:
             from agent import Agent
             self.ai_agent = Agent(self.network, num_simulations=self.num_simulations, 
                             c_puct=self.c_puct, device='cpu',
-                            add_dirichlet_noise=False)
+                            add_dirichlet_noise=False,
+                            move_encoder_class=self._get_move_encoder())
         
         print(f"AI making move for {'Attackers' if self.game.current_player == 0 else 'Defenders'}...")
         
@@ -878,8 +926,8 @@ def main():
     parser = argparse.ArgumentParser(description="Tafl Game GUI with Optional AI Evaluation")
     parser.add_argument("--checkpoint", type=str, default=None,
                        help="Path to model checkpoint (.pth file). If not provided, plays without AI evaluation.")
-    parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut"],
-                       help="Game variant to play: brandubh (7x7) or tablut (9x9) (default: brandubh)")
+    parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut", "hnefatafl"],
+                       help="Game variant to play: brandubh (7x7), tablut (9x9), or hnefatafl (11x11) (default: brandubh)")
     parser.add_argument("--simulations", type=int, default=100, 
                        help="Number of MCTS simulations/depth for AI evaluation (default: 100)")
     parser.add_argument("--c-puct", type=float, default=1.4,

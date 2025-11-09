@@ -2,7 +2,7 @@
 Play Tafl games between two AI agents loaded from checkpoints.
 Displays the game state and move history.
 
-Supports both Brandubh (7x7) and Tablut (9x9) variants.
+Supports Brandubh (7x7), Tablut (9x9), and Hnefatafl (11x11) variants.
 
 Usage:
     python play.py <checkpoint1> <checkpoint2> [options]
@@ -10,6 +10,7 @@ Usage:
 Example:
     python play.py checkpoints/best_model.pth checkpoints/checkpoint_iter_5.pth
     python play.py model1.pth model2.pth --game tablut --simulations 200
+    python play.py model1.pth model2.pth --game hnefatafl --simulations 200
     python play.py model1.pth model2.pth --king-capture-pieces 4 --throne-is-hostile
     python play.py model1.pth model2.pth --num-games 10 --swap-colors  # 20 games total
 """
@@ -20,17 +21,21 @@ import torch
 
 from brandubh import Brandubh
 from tablut import Tablut
+from hnefatafl import Hnefatafl
 from network import BrandubhNet
+from network_tablut import TablutNet
+from network_hnefatafl import HnefataflNet
 from agent import Agent
 
 
-def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None):
+def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, game_class=None):
     """
     Load neural network from checkpoint and extract rules.
     
     Args:
         checkpoint_path: Path to checkpoint file
         force_rules: Optional dict of rules to force (overrides checkpoint)
+        game_class: Game class (Brandubh, Tablut, or Hnefatafl) - determines network type
     
     Returns:
         (network, rules_dict) tuple
@@ -43,6 +48,7 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None):
             config = checkpoint['config']
             num_res_blocks = config.get('num_res_blocks', 4)
             num_channels = config.get('num_channels', 64)
+            board_size = config.get('board_size', 7)  # Extract board size from config
             
             # Extract game rules from checkpoint (can be overridden)
             if force_rules is None:
@@ -58,6 +64,7 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None):
             # Default values
             num_res_blocks = 4
             num_channels = 64
+            board_size = 7  # Default to Brandubh
             rules = force_rules if force_rules else {
                 'king_capture_pieces': 2,
                 'king_can_capture': True,
@@ -65,8 +72,14 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None):
                 'throne_enabled': True,
             }
         
-        # Create and load network
-        network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+        # Determine network type based on game_class or board_size
+        if game_class == Tablut or board_size == 9:
+            network = TablutNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+        elif game_class == Hnefatafl or board_size == 11:
+            network = HnefataflNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+        else:
+            network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+        
         network.load_state_dict(checkpoint['model_state_dict'])
         network.eval()
         
@@ -291,8 +304,8 @@ def main():
                        help="Path to first checkpoint (.pth file) - plays as attacker")
     parser.add_argument("checkpoint2", type=str,
                        help="Path to second checkpoint (.pth file) - plays as defender")
-    parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut"],
-                       help="Game variant: brandubh (7x7) or tablut (9x9) (default: brandubh)")
+    parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut", "hnefatafl"],
+                       help="Game variant: brandubh (7x7), tablut (9x9), or hnefatafl (11x11) (default: brandubh)")
     parser.add_argument("--simulations", type=int, default=100,
                        help="Number of MCTS simulations per move (default: 100)")
     parser.add_argument("--c-puct", type=float, default=1.4,
@@ -362,10 +375,18 @@ def main():
         if args.throne_enabled_flag is not None:
             force_rules['throne_enabled'] = args.throne_enabled_flag
     
-    # Load checkpoints
+    # Select game class first (needed for network loading)
+    if args.game.lower() == 'tablut':
+        game_class = Tablut
+    elif args.game.lower() == 'hnefatafl':
+        game_class = Hnefatafl
+    else:
+        game_class = Brandubh
+    
+    # Load checkpoints with correct network type
     print("Loading checkpoints...\n")
-    network1, rules1 = load_checkpoint_with_rules(args.checkpoint1, force_rules)
-    network2, rules2 = load_checkpoint_with_rules(args.checkpoint2, force_rules)
+    network1, rules1 = load_checkpoint_with_rules(args.checkpoint1, force_rules, game_class)
+    network2, rules2 = load_checkpoint_with_rules(args.checkpoint2, force_rules, game_class)
     
     # Use rules from first checkpoint (or forced rules if specified)
     rules = rules1
@@ -378,14 +399,24 @@ def main():
     
     print(f"\nUsing rules: {rules}\n")
     
+    # Determine move encoder class based on game type
+    if game_class == Tablut:
+        from network_tablut import TablutMoveEncoder
+        move_encoder_class = TablutMoveEncoder
+    elif game_class == Hnefatafl:
+        from network_hnefatafl import HnefataflMoveEncoder
+        move_encoder_class = HnefataflMoveEncoder
+    else:
+        from network import MoveEncoder
+        move_encoder_class = MoveEncoder
+    
     # Create agents with optional Dirichlet noise
     agent1 = Agent(network1, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu',
-                   add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha)
+                   add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha,
+                   move_encoder_class=move_encoder_class)
     agent2 = Agent(network2, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu',
-                   add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha)
-    
-    # Select game class
-    game_class = Tablut if args.game.lower() == 'tablut' else Brandubh
+                   add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha,
+                   move_encoder_class=move_encoder_class)
     
     # Play games
     if args.num_games == 1 and not args.swap_colors:

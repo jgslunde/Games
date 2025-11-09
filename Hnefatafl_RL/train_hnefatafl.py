@@ -1,7 +1,7 @@
 """
-Training script for Brandubh (7x7 Tafl) using AlphaZero.
+Training script for Hnefatafl (11x11 Tafl) using AlphaZero.
 
-This script configures and runs the training pipeline specifically for Brandubh.
+This script configures and runs the training pipeline specifically for Hnefatafl.
 For other board sizes or game variants, create a similar training script.
 """
 
@@ -11,10 +11,10 @@ import multiprocessing as mp
 # Import the generic training module
 from train import TrainingConfig, train
 
-# Import Brandubh-specific classes
-from brandubh import Brandubh
-from network import BrandubhNet, MoveEncoder
-from agent import Agent as BrandubhAgent  # Use generic Agent
+# Import Hnefatafl-specific classes
+from hnefatafl import Hnefatafl
+from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
+from agent import Agent as HnefataflAgent  # Use generic Agent
 
 
 # Custom type for temperature_threshold argument
@@ -85,7 +85,7 @@ DEFAULT_C_PUCT = 1.4
 DEFAULT_KING_CAPTURE_PIECES = 2  # 2, 3, or 4 pieces needed to capture king
 DEFAULT_KING_CAN_CAPTURE = True  # Whether king participates in captures
 DEFAULT_THRONE_IS_HOSTILE = False  # Whether throne acts as hostile square
-DEFAULT_THRONE_ENABLED = False  # Whether throne exists and blocks movement
+DEFAULT_THRONE_ENABLED = True  # Whether throne exists and blocks movement
 
 # Evaluation
 DEFAULT_EVAL_GAMES = 128
@@ -95,7 +95,7 @@ DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1  # Evaluate every iteration until 100% win 
 
 # Checkpointing
 DEFAULT_SAVE_FREQUENCY = 1
-DEFAULT_CHECKPOINT_DIR = "checkpoints"
+DEFAULT_CHECKPOINT_DIR = "checkpoints_hnefatafl"
 
 
 # =============================================================================
@@ -103,7 +103,7 @@ DEFAULT_CHECKPOINT_DIR = "checkpoints"
 # =============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Brandubh AlphaZero")
+    parser = argparse.ArgumentParser(description="Train Hnefatafl AlphaZero")
     
     # Core training parameters
     parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS,
@@ -226,11 +226,11 @@ if __name__ == "__main__":
     config = TrainingConfig()
     
     # Set game-specific configuration
-    config.game_class = Brandubh
-    config.network_class = BrandubhNet
-    config.agent_class = BrandubhAgent
-    config.move_encoder_class = MoveEncoder
-    config.board_size = 7  # Brandubh is 7x7
+    config.game_class = Hnefatafl
+    config.network_class = HnefataflNet
+    config.agent_class = HnefataflAgent
+    config.move_encoder_class = HnefataflMoveEncoder
+    config.board_size = 11  # Hnefatafl is 11x11
     
     # Core training parameters
     config.num_iterations = args.iterations
