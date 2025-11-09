@@ -2,12 +2,13 @@
 """
 Parse training output and create matplotlib plots of training progress.
 
-This script parses the output.txt file from train.py and generates four plots:
+This script parses the output.txt file from train.py and generates five plots:
 1. plot_elo.png - ELO vs random and ELO vs first version
 2. plot_win_rates.png - Win rates (attacker/defender/draw) for self-play, 
    random evaluation, and self-evaluation
-3. plot_losses.png - Policy and value losses (dual y-axes)
+3. plot_losses.png - Policy and value losses per iteration (dual y-axes)
 4. plot_buffer_time.png - Replay buffer size and iteration time (dual y-axes)
+5. plot_epoch_losses.png - Policy and value losses per epoch across all iterations
 
 All plots are saved in the same directory as the input file.
 
@@ -56,6 +57,11 @@ def parse_output_file(filepath):
         'policy_loss': [],
         'value_loss': [],
         
+        # Epoch-level losses
+        'epoch_steps': [],  # Global step counter across all iterations
+        'epoch_policy_loss': [],
+        'epoch_value_loss': [],
+        
         # Buffer and time
         'buffer_size': [],
         'total_time': [],
@@ -65,6 +71,7 @@ def parse_output_file(filepath):
         lines = f.readlines()
     
     current_iteration = None
+    global_epoch_step = 0  # Track epochs across all iterations
     
     for i, line in enumerate(lines):
         # Extract iteration number
@@ -160,6 +167,17 @@ def parse_output_file(filepath):
         match = re.search(r'Total:\s+([\d.]+)s', line)
         if match and 'Timing Summary:' in ''.join(lines[max(0, i-10):i]):
             iterations_data[current_iteration]['total_time'] = float(match.group(1))
+            continue
+        
+        # Epoch-level losses (e.g., "  Epoch 1/10: policy=2.3456, value=0.5678, total=2.9134")
+        match = re.search(r'Epoch (\d+)/\d+: policy=([\d.]+), value=([\d.]+)', line)
+        if match:
+            policy_loss = float(match.group(2))
+            value_loss = float(match.group(3))
+            data['epoch_steps'].append(global_epoch_step)
+            data['epoch_policy_loss'].append(policy_loss)
+            data['epoch_value_loss'].append(value_loss)
+            global_epoch_step += 1
             continue
     
     # Now compile data only for complete iterations (those with both results and losses)
@@ -313,7 +331,7 @@ def plot_losses(data, output_dir):
     ax2.tick_params(axis='y', labelcolor=color2)
     
     # Add title
-    ax1.set_title('Training Losses', fontsize=14, fontweight='bold')
+    ax1.set_title('Training Losses (Per Iteration)', fontsize=14, fontweight='bold')
     
     # Add legends
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -322,6 +340,42 @@ def plot_losses(data, output_dir):
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'plot_losses.png'), dpi=150)
+    plt.close()
+
+
+def plot_epoch_losses(data, output_dir):
+    """Plot 5: Epoch-level policy loss and value loss with dual y-axes across all iterations."""
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    
+    epoch_steps = data['epoch_steps']
+    
+    color1 = 'tab:blue'
+    ax1.set_xlabel('Training Epoch (Cumulative)', fontsize=12)
+    ax1.set_ylabel('Policy Loss', fontsize=12, color=color1)
+    if data['epoch_policy_loss']:
+        ax1.plot(epoch_steps, data['epoch_policy_loss'], '-', color=color1, 
+                label='Policy Loss', linewidth=1.5, alpha=0.7)
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.grid(True, alpha=0.3)
+    
+    ax2 = ax1.twinx()
+    color2 = 'tab:red'
+    ax2.set_ylabel('Value Loss', fontsize=12, color=color2)
+    if data['epoch_value_loss']:
+        ax2.plot(epoch_steps, data['epoch_value_loss'], '-', color=color2, 
+                label='Value Loss', linewidth=1.5, alpha=0.7)
+    ax2.tick_params(axis='y', labelcolor=color2)
+    
+    # Add title
+    ax1.set_title('Training Losses (Per Epoch - All Iterations)', fontsize=14, fontweight='bold')
+    
+    # Add legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'plot_epoch_losses.png'), dpi=150)
     plt.close()
 
 
@@ -387,6 +441,7 @@ def main():
     print(f"  - Self-evaluations: {len(data['cumulative_elo_vs_first'])} data points")
     print(f"  - Policy loss: {len(data['policy_loss'])} data points")
     print(f"  - Value loss: {len(data['value_loss'])} data points")
+    print(f"  - Epoch-level losses: {len(data['epoch_policy_loss'])} epochs")
     
     plot_elo(data, output_dir)
     print(f"  ✓ Saved plot_elo.png")
@@ -399,6 +454,10 @@ def main():
     
     plot_buffer_and_time(data, output_dir)
     print(f"  ✓ Saved plot_buffer_time.png")
+    
+    if data['epoch_policy_loss']:
+        plot_epoch_losses(data, output_dir)
+        print(f"  ✓ Saved plot_epoch_losses.png")
     
     print(f"\nAll plots saved to {output_dir}/")
 
