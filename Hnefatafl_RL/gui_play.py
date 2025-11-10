@@ -135,6 +135,10 @@ class TaflGUI:
         self.board_offset_y = (WINDOW_HEIGHT - self.square_size * self.board_size) // 2
         self.piece_radius = self.square_size // 3
         
+        # MCTS settings (store before loading network so they can be displayed)
+        self.num_simulations = num_simulations
+        self.c_puct = c_puct
+        
         # Load neural network (optional)
         self.network = None
         if checkpoint_path:
@@ -153,10 +157,6 @@ class TaflGUI:
                 print("    (AI moves will vary between games)")
         
         self.clock = pygame.time.Clock()
-        
-        # MCTS settings
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
         self.mcts = None  # MCTS object for evaluation (created when needed)
         self.ai_agent = None  # Agent object for making AI moves (created when needed)
         
