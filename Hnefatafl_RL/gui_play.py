@@ -71,6 +71,9 @@ DANGER_COLOR = (231, 76, 60)     # Red
 HIGHLIGHT_COLOR = (52, 152, 219) # Blue highlight
 MOVE_HIGHLIGHT = (46, 204, 113, 100) # Semi-transparent green
 PROBABILITY_TEXT_COLOR = (138, 43, 226)  # Purple (visible on all backgrounds)
+# Animation colors
+MOVE_FROM_HIGHLIGHT = (255, 200, 100)  # Orange for source tile
+MOVE_TO_HIGHLIGHT = (100, 255, 150)    # Light green for destination tile
 
 # Board settings
 WINDOW_WIDTH = 1350  # 50% wider than original 900
@@ -150,6 +153,20 @@ class TaflGUI:
         self.selected_piece = None  # (row, col) of selected piece
         self.legal_moves_from_selected = []  # List of legal moves from selected piece
         self.hovered_square = None  # (row, col) of square under mouse cursor
+        
+        # Animation state
+        self.animating_move = False
+        self.animation_progress = 0.0  # 0.0 to 1.0
+        self.animation_from = None  # (row, col)
+        self.animation_to = None  # (row, col)
+        self.animation_piece = None  # piece type being animated
+        self.move_highlight_timer = 0  # Timer for source/dest highlighting
+        self.move_highlight_from = None
+        self.move_highlight_to = None
+        
+        # Capture animation state
+        self.captured_pieces = []  # List of (row, col, piece_type, fade_progress)
+        self.capture_fade_speed = 0.05  # Speed of fade animation
         
         # Evaluation mode toggle
         self.use_mcts = False  # Toggle between raw network and MCTS evaluation
@@ -375,6 +392,39 @@ class TaflGUI:
             move_idx = encoder.encode_move(move)
             self.move_probs_from_selected[to_r, to_c] = self.policy_probs[move_idx]
     
+    def _start_move_animation(self, move):
+        """Start animating a move."""
+        from_r, from_c, to_r, to_c = move
+        self.animation_from = (from_r, from_c)
+        self.animation_to = (to_r, to_c)
+        self.animation_piece = self.game.board[from_r, from_c]
+        self.animation_progress = 0.0
+        self.animating_move = True
+        
+    def _update_animation(self):
+        """Update animation state."""
+        if self.animating_move:
+            self.animation_progress += 0.08  # Animation speed
+            if self.animation_progress >= 1.0:
+                self.animating_move = False
+                self.animation_progress = 0.0
+                # Set highlight timer for move feedback
+                self.move_highlight_timer = 60  # Show for 60 frames (~1 second)
+        
+        # Update move highlight timer
+        if self.move_highlight_timer > 0:
+            self.move_highlight_timer -= 1
+            if self.move_highlight_timer == 0:
+                self.move_highlight_from = None
+                self.move_highlight_to = None
+        
+        # Update captured pieces fade animation
+        self.captured_pieces = [
+            (r, c, piece, fade + self.capture_fade_speed)
+            for r, c, piece, fade in self.captured_pieces
+            if fade < 1.0
+        ]
+    
     def _make_ai_move(self):
         """Make the AI select and execute a move for the current player."""
         if self.game.game_over or not self.network:
@@ -397,15 +447,31 @@ class TaflGUI:
             from_r, from_c, to_r, to_c = move
             print(f"  AI selected: ({from_r},{from_c}) → ({to_r},{to_c})")
             
+            # Store current board state to detect captures
+            old_board = self.game.board.copy()
+            
+            # Start animation
+            self._start_move_animation(move)
+            
             # Make the move
             self.game.make_move(move)
+            
+            # Detect captured pieces and add to animation list
+            for r in range(self.board_size):
+                for c in range(self.board_size):
+                    if old_board[r, c] != EMPTY and self.game.board[r, c] == EMPTY:
+                        # This piece was captured
+                        if (r, c) != (from_r, from_c):  # Not the moved piece
+                            self.captured_pieces.append((r, c, old_board[r, c], 0.0))
+            
+            # Set move highlight positions
+            self.move_highlight_from = (from_r, from_c)
+            self.move_highlight_to = (to_r, to_c)
+            self.move_highlight_timer = 60  # Will start counting down after animation
+            
             self.selected_piece = None
             self.legal_moves_from_selected = []
             self.move_probs_from_selected = None
-            
-            # Re-evaluate position
-            if not self.game.game_over:
-                self._evaluate_position()
         else:
             print("  No legal moves available!")
     
@@ -452,8 +518,30 @@ class TaflGUI:
                 pygame.draw.rect(self.screen, color, (x, y, self.square_size, self.square_size))
                 pygame.draw.rect(self.screen, BLACK, (x, y, self.square_size, self.square_size), 1)
         
+        # Draw move highlight (from/to tiles after a move)
+        if self.move_highlight_timer > 0 and self.move_highlight_from and self.move_highlight_to:
+            alpha = min(255, self.move_highlight_timer * 4)  # Fade out
+            
+            # Highlight source tile (orange)
+            from_r, from_c = self.move_highlight_from
+            x = self.board_offset_x + from_c * self.square_size
+            y = self.board_offset_y + from_r * self.square_size
+            s = pygame.Surface((self.square_size, self.square_size))
+            s.set_alpha(alpha)
+            s.fill(MOVE_FROM_HIGHLIGHT)
+            self.screen.blit(s, (x, y))
+            
+            # Highlight destination tile (green)
+            to_r, to_c = self.move_highlight_to
+            x = self.board_offset_x + to_c * self.square_size
+            y = self.board_offset_y + to_r * self.square_size
+            s = pygame.Surface((self.square_size, self.square_size))
+            s.set_alpha(alpha)
+            s.fill(MOVE_TO_HIGHLIGHT)
+            self.screen.blit(s, (x, y))
+        
         # Highlight legal move destinations when piece is selected
-        if self.selected_piece is not None:
+        if self.selected_piece is not None and not self.animating_move:
             for move in self.legal_moves_from_selected:
                 to_r, to_c = move[2], move[3]
                 x = self.board_offset_x + to_c * self.square_size
@@ -472,7 +560,7 @@ class TaflGUI:
                                  self.square_size // 6, 3)
         
         # Highlight hovered square (if it belongs to current player)
-        if self.hovered_square is not None:
+        if self.hovered_square is not None and not self.animating_move:
             row, col = self.hovered_square
             piece = self.game.board[row, col]
             
@@ -498,7 +586,7 @@ class TaflGUI:
                                (x, y, self.square_size, self.square_size), 3)
         
         # Highlight selected piece with a stronger effect
-        if self.selected_piece is not None:
+        if self.selected_piece is not None and not self.animating_move:
             row, col = self.selected_piece
             x = self.board_offset_x + col * self.square_size
             y = self.board_offset_y + row * self.square_size
@@ -515,7 +603,7 @@ class TaflGUI:
         
         # Draw policy probabilities overlay (only if network is loaded and percentages are enabled)
         prob_texts_to_draw = []  # Store probability texts to draw after pieces
-        if self.network and self.piece_selection_probs is not None and self.show_percentages:
+        if self.network and self.piece_selection_probs is not None and self.show_percentages and not self.animating_move:
             if self.selected_piece is None:
                 # Show piece selection probabilities
                 max_prob = np.max(self.piece_selection_probs) if np.max(self.piece_selection_probs) > 0 else 1.0
@@ -562,64 +650,166 @@ class TaflGUI:
                 if piece == EMPTY:
                     continue
                 
-                x, y = self._board_to_screen(row, col)
+                # Skip piece that's being animated
+                if self.animating_move and (row, col) == self.animation_from:
+                    continue
                 
-                if piece == ATTACKER:
-                    # Dark piece with 3D effect
-                    # Base color (dark gray/black)
-                    base_color = (60, 60, 60)
-                    # Shadow (bottom-right)
-                    shadow_color = (30, 30, 30)
-                    pygame.draw.circle(self.screen, shadow_color, (x + 2, y + 2), self.piece_radius)
-                    # Main piece
-                    pygame.draw.circle(self.screen, base_color, (x, y), self.piece_radius)
-                    # Highlight (top-left)
-                    highlight_color = (100, 100, 100)
-                    pygame.draw.circle(self.screen, highlight_color, 
-                                     (x - self.piece_radius//4, y - self.piece_radius//4), 
-                                     self.piece_radius//3)
-                    # Outline
-                    pygame.draw.circle(self.screen, (20, 20, 20), (x, y), self.piece_radius, 2)
-                    
-                elif piece == DEFENDER:
-                    # Light piece with 3D effect
-                    # Base color (off-white)
-                    base_color = (240, 240, 240)
-                    # Shadow (bottom-right)
-                    shadow_color = (180, 180, 180)
-                    pygame.draw.circle(self.screen, shadow_color, (x + 2, y + 2), self.piece_radius)
-                    # Main piece
-                    pygame.draw.circle(self.screen, base_color, (x, y), self.piece_radius)
-                    # Highlight (top-left)
-                    highlight_color = (255, 255, 255)
-                    pygame.draw.circle(self.screen, highlight_color, 
-                                     (x - self.piece_radius//4, y - self.piece_radius//4), 
-                                     self.piece_radius//3)
-                    # Outline
-                    pygame.draw.circle(self.screen, (160, 160, 160), (x, y), self.piece_radius, 2)
-                    
-                elif piece == KING:
-                    # King piece with 3D effect (yellow/gold)
-                    # Base color (goldenrod)
-                    base_color = (218, 165, 32)
-                    # Shadow (bottom-right)
-                    shadow_color = (150, 110, 20)
-                    pygame.draw.circle(self.screen, shadow_color, (x + 2, y + 2), self.piece_radius)
-                    # Main piece
-                    pygame.draw.circle(self.screen, base_color, (x, y), self.piece_radius)
-                    # Highlight (top-left)
-                    highlight_color = (255, 215, 100)
-                    pygame.draw.circle(self.screen, highlight_color, 
-                                     (x - self.piece_radius//4, y - self.piece_radius//4), 
-                                     self.piece_radius//3)
-                    # Outline
-                    pygame.draw.circle(self.screen, (140, 100, 20), (x, y), self.piece_radius, 2)
+                x, y = self._board_to_screen(row, col)
+                self._draw_piece(piece, x, y, alpha=255)
+        
+        # Draw captured pieces with fade animation
+        for cap_r, cap_c, cap_piece, fade_progress in self.captured_pieces:
+            x, y = self._board_to_screen(cap_r, cap_c)
+            alpha = int(255 * (1.0 - fade_progress))
+            self._draw_piece(cap_piece, x, y, alpha=alpha)
+        
+        # Draw animated moving piece
+        if self.animating_move:
+            from_r, from_c = self.animation_from
+            to_r, to_c = self.animation_to
+            from_x, from_y = self._board_to_screen(from_r, from_c)
+            to_x, to_y = self._board_to_screen(to_r, to_c)
+            
+            # Interpolate position with easing (ease-in-out)
+            t = self.animation_progress
+            # Smooth step easing function
+            eased_t = t * t * (3.0 - 2.0 * t)
+            
+            anim_x = int(from_x + (to_x - from_x) * eased_t)
+            anim_y = int(from_y + (to_y - from_y) * eased_t)
+            
+            self._draw_piece(self.animation_piece, anim_x, anim_y, alpha=255)
         
         # Draw probability texts AFTER pieces so they appear on top
         for prob, x, y in prob_texts_to_draw:
             prob_text = self.font_probability.render(f"{prob*100:.0f}%", True, PROBABILITY_TEXT_COLOR)
             text_rect = prob_text.get_rect(center=(x + self.square_size//2, y + self.square_size//2))
             self.screen.blit(prob_text, text_rect)
+    
+    def _draw_piece(self, piece, x, y, alpha=255):
+        """Draw a piece at the given screen coordinates with optional transparency."""
+        if piece == ATTACKER:
+            # Dark piece with 3D effect
+            base_color = (60, 60, 60, alpha)
+            shadow_color = (30, 30, 30, alpha)
+            highlight_color = (100, 100, 100, alpha)
+            outline_color = (20, 20, 20, alpha)
+            
+            # Shadow (bottom-right)
+            if alpha == 255:
+                pygame.draw.circle(self.screen, shadow_color[:3], (x + 2, y + 2), self.piece_radius)
+            else:
+                s = pygame.Surface((self.piece_radius * 2 + 4, self.piece_radius * 2 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(s, shadow_color, (self.piece_radius + 2, self.piece_radius + 2), self.piece_radius)
+                self.screen.blit(s, (x - self.piece_radius, y - self.piece_radius))
+            
+            # Main piece
+            if alpha == 255:
+                pygame.draw.circle(self.screen, base_color[:3], (x, y), self.piece_radius)
+            else:
+                s = pygame.Surface((self.piece_radius * 2, self.piece_radius * 2), pygame.SRCALPHA)
+                pygame.draw.circle(s, base_color, (self.piece_radius, self.piece_radius), self.piece_radius)
+                self.screen.blit(s, (x - self.piece_radius, y - self.piece_radius))
+            
+            # Highlight (top-left)
+            if alpha == 255:
+                pygame.draw.circle(self.screen, highlight_color[:3], 
+                                 (x - self.piece_radius//4, y - self.piece_radius//4), 
+                                 self.piece_radius//3)
+            else:
+                s = pygame.Surface((self.piece_radius, self.piece_radius), pygame.SRCALPHA)
+                pygame.draw.circle(s, highlight_color, (self.piece_radius//2, self.piece_radius//2), self.piece_radius//3)
+                self.screen.blit(s, (x - self.piece_radius//2, y - self.piece_radius//2))
+            
+            # Outline
+            if alpha == 255:
+                pygame.draw.circle(self.screen, outline_color[:3], (x, y), self.piece_radius, 2)
+            else:
+                s = pygame.Surface((self.piece_radius * 2 + 4, self.piece_radius * 2 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(s, outline_color, (self.piece_radius + 2, self.piece_radius + 2), self.piece_radius, 2)
+                self.screen.blit(s, (x - self.piece_radius - 2, y - self.piece_radius - 2))
+                
+        elif piece == DEFENDER:
+            # Light piece with 3D effect
+            base_color = (240, 240, 240, alpha)
+            shadow_color = (180, 180, 180, alpha)
+            highlight_color = (255, 255, 255, alpha)
+            outline_color = (160, 160, 160, alpha)
+            
+            # Shadow (bottom-right)
+            if alpha == 255:
+                pygame.draw.circle(self.screen, shadow_color[:3], (x + 2, y + 2), self.piece_radius)
+            else:
+                s = pygame.Surface((self.piece_radius * 2 + 4, self.piece_radius * 2 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(s, shadow_color, (self.piece_radius + 2, self.piece_radius + 2), self.piece_radius)
+                self.screen.blit(s, (x - self.piece_radius, y - self.piece_radius))
+            
+            # Main piece
+            if alpha == 255:
+                pygame.draw.circle(self.screen, base_color[:3], (x, y), self.piece_radius)
+            else:
+                s = pygame.Surface((self.piece_radius * 2, self.piece_radius * 2), pygame.SRCALPHA)
+                pygame.draw.circle(s, base_color, (self.piece_radius, self.piece_radius), self.piece_radius)
+                self.screen.blit(s, (x - self.piece_radius, y - self.piece_radius))
+            
+            # Highlight (top-left)
+            if alpha == 255:
+                pygame.draw.circle(self.screen, highlight_color[:3], 
+                                 (x - self.piece_radius//4, y - self.piece_radius//4), 
+                                 self.piece_radius//3)
+            else:
+                s = pygame.Surface((self.piece_radius, self.piece_radius), pygame.SRCALPHA)
+                pygame.draw.circle(s, highlight_color, (self.piece_radius//2, self.piece_radius//2), self.piece_radius//3)
+                self.screen.blit(s, (x - self.piece_radius//2, y - self.piece_radius//2))
+            
+            # Outline
+            if alpha == 255:
+                pygame.draw.circle(self.screen, outline_color[:3], (x, y), self.piece_radius, 2)
+            else:
+                s = pygame.Surface((self.piece_radius * 2 + 4, self.piece_radius * 2 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(s, outline_color, (self.piece_radius + 2, self.piece_radius + 2), self.piece_radius, 2)
+                self.screen.blit(s, (x - self.piece_radius - 2, y - self.piece_radius - 2))
+                
+        elif piece == KING:
+            # King piece with 3D effect (yellow/gold)
+            base_color = (218, 165, 32, alpha)
+            shadow_color = (150, 110, 20, alpha)
+            highlight_color = (255, 215, 100, alpha)
+            outline_color = (140, 100, 20, alpha)
+            
+            # Shadow (bottom-right)
+            if alpha == 255:
+                pygame.draw.circle(self.screen, shadow_color[:3], (x + 2, y + 2), self.piece_radius)
+            else:
+                s = pygame.Surface((self.piece_radius * 2 + 4, self.piece_radius * 2 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(s, shadow_color, (self.piece_radius + 2, self.piece_radius + 2), self.piece_radius)
+                self.screen.blit(s, (x - self.piece_radius, y - self.piece_radius))
+            
+            # Main piece
+            if alpha == 255:
+                pygame.draw.circle(self.screen, base_color[:3], (x, y), self.piece_radius)
+            else:
+                s = pygame.Surface((self.piece_radius * 2, self.piece_radius * 2), pygame.SRCALPHA)
+                pygame.draw.circle(s, base_color, (self.piece_radius, self.piece_radius), self.piece_radius)
+                self.screen.blit(s, (x - self.piece_radius, y - self.piece_radius))
+            
+            # Highlight (top-left)
+            if alpha == 255:
+                pygame.draw.circle(self.screen, highlight_color[:3], 
+                                 (x - self.piece_radius//4, y - self.piece_radius//4), 
+                                 self.piece_radius//3)
+            else:
+                s = pygame.Surface((self.piece_radius, self.piece_radius), pygame.SRCALPHA)
+                pygame.draw.circle(s, highlight_color, (self.piece_radius//2, self.piece_radius//2), self.piece_radius//3)
+                self.screen.blit(s, (x - self.piece_radius//2, y - self.piece_radius//2))
+            
+            # Outline
+            if alpha == 255:
+                pygame.draw.circle(self.screen, outline_color[:3], (x, y), self.piece_radius, 2)
+            else:
+                s = pygame.Surface((self.piece_radius * 2 + 4, self.piece_radius * 2 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(s, outline_color, (self.piece_radius + 2, self.piece_radius + 2), self.piece_radius, 2)
+                self.screen.blit(s, (x - self.piece_radius - 2, y - self.piece_radius - 2))
     
     def _draw_info_panel(self):
         """Draw information panel on the right side with improved aesthetics."""
@@ -932,15 +1122,34 @@ class TaflGUI:
                 move = (from_r, from_c, row, col)
                 
                 if move in self.legal_moves_from_selected:
+                    # Store current board state to detect captures
+                    old_board = self.game.board.copy()
+                    
+                    # Start animation
+                    self._start_move_animation(move)
+                    
                     # Make the move
                     self.game.make_move(move)
+                    
+                    # Detect captured pieces and add to animation list
+                    for r in range(self.board_size):
+                        for c in range(self.board_size):
+                            if old_board[r, c] != EMPTY and self.game.board[r, c] == EMPTY:
+                                # This piece was captured
+                                if (r, c) != (from_r, from_c):  # Not the moved piece
+                                    self.captured_pieces.append((r, c, old_board[r, c], 0.0))
+                    
+                    # Set move highlight positions
+                    self.move_highlight_from = (from_r, from_c)
+                    self.move_highlight_to = (row, col)
+                    self.move_highlight_timer = 60  # Will start counting down after animation
+                    
                     self.selected_piece = None
                     self.legal_moves_from_selected = []
                     self.move_probs_from_selected = None
                     
-                    # Re-evaluate position
-                    if not self.game.game_over:
-                        self._evaluate_position()
+                    # Re-evaluate position after animation completes
+                    # (will happen in main loop)
                 else:
                     # Invalid move - try selecting new piece
                     self.selected_piece = None
@@ -951,8 +1160,22 @@ class TaflGUI:
     def run(self):
         """Main game loop."""
         running = True
+        animation_just_completed = False
         
         while running:
+            # Update animations
+            was_animating = self.animating_move
+            self._update_animation()
+            
+            # Check if animation just completed
+            if was_animating and not self.animating_move:
+                animation_just_completed = True
+            
+            # Re-evaluate position after animation completes
+            if animation_just_completed and not self.game.game_over and self.network:
+                self._evaluate_position()
+                animation_just_completed = False
+            
             # Update hovered square based on mouse position
             mouse_pos = pygame.mouse.get_pos()
             self.hovered_square = self._screen_to_board(mouse_pos[0], mouse_pos[1])
@@ -961,56 +1184,62 @@ class TaflGUI:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
-                    self._handle_click(event.pos, event.button)
+                    # Don't allow clicks during animation
+                    if not self.animating_move:
+                        self._handle_click(event.pos, event.button)
                 elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_r:
-                        # Reset game - create appropriate game type with same rules
-                        if self.board_size == 9:
-                            self.game = Tablut(
-                                king_capture_pieces=self.king_capture_pieces,
-                                king_can_capture=self.king_can_capture,
-                                throne_is_hostile=self.throne_is_hostile,
-                                throne_enabled=self.throne_enabled
-                            )
-                        elif self.board_size == 11:
-                            self.game = Hnefatafl(
-                                king_capture_pieces=self.king_capture_pieces,
-                                king_can_capture=self.king_can_capture,
-                                throne_is_hostile=self.throne_is_hostile,
-                                throne_enabled=self.throne_enabled
-                            )
-                        else:  # board_size == 7
-                            self.game = Brandubh(
-                                king_capture_pieces=self.king_capture_pieces,
-                                king_can_capture=self.king_can_capture,
-                                throne_is_hostile=self.throne_is_hostile,
-                                throne_enabled=self.throne_enabled
-                            )
-                        self.selected_piece = None
-                        self.legal_moves_from_selected = []
-                        self.move_probs_from_selected = None
-                        if self.network:
-                            self._evaluate_position()
-                    elif event.key == pygame.K_m and self.network:
-                        # Toggle MCTS mode (only if network loaded)
-                        self.use_mcts = not self.use_mcts
-                        print(f"Switched to {'MCTS' if self.use_mcts else 'Raw Network'} evaluation")
-                        if self.use_mcts:
-                            print(f"  Running {self.num_simulations} simulations per evaluation")
-                        # Re-evaluate current position with new mode
-                        if not self.game.game_over:
-                            self._evaluate_position()
-                    elif event.key == pygame.K_v and self.network:
-                        # Toggle value display
-                        self.show_value = not self.show_value
-                        print(f"Value display: {'ON' if self.show_value else 'OFF'}")
-                    elif event.key == pygame.K_p and self.network:
-                        # Toggle percentage display
-                        self.show_percentages = not self.show_percentages
-                        print(f"Percentage display: {'ON' if self.show_percentages else 'OFF'}")
-                    elif event.key == pygame.K_a and self.network and not self.game.game_over:
-                        # Make AI move
-                        self._make_ai_move()
+                    # Don't allow key presses during animation
+                    if not self.animating_move:
+                        if event.key == pygame.K_r:
+                            # Reset game - create appropriate game type with same rules
+                            if self.board_size == 9:
+                                self.game = Tablut(
+                                    king_capture_pieces=self.king_capture_pieces,
+                                    king_can_capture=self.king_can_capture,
+                                    throne_is_hostile=self.throne_is_hostile,
+                                    throne_enabled=self.throne_enabled
+                                )
+                            elif self.board_size == 11:
+                                self.game = Hnefatafl(
+                                    king_capture_pieces=self.king_capture_pieces,
+                                    king_can_capture=self.king_can_capture,
+                                    throne_is_hostile=self.throne_is_hostile,
+                                    throne_enabled=self.throne_enabled
+                                )
+                            else:  # board_size == 7
+                                self.game = Brandubh(
+                                    king_capture_pieces=self.king_capture_pieces,
+                                    king_can_capture=self.king_can_capture,
+                                    throne_is_hostile=self.throne_is_hostile,
+                                    throne_enabled=self.throne_enabled
+                                )
+                            self.selected_piece = None
+                            self.legal_moves_from_selected = []
+                            self.move_probs_from_selected = None
+                            self.captured_pieces = []
+                            self.move_highlight_timer = 0
+                            if self.network:
+                                self._evaluate_position()
+                        elif event.key == pygame.K_m and self.network:
+                            # Toggle MCTS mode (only if network loaded)
+                            self.use_mcts = not self.use_mcts
+                            print(f"Switched to {'MCTS' if self.use_mcts else 'Raw Network'} evaluation")
+                            if self.use_mcts:
+                                print(f"  Running {self.num_simulations} simulations per evaluation")
+                            # Re-evaluate current position with new mode
+                            if not self.game.game_over:
+                                self._evaluate_position()
+                        elif event.key == pygame.K_v and self.network:
+                            # Toggle value display
+                            self.show_value = not self.show_value
+                            print(f"Value display: {'ON' if self.show_value else 'OFF'}")
+                        elif event.key == pygame.K_p and self.network:
+                            # Toggle percentage display
+                            self.show_percentages = not self.show_percentages
+                            print(f"Percentage display: {'ON' if self.show_percentages else 'OFF'}")
+                        elif event.key == pygame.K_a and self.network and not self.game.game_over:
+                            # Make AI move
+                            self._make_ai_move()
             
             self._draw_board()
             self._draw_info_panel()
