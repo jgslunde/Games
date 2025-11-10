@@ -160,6 +160,8 @@ class TaflGUI:
         self.animation_from = None  # (row, col)
         self.animation_to = None  # (row, col)
         self.animation_piece = None  # piece type being animated
+        self.pending_move = None  # Move to execute after animation
+        self.old_board_state = None  # Board state before move (for capture detection)
         self.move_highlight_timer = 0  # Timer for source/dest highlighting
         self.move_highlight_from = None
         self.move_highlight_to = None
@@ -393,13 +395,15 @@ class TaflGUI:
             self.move_probs_from_selected[to_r, to_c] = self.policy_probs[move_idx]
     
     def _start_move_animation(self, move):
-        """Start animating a move."""
+        """Start animating a move. The actual move will be executed after animation completes."""
         from_r, from_c, to_r, to_c = move
         self.animation_from = (from_r, from_c)
         self.animation_to = (to_r, to_c)
         self.animation_piece = self.game.board[from_r, from_c]
         self.animation_progress = 0.0
         self.animating_move = True
+        self.pending_move = move
+        self.old_board_state = self.game.board.copy()
         
     def _update_animation(self):
         """Update animation state."""
@@ -408,6 +412,23 @@ class TaflGUI:
             if self.animation_progress >= 1.0:
                 self.animating_move = False
                 self.animation_progress = 0.0
+                
+                # Execute the pending move now that animation is complete
+                if self.pending_move is not None:
+                    self.game.make_move(self.pending_move)
+                    
+                    # Detect captured pieces and add to fade animation list
+                    from_r, from_c, to_r, to_c = self.pending_move
+                    for r in range(self.board_size):
+                        for c in range(self.board_size):
+                            if self.old_board_state[r, c] != EMPTY and self.game.board[r, c] == EMPTY:
+                                # This piece was captured
+                                if (r, c) != (from_r, from_c):  # Not the moved piece
+                                    self.captured_pieces.append((r, c, self.old_board_state[r, c], 0.0))
+                    
+                    self.pending_move = None
+                    self.old_board_state = None
+                
                 # Set highlight timer for move feedback
                 self.move_highlight_timer = 60  # Show for 60 frames (~1 second)
         
@@ -447,22 +468,8 @@ class TaflGUI:
             from_r, from_c, to_r, to_c = move
             print(f"  AI selected: ({from_r},{from_c}) → ({to_r},{to_c})")
             
-            # Store current board state to detect captures
-            old_board = self.game.board.copy()
-            
-            # Start animation
+            # Start animation (move will be executed after animation completes)
             self._start_move_animation(move)
-            
-            # Make the move
-            self.game.make_move(move)
-            
-            # Detect captured pieces and add to animation list
-            for r in range(self.board_size):
-                for c in range(self.board_size):
-                    if old_board[r, c] != EMPTY and self.game.board[r, c] == EMPTY:
-                        # This piece was captured
-                        if (r, c) != (from_r, from_c):  # Not the moved piece
-                            self.captured_pieces.append((r, c, old_board[r, c], 0.0))
             
             # Set move highlight positions
             self.move_highlight_from = (from_r, from_c)
@@ -1122,22 +1129,8 @@ class TaflGUI:
                 move = (from_r, from_c, row, col)
                 
                 if move in self.legal_moves_from_selected:
-                    # Store current board state to detect captures
-                    old_board = self.game.board.copy()
-                    
-                    # Start animation
+                    # Start animation (move will be executed after animation completes)
                     self._start_move_animation(move)
-                    
-                    # Make the move
-                    self.game.make_move(move)
-                    
-                    # Detect captured pieces and add to animation list
-                    for r in range(self.board_size):
-                        for c in range(self.board_size):
-                            if old_board[r, c] != EMPTY and self.game.board[r, c] == EMPTY:
-                                # This piece was captured
-                                if (r, c) != (from_r, from_c):  # Not the moved piece
-                                    self.captured_pieces.append((r, c, old_board[r, c], 0.0))
                     
                     # Set move highlight positions
                     self.move_highlight_from = (from_r, from_c)
@@ -1148,8 +1141,7 @@ class TaflGUI:
                     self.legal_moves_from_selected = []
                     self.move_probs_from_selected = None
                     
-                    # Re-evaluate position after animation completes
-                    # (will happen in main loop)
+                    # Re-evaluation will happen in main loop after animation completes
                 else:
                     # Invalid move - try selecting new piece
                     self.selected_piece = None
