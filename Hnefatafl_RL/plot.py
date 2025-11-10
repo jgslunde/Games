@@ -193,11 +193,18 @@ def parse_output_file(filepath):
             data['policy_loss'].append(iter_data['policy_loss'])
             data['value_loss'].append(iter_data['value_loss'])
             
-            # Optional data
+            # Optional data - always append to keep arrays aligned
             if 'buffer_size' in iter_data:
                 data['buffer_size'].append(iter_data['buffer_size'])
+            else:
+                # Use previous value if available, otherwise 0
+                data['buffer_size'].append(data['buffer_size'][-1] if data['buffer_size'] else 0)
+            
             if 'total_time' in iter_data:
                 data['total_time'].append(iter_data['total_time'])
+            else:
+                # Use previous value if available, otherwise 0
+                data['total_time'].append(data['total_time'][-1] if data['total_time'] else 0)
             
             # Random evaluation data (tracked separately)
             if 'random_elo' in iter_data:

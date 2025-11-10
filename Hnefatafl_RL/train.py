@@ -536,8 +536,10 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
             
             # Determine temperature based on move count or king position
             if temperature_threshold == "king":
-                # Drop temperature when king leaves throne
-                temp = 0.0 if game.king_has_left_throne else temperature
+                # Drop temperature when king is off the throne
+                # KING piece value is 3 in all game variants
+                king_on_throne = (game.board[game.throne] == 3)
+                temp = temperature if king_on_throne else 0.0
             else:
                 # Drop temperature after a fixed number of moves
                 temp = temperature if move_count < temperature_threshold else 0.0
@@ -668,8 +670,10 @@ def play_self_play_game(agent: Agent, config: TrainingConfig) -> Dict:
         
         # Determine temperature based on move count or king position
         if config.temperature_threshold == "king":
-            # Drop temperature when king leaves throne
-            temperature = 0.0 if game.king_has_left_throne else config.temperature
+            # Drop temperature when king is off the throne
+            # KING piece value is 3 in all game variants
+            king_on_throne = (game.board[game.throne] == 3)
+            temperature = config.temperature if king_on_throne else 0.0
         elif move_count < config.temperature_threshold:
             temperature = config.temperature
         else:
@@ -728,7 +732,7 @@ def play_self_play_game(agent: Agent, config: TrainingConfig) -> Dict:
     }
 
 
-def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None) -> ReplayBuffer:
+def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None) -> Tuple[ReplayBuffer, int, int]:
     """
     Generate self-play games and store in replay buffer.
     Uses multiprocessing to parallelize game generation.
@@ -740,7 +744,10 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         temp_network_path: Path to temporary network file (avoids pickling large tensors)
     
     Returns:
-        ReplayBuffer with collected experience
+        Tuple of (buffer, attacker_wins, defender_wins) where:
+        - buffer: ReplayBuffer with collected experience
+        - attacker_wins: Number of games won by attacker
+        - defender_wins: Number of games won by defender
     """
     buffer = ReplayBuffer(config.replay_buffer_size)
     
@@ -894,7 +901,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         print(f"  Terminal eval:     {mcts_timing_totals['terminal_eval']:7.1f}s ({100*mcts_timing_totals['terminal_eval']/total_mcts_time:5.1f}%)")
         print(f"  Total MCTS time:   {total_mcts_time:7.1f}s")
     
-    return buffer
+    return buffer, attacker_wins, defender_wins
 
 
 # =============================================================================
@@ -1805,32 +1812,10 @@ def train(config: TrainingConfig, resume_from: str = None):
                          c_puct=config.c_puct,
                          device=config.device)
             
-            new_buffer = generate_self_play_data(agent, config, pool=worker_pool)
+            new_buffer, attacker_game_wins, defender_game_wins = generate_self_play_data(agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
             
-            # Count wins from the new buffer to update win rate tracker
-            # We track by counting unique games (not samples, as augmentation creates multiple samples per game)
-            attacker_game_wins = 0
-            defender_game_wins = 0
-            
-            # Simple approach: count how many samples are from attacker-won vs defender-won games
-            # This is approximate but works well with the smoothing in the tracker
-            attacker_samples = sum(1 for _, _, _, won in new_buffer.buffer if won)
-            defender_samples = len(new_buffer.buffer) - attacker_samples
-            
-            # Estimate game counts (accounting for data augmentation)
-            if config.use_data_augmentation:
-                attacker_game_wins = attacker_samples // 8 // 50  # Rough estimate: 8x augmentation, ~50 moves/game
-                defender_game_wins = defender_samples // 8 // 50
-            else:
-                attacker_game_wins = attacker_samples // 50
-                defender_game_wins = defender_samples // 50
-            
-            # Ensure at least some count to avoid zero divisions in tracker
-            attacker_game_wins = max(1, attacker_game_wins)
-            defender_game_wins = max(1, defender_game_wins)
-            
-            # Update win rate tracker with new games
+            # Update win rate tracker with actual game results
             if config.use_dynamic_boosting:
                 win_rate_tracker.update(attacker_game_wins, defender_game_wins)
                 attacker_boost, defender_boost = win_rate_tracker.get_boost_factors()

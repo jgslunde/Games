@@ -74,9 +74,6 @@ class Hnefatafl:
         self.position_history = []
         self.move_count = 0
         
-        # Track if king has moved off throne
-        self.king_has_left_throne = False
-        
         self._setup_board()
         self._record_position()
     
@@ -228,10 +225,6 @@ class Hnefatafl:
                 if is_throne and self.throne_enabled and not is_king:
                     break
                 
-                # Block king from returning to throne once it has left (if throne is enabled)
-                if is_throne and self.throne_enabled and is_king and self.king_has_left_throne:
-                    break
-                
                 moves.append((r, c, nr, nc))
                 nr += dr
                 nc += dc
@@ -255,10 +248,6 @@ class Hnefatafl:
         piece = self.board[from_r, from_c]
         self.board[from_r, from_c] = EMPTY
         self.board[to_r, to_c] = piece
-        
-        # Track if king has left the throne
-        if piece == KING and (from_r, from_c) == self.throne:
-            self.king_has_left_throne = True
         
         # Increment move counter
         self.move_count += 1
@@ -302,7 +291,7 @@ class Hnefatafl:
             # For 2-piece capture, check if we complete a sandwich in THIS direction
             if self.king_capture_pieces == 2:
                 nr2, nc2 = nr + dr, nc + dc
-                if 0 <= nr2 < 11 and 0 <= nc2 < 11 and (self.board[nr2, nc2] == ATTACKER or self._is_hostile_square(nr2, nc2)):
+                if 0 <= nr2 < 11 and 0 <= nc2 < 11 and (self.board[nr2, nc2] == ATTACKER or self._is_hostile_square(nr2, nc2, KING)):
                     # Complete sandwich in this direction
                     self.board[nr, nc] = EMPTY
                     self.game_over = True
@@ -321,7 +310,7 @@ class Hnefatafl:
                 return
             
             opposite = self.board[nr2, nc2]
-            is_hostile_square = self._is_hostile_square(nr2, nc2)
+            is_hostile_square = self._is_hostile_square(nr2, nc2, enemy)
             
             if self._is_friendly(piece, opposite) or is_hostile_square:
                 self.board[nr, nc] = EMPTY
@@ -337,17 +326,17 @@ class Hnefatafl:
             # Standard custodian capture - need attackers/hostile squares on opposite sides
             # Check horizontal
             left_hostile = (king_c > 0 and (self.board[king_r, king_c - 1] == ATTACKER or 
-                           self._is_hostile_square(king_r, king_c - 1)))
+                           self._is_hostile_square(king_r, king_c - 1, KING)))
             right_hostile = (king_c < 10 and (self.board[king_r, king_c + 1] == ATTACKER or 
-                            self._is_hostile_square(king_r, king_c + 1)))
+                            self._is_hostile_square(king_r, king_c + 1, KING)))
             if left_hostile and right_hostile:
                 return True
             
             # Check vertical
             top_hostile = (king_r > 0 and (self.board[king_r - 1, king_c] == ATTACKER or 
-                          self._is_hostile_square(king_r - 1, king_c)))
+                          self._is_hostile_square(king_r - 1, king_c, KING)))
             bottom_hostile = (king_r < 10 and (self.board[king_r + 1, king_c] == ATTACKER or 
-                             self._is_hostile_square(king_r + 1, king_c)))
+                             self._is_hostile_square(king_r + 1, king_c, KING)))
             if top_hostile and bottom_hostile:
                 return True
             return False
@@ -358,7 +347,7 @@ class Hnefatafl:
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 nr, nc = king_r + dr, king_c + dc
                 if 0 <= nr < 11 and 0 <= nc < 11:
-                    if self.board[nr, nc] == ATTACKER or self._is_hostile_square(nr, nc):
+                    if self.board[nr, nc] == ATTACKER or self._is_hostile_square(nr, nc, KING):
                         hostile_count += 1
             return hostile_count >= 3
             
@@ -371,20 +360,33 @@ class Hnefatafl:
                 if not (0 <= nr < 11 and 0 <= nc < 11):
                     continue  # Edge is hostile, this side is satisfied
                 # Check if square has attacker or is a hostile square
-                if self.board[nr, nc] != ATTACKER and not self._is_hostile_square(nr, nc):
+                if self.board[nr, nc] != ATTACKER and not self._is_hostile_square(nr, nc, KING):
                     return False
             return True
         
         return False
     
-    def _is_hostile_square(self, r: int, c: int) -> bool:
-        """Check if a square is hostile for capturing purposes."""
+    def _is_hostile_square(self, r: int, c: int, target_piece: int) -> bool:
+        """
+        Check if a square is hostile for capturing purposes.
+        target_piece: The piece type being captured (ATTACKER, DEFENDER, or KING).
+        """
         # Corners are always hostile
         if (r, c) in self.corner_set:
             return True
-        # Throne is hostile only if throne is enabled AND throne_is_hostile rule is set
-        if self.throne_enabled and self.throne_is_hostile and (r, c) == self.throne:
-            return True
+        
+        # Throne: depends on whether it's occupied and what piece is being captured
+        if self.throne_enabled and (r, c) == self.throne:
+            # If throne is occupied, it's not hostile (can't squeeze against a piece)
+            if self.board[r, c] != EMPTY:
+                return False
+            # Empty throne: hostile to attackers, but only hostile to defenders/king if throne_is_hostile
+            if target_piece == ATTACKER:
+                return True  # Always hostile to attackers
+            else:
+                # For defenders and king, only hostile if throne_is_hostile rule is set
+                return self.throne_is_hostile
+        
         return False
     
     def _is_friendly(self, piece1: int, piece2: int) -> bool:
@@ -505,7 +507,6 @@ class Hnefatafl:
         new_game.corner_set = self.corner_set
         new_game.position_history = self.position_history.copy()
         new_game.move_count = self.move_count
-        new_game.king_has_left_throne = self.king_has_left_throne
         # Copy rule parameters
         new_game.king_capture_pieces = self.king_capture_pieces
         new_game.king_can_capture = self.king_can_capture
