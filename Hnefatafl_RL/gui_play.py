@@ -972,7 +972,14 @@ class TaflGUI:
                                 throne_is_hostile=self.throne_is_hostile,
                                 throne_enabled=self.throne_enabled
                             )
-                        else:
+                        elif self.board_size == 11:
+                            self.game = Hnefatafl(
+                                king_capture_pieces=self.king_capture_pieces,
+                                king_can_capture=self.king_can_capture,
+                                throne_is_hostile=self.throne_is_hostile,
+                                throne_enabled=self.throne_enabled
+                            )
+                        else:  # board_size == 7
                             self.game = Brandubh(
                                 king_capture_pieces=self.king_capture_pieces,
                                 king_can_capture=self.king_can_capture,
