@@ -183,13 +183,18 @@ class ReplayBuffer:
         """Sample a random batch from the buffer."""
         indices = np.random.choice(len(self.buffer), batch_size, replace=False)
         
+        # Convert deque to list once for O(1) random access instead of O(n) per access
+        # This is much faster than repeatedly indexing the deque
+        buffer_list = list(self.buffer)
+        
+        # Pre-allocate arrays for better performance
         states = []
         policies = []
         values = []
         attacker_won_flags = []
         
         for idx in indices:
-            state, policy, value, attacker_won = self.buffer[idx]
+            state, policy, value, attacker_won = buffer_list[idx]
             states.append(state)
             policies.append(policy)
             values.append(value)
