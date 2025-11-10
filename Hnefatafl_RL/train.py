@@ -1121,12 +1121,15 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
 
 def calculate_elo_difference(win_rate: float) -> float:
     """
-    Calculate ELO rating difference from win rate.
+    Calculate ELO rating difference from win rate / score.
     
     ELO formula: diff = -400 * log10((1/win_rate) - 1)
     
+    For network evaluation, win_rate should be the score:
+        score = (wins + 0.5 * draws) / total_games
+    
     Args:
-        win_rate: win rate between 0 and 1
+        win_rate: win rate / score between 0 and 1 (where draws count as 0.5)
     
     Returns:
         ELO difference (positive means stronger)
@@ -1352,10 +1355,20 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Play game
     if new_plays_attacker:
         winner = play_game(new_agent, old_agent, GameClass, display=False)
-        return 1 if winner == 0 else 0
+        if winner == 0:
+            return 1.0  # New network wins
+        elif winner is None:
+            return 0.5  # Draw
+        else:
+            return 0.0  # New network loses
     else:
         winner = play_game(old_agent, new_agent, GameClass, display=False)
-        return 1 if winner == 1 else 0
+        if winner == 1:
+            return 1.0  # New network wins
+        elif winner is None:
+            return 0.5  # Draw
+        else:
+            return 0.0  # New network loses
 
 
 def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet, 
@@ -1373,7 +1386,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         temp_old_path: Path to temporary old network file (avoids pickling large tensors)
     
     Returns:
-        win_rate: fraction of games won by new network
+        score_rate: score as fraction (wins + 0.5 * draws) / total_games
     """
     print(f"\nEvaluating new network vs old network ({config.eval_games} games using {config.num_workers} workers)...")
     
@@ -1476,16 +1489,29 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
                 pass
     
     # Process results - split by attacker/defender
-    attacker_wins = sum(results[:half_games + remainder])
-    defender_wins = sum(results[half_games + remainder:])
+    # Results are now floats: 1.0 = win, 0.5 = draw, 0.0 = loss
+    attacker_results = results[:half_games + remainder]
+    defender_results = results[half_games + remainder:]
+    
+    # Count wins and draws separately
+    attacker_wins = sum(1 for r in attacker_results if r == 1.0)
+    attacker_draws = sum(1 for r in attacker_results if r == 0.5)
+    defender_wins = sum(1 for r in defender_results if r == 1.0)
+    defender_draws = sum(1 for r in defender_results if r == 0.5)
+    
     total_wins = attacker_wins + defender_wins
-    win_rate = total_wins / config.eval_games
+    total_draws = attacker_draws + defender_draws
+    total_losses = config.eval_games - total_wins - total_draws
     
-    print(f"  As Attacker: {attacker_wins}/{half_games + remainder} wins")
-    print(f"  As Defender: {defender_wins}/{half_games} wins")
-    print(f"New network win rate: {100*win_rate:.1f}% ({total_wins}/{config.eval_games})")
+    # Calculate score (wins + 0.5 * draws) for ELO
+    total_score = sum(results)
+    score_rate = total_score / config.eval_games
     
-    return win_rate
+    print(f"  As Attacker: {attacker_wins}/{half_games + remainder} wins, {attacker_draws} draws")
+    print(f"  As Defender: {defender_wins}/{half_games} wins, {defender_draws} draws")
+    print(f"New network results: {total_wins}W-{total_losses}L-{total_draws}D ({100*score_rate:.1f}% score)")
+    
+    return score_rate
 
 
 # =============================================================================
@@ -1897,19 +1923,20 @@ def train(config: TrainingConfig, resume_from: str = None):
             
             # 4. Evaluate and update best network
             if (iteration + 1) % config.eval_frequency == 0:
-                print(f"\n[4/4] Evaluating new vs old network...")
+                print("\n[4/4] Evaluating new vs old network...")
                 eval_network_start = time.time()
-                win_rate = evaluate_networks(network, best_network, config, pool=worker_pool)
+                score_rate = evaluate_networks(network, best_network, config, pool=worker_pool)
                 eval_network_time = time.time() - eval_network_start
                 print(f"Network evaluation time: {eval_network_time:.1f}s")
-                training_history['win_rates'].append(win_rate)
+                training_history['win_rates'].append(score_rate)
                 
-                # Calculate ELO gain from this evaluation
-                elo_gain = calculate_elo_difference(win_rate)
+                # Calculate ELO gain from this evaluation (using score that counts draws as 0.5)
+                elo_gain = calculate_elo_difference(score_rate)
                 training_history['elo_gain'].append(elo_gain)
                 
-                if win_rate >= config.eval_win_rate:
-                    print(f"New network wins {100*win_rate:.1f}% - updating best network!")
+                # Check if score meets threshold (draws count as half a win)
+                if score_rate >= config.eval_win_rate:
+                    print(f"New network scores {100*score_rate:.1f}% - updating best network!")
                     print(f"ELO gain: {elo_gain:+.1f} (new network vs previous best)")
                     # Update cumulative ELO by adding this gain
                     cumulative_elo += elo_gain
@@ -1919,7 +1946,7 @@ def train(config: TrainingConfig, resume_from: str = None):
                     save_checkpoint(best_network, optimizer, iteration + 1, config,
                                   training_history, "best_model.pth")
                 else:
-                    print(f"New network wins {100*win_rate:.1f}% - keeping old network")
+                    print(f"New network scores {100*score_rate:.1f}% - keeping old network")
                     print(f"ELO difference: {elo_gain:+.1f} (new network vs previous best, not applied)")
                 
                 # Record cumulative ELO (relative to iteration 0)
