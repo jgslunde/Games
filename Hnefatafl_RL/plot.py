@@ -2,7 +2,7 @@
 """
 Parse training output and create matplotlib plots of training progress.
 
-This script parses the output.txt file from train.py and generates five plots:
+This script parses the output.txt file(s) from train.py and generates five plots:
 1. plot_elo.png - ELO vs random and ELO vs first version
 2. plot_win_rates.png - Win rates (attacker/defender/draw) for self-play, 
    random evaluation, and self-evaluation
@@ -12,9 +12,10 @@ This script parses the output.txt file from train.py and generates five plots:
 
 All plots are saved in the same directory as the input file.
 
-Usage: python plot.py <path_to_output.txt>
+Usage: python plot.py <path_to_output.txt> [path_to_output2.txt] [...]
 
 Example: python plot.py checkpoints_v05_fatman_asym_atkboost2_nodraw/output.txt
+Example: python plot.py checkpoints_brandubh/jack_nothrone/output.txt checkpoints_brandubh/jack_nothrone/output2.txt
 """
 
 import sys
@@ -233,6 +234,96 @@ def fill_missing_values(data):
     return data
 
 
+def merge_data_from_files(file_data_list):
+    """
+    Merge data from multiple output files.
+    
+    For cumulative ELO, adds the final ELO from each file to the values in subsequent files.
+    For other metrics, simply concatenates the data.
+    
+    Args:
+        file_data_list: List of data dictionaries from parse_output_file()
+    
+    Returns:
+        Merged data dictionary
+    """
+    if len(file_data_list) == 1:
+        return file_data_list[0]
+    
+    merged = {
+        'iterations': [],
+        'selfplay_attacker_wins': [],
+        'selfplay_defender_wins': [],
+        'selfplay_draws': [],
+        'random_iterations': [],
+        'random_attacker_wins': [],
+        'random_defender_wins': [],
+        'random_total_wins': [],
+        'random_elo': [],
+        'selfeval_iterations': [],
+        'selfeval_attacker_wins': [],
+        'selfeval_defender_wins': [],
+        'selfeval_total_wins': [],
+        'selfeval_win_rate': [],
+        'cumulative_elo_vs_first': [],
+        'policy_loss': [],
+        'value_loss': [],
+        'epoch_steps': [],
+        'epoch_policy_loss': [],
+        'epoch_value_loss': [],
+        'buffer_size': [],
+        'total_time': [],
+    }
+    
+    cumulative_elo_offset = 0.0
+    
+    for file_idx, data in enumerate(file_data_list):
+        # For cumulative ELO, we need to add the offset from previous files
+        if data['cumulative_elo_vs_first']:
+            # Add offset to all cumulative ELO values
+            adjusted_elo = [elo + cumulative_elo_offset for elo in data['cumulative_elo_vs_first']]
+            merged['cumulative_elo_vs_first'].extend(adjusted_elo)
+            merged['selfeval_iterations'].extend(data['selfeval_iterations'])
+            
+            # Update offset for next file (use the last ELO value from current file)
+            cumulative_elo_offset = adjusted_elo[-1]
+        
+        # For other self-evaluation metrics
+        merged['selfeval_attacker_wins'].extend(data['selfeval_attacker_wins'])
+        merged['selfeval_defender_wins'].extend(data['selfeval_defender_wins'])
+        merged['selfeval_total_wins'].extend(data['selfeval_total_wins'])
+        
+        # Simple concatenation for other metrics
+        merged['iterations'].extend(data['iterations'])
+        merged['selfplay_attacker_wins'].extend(data['selfplay_attacker_wins'])
+        merged['selfplay_defender_wins'].extend(data['selfplay_defender_wins'])
+        merged['selfplay_draws'].extend(data['selfplay_draws'])
+        
+        merged['random_iterations'].extend(data['random_iterations'])
+        merged['random_attacker_wins'].extend(data['random_attacker_wins'])
+        merged['random_defender_wins'].extend(data['random_defender_wins'])
+        merged['random_total_wins'].extend(data['random_total_wins'])
+        merged['random_elo'].extend(data['random_elo'])
+        
+        merged['policy_loss'].extend(data['policy_loss'])
+        merged['value_loss'].extend(data['value_loss'])
+        
+        merged['epoch_policy_loss'].extend(data['epoch_policy_loss'])
+        merged['epoch_value_loss'].extend(data['epoch_value_loss'])
+        # Adjust epoch steps to be cumulative across files
+        if merged['epoch_steps']:
+            max_step = merged['epoch_steps'][-1] + 1
+            adjusted_steps = [step + max_step for step in data['epoch_steps']]
+            merged['epoch_steps'].extend(adjusted_steps)
+        else:
+            merged['epoch_steps'].extend(data['epoch_steps'])
+        
+        merged['buffer_size'].extend(data['buffer_size'])
+        merged['total_time'].extend(data['total_time'])
+    
+    return merged
+
+
 def plot_elo(data, output_dir):
     """Plot 1: ELO versus random and ELO versus first version."""
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -423,26 +514,40 @@ def plot_buffer_and_time(data, output_dir):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python plot.py <path_to_output.txt>")
+    if len(sys.argv) < 2:
+        print("Usage: python plot.py <path_to_output.txt> [path_to_output2.txt] [...]")
         sys.exit(1)
     
-    filepath = sys.argv[1]
+    filepaths = sys.argv[1:]
     
-    if not os.path.exists(filepath):
-        print(f"Error: File '{filepath}' not found.")
-        sys.exit(1)
+    # Check that all files exist
+    for filepath in filepaths:
+        if not os.path.exists(filepath):
+            print(f"Error: File '{filepath}' not found.")
+            sys.exit(1)
     
-    print(f"Parsing {filepath}...")
-    data = parse_output_file(filepath)
+    # Parse all files
+    print(f"Parsing {len(filepaths)} file(s)...")
+    file_data_list = []
+    for filepath in filepaths:
+        print(f"  - {filepath}")
+        data = parse_output_file(filepath)
+        file_data_list.append(data)
+    
+    # Merge data from multiple files if necessary
+    if len(file_data_list) > 1:
+        print(f"\nMerging data from {len(file_data_list)} files...")
+        data = merge_data_from_files(file_data_list)
+    else:
+        data = file_data_list[0]
     
     # Fill missing values for metrics not recorded every iteration
     data = fill_missing_values(data)
     
-    # Output directory is the same as the input file
-    output_dir = os.path.dirname(filepath)
+    # Output directory is the same as the first input file
+    output_dir = os.path.dirname(filepaths[0])
     
-    print(f"Creating plots...")
+    print(f"\nCreating plots...")
     print(f"  - Found {len(data['iterations'])} iterations")
     print(f"  - Random evaluations: {len(data['random_elo'])} data points")
     print(f"  - Self-evaluations: {len(data['cumulative_elo_vs_first'])} data points")

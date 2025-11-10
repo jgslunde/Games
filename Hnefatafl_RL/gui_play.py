@@ -86,7 +86,8 @@ BOARD_AREA_WIDTH = WINDOW_WIDTH - INFO_PANEL_WIDTH
 class TaflGUI:
     def __init__(self, checkpoint_path: Optional[str] = None, game_type: str = 'brandubh', num_simulations: int = 100, c_puct: float = 1.4,
                  king_capture_pieces: int = 2, king_can_capture: bool = True, 
-                 throne_is_hostile: bool = False, throne_enabled: bool = True, force_rules: bool = False):
+                 throne_is_hostile: bool = False, throne_enabled: bool = True, force_rules: bool = False,
+                 add_dirichlet_noise: bool = False):
         pygame.init()
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         
@@ -97,6 +98,7 @@ class TaflGUI:
         self.throne_is_hostile = throne_is_hostile
         self.throne_enabled = throne_enabled
         self.force_rules = force_rules
+        self.add_dirichlet_noise = add_dirichlet_noise
         
         # Initialize game
         if self.game_type == 'tablut':
@@ -140,6 +142,15 @@ class TaflGUI:
             pygame.display.set_caption(f"{game_name} - AI Evaluation")
         else:
             pygame.display.set_caption(f"{game_name}")
+        
+        # Print AI settings if network is loaded
+        if self.network:
+            print("\nAI Settings:")
+            print(f"  MCTS simulations: {self.num_simulations}")
+            print(f"  c_puct: {self.c_puct}")
+            print(f"  Dirichlet noise: {'ENABLED' if self.add_dirichlet_noise else 'DISABLED'}")
+            if self.add_dirichlet_noise:
+                print("    (AI moves will vary between games)")
         
         self.clock = pygame.time.Clock()
         
@@ -456,7 +467,7 @@ class TaflGUI:
             from agent import Agent
             self.ai_agent = Agent(self.network, num_simulations=self.num_simulations, 
                             c_puct=self.c_puct, device='cpu',
-                            add_dirichlet_noise=False,
+                            add_dirichlet_noise=self.add_dirichlet_noise,
                             move_encoder_class=self._get_move_encoder())
         
         print(f"AI making move for {'Attackers' if self.game.current_player == 0 else 'Defenders'}...")
@@ -1252,6 +1263,8 @@ def main():
                        help="Number of MCTS simulations/depth for AI evaluation (default: 100)")
     parser.add_argument("--c-puct", type=float, default=1.4,
                        help="MCTS exploration constant (default: 1.4)")
+    parser.add_argument("--dirichlet-noise", action="store_true",
+                       help="Add Dirichlet noise to root node for exploration during AI moves (adds variety to play)")
     
     # Game rule arguments (optional - will be overridden by checkpoint config if present)
     parser.add_argument("--king-capture-pieces", type=int, default=None, choices=[2, 3, 4],
@@ -1308,7 +1321,7 @@ def main():
     gui = TaflGUI(args.checkpoint, game_type=args.game, num_simulations=args.simulations, c_puct=args.c_puct,
                   king_capture_pieces=king_capture_pieces, king_can_capture=king_can_capture,
                   throne_is_hostile=throne_is_hostile, throne_enabled=throne_enabled,
-                  force_rules=args.force_rules)
+                  force_rules=args.force_rules, add_dirichlet_noise=args.dirichlet_noise)
     gui.run()
 
 
