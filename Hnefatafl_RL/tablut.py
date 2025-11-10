@@ -213,13 +213,16 @@ class Tablut:
                 is_corner = (nr, nc) in self.corner_set
                 is_throne = (nr, nc) == self.throne
                 
-                # Block non-king from corners (always)
+                # Block non-king from corners (always) - cannot move through corners
                 if is_corner and not is_king:
                     break
                 
-                # Block non-king from throne (only if throne is enabled)
+                # Block non-king from landing on throne (only if throne is enabled)
+                # But allow moving THROUGH the throne (continue to next square)
                 if is_throne and self.throne_enabled and not is_king:
-                    break
+                    nr += dr
+                    nc += dc
+                    continue  # Skip this square but keep checking beyond it
                 
                 moves.append((r, c, nr, nc))
                 nr += dr
