@@ -339,6 +339,7 @@ def plot_elo(data, output_dir):
     ax.set_title('ELO Ratings During Training', fontsize=14, fontweight='bold')
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
+    ax.set_ylim(bottom=0)
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'plot_elo.png'), dpi=150)
@@ -420,6 +421,7 @@ def plot_losses(data, output_dir):
         ax1.plot(iterations, data['policy_loss'], 'o-', color=color1, label='Policy Loss', linewidth=2, markersize=4)
     ax1.tick_params(axis='y', labelcolor=color1)
     ax1.grid(True, alpha=0.3)
+    ax1.set_ylim(bottom=0)
     
     ax2 = ax1.twinx()
     color2 = 'tab:red'
@@ -427,6 +429,7 @@ def plot_losses(data, output_dir):
     if data['value_loss']:
         ax2.plot(iterations, data['value_loss'], 's-', color=color2, label='Value Loss', linewidth=2, markersize=4)
     ax2.tick_params(axis='y', labelcolor=color2)
+    ax2.set_ylim(bottom=0)
     
     # Add title
     ax1.set_title('Training Losses (Per Iteration)', fontsize=14, fontweight='bold')
@@ -455,6 +458,7 @@ def plot_epoch_losses(data, output_dir):
                 label='Policy Loss', linewidth=1.5, alpha=0.7)
     ax1.tick_params(axis='y', labelcolor=color1)
     ax1.grid(True, alpha=0.3)
+    ax1.set_ylim(bottom=0)
     
     ax2 = ax1.twinx()
     color2 = 'tab:red'
@@ -463,6 +467,7 @@ def plot_epoch_losses(data, output_dir):
         ax2.plot(epoch_steps, data['epoch_value_loss'], '-', color=color2, 
                 label='Value Loss', linewidth=1.5, alpha=0.7)
     ax2.tick_params(axis='y', labelcolor=color2)
+    ax2.set_ylim(bottom=0)
     
     # Add title
     ax1.set_title('Training Losses (Per Epoch - All Iterations)', fontsize=14, fontweight='bold')
@@ -490,6 +495,7 @@ def plot_buffer_and_time(data, output_dir):
         ax1.plot(iterations, data['buffer_size'], 'o-', color=color1, label='Buffer Size', linewidth=2, markersize=4)
     ax1.tick_params(axis='y', labelcolor=color1)
     ax1.grid(True, alpha=0.3)
+    ax1.set_ylim(bottom=0)
     # Format y-axis with thousands separator
     ax1.ticklabel_format(style='plain', axis='y')
     
@@ -499,6 +505,7 @@ def plot_buffer_and_time(data, output_dir):
     if data['total_time']:
         ax2.plot(iterations, data['total_time'], 's-', color=color2, label='Total Time', linewidth=2, markersize=4)
     ax2.tick_params(axis='y', labelcolor=color2)
+    ax2.set_ylim(bottom=0)
     
     # Add title
     ax1.set_title('Buffer Size and Iteration Time', fontsize=14, fontweight='bold')
