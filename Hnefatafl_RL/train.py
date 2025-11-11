@@ -1052,7 +1052,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
         game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
     
     Returns:
-        1 if NN wins, 0 otherwise
+        1.0 if NN wins, 0.5 if draw, 0.0 if NN loses
     """
     # Seed random number generators uniquely for each worker
     import time
@@ -1113,10 +1113,20 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     # Play game
     if nn_plays_attacker:
         winner = play_game(nn_agent, random_agent, GameClass, display=False)
-        return 1 if winner == 0 else 0
+        if winner == 0:
+            return 1.0  # NN wins
+        elif winner is None:
+            return 0.5  # Draw
+        else:
+            return 0.0  # NN loses
     else:
         winner = play_game(random_agent, nn_agent, GameClass, display=False)
-        return 1 if winner == 1 else 0
+        if winner == 1:
+            return 1.0  # NN wins
+        elif winner is None:
+            return 0.5  # Draw
+        else:
+            return 0.0  # NN loses
 
 
 def calculate_elo_difference(win_rate: float) -> float:
@@ -1157,8 +1167,9 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
         temp_network_path: Path to temporary network file (avoids pickling large tensors)
     
     Returns:
-        dict with 'total_wins', 'total_games', 'win_rate', 'elo_diff',
-        'attacker_wins', 'defender_wins'
+        dict with 'total_wins', 'total_draws', 'total_losses', 'total_games', 
+        'win_rate' (score rate where draws = 0.5), 'elo_diff',
+        'attacker_wins', 'attacker_draws', 'defender_wins', 'defender_draws'
     """
     print(f"\nEvaluating vs Random player ({num_games * 2} games using {config.num_workers} workers)...")
     
@@ -1232,26 +1243,38 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
                 pass
     
     # Process results
-    attacker_wins = sum(attacker_results)
-    defender_wins = sum(defender_results)
+    # Results are now floats: 1.0 = win, 0.5 = draw, 0.0 = loss
+    attacker_wins = sum(1 for r in attacker_results if r == 1.0)
+    attacker_draws = sum(1 for r in attacker_results if r == 0.5)
+    defender_wins = sum(1 for r in defender_results if r == 1.0)
+    defender_draws = sum(1 for r in defender_results if r == 0.5)
     
     total_wins = attacker_wins + defender_wins
+    total_draws = attacker_draws + defender_draws
     total_games = num_games * 2
-    win_rate = total_wins / total_games
-    elo_diff = calculate_elo_difference(win_rate)
+    total_losses = total_games - total_wins - total_draws
     
-    print(f"  As Attacker: {attacker_wins}/{num_games} wins")
-    print(f"  As Defender: {defender_wins}/{num_games} wins")
-    print(f"  Total: {total_wins}/{total_games} wins ({100*win_rate:.1f}%)")
+    # Calculate score (wins + 0.5 * draws) for ELO and win rate
+    total_score = sum(attacker_results) + sum(defender_results)
+    score_rate = total_score / total_games
+    elo_diff = calculate_elo_difference(score_rate)
+    
+    print(f"  As Attacker: {attacker_wins}/{num_games} wins, {attacker_draws} draws")
+    print(f"  As Defender: {defender_wins}/{num_games} wins, {defender_draws} draws")
+    print(f"  Total: {total_wins}W-{total_losses}L-{total_draws}D ({100*score_rate:.1f}% score)")
     print(f"  ELO vs Random: {elo_diff:+.0f}")
     
     return {
         'total_wins': total_wins,
+        'total_draws': total_draws,
+        'total_losses': total_losses,
         'total_games': total_games,
-        'win_rate': win_rate,
+        'win_rate': score_rate,  # Note: now returns score rate (with draws as 0.5)
         'elo_diff': elo_diff,
         'attacker_wins': attacker_wins,
-        'defender_wins': defender_wins
+        'attacker_draws': attacker_draws,
+        'defender_wins': defender_wins,
+        'defender_draws': defender_draws
     }
 
 
@@ -1280,7 +1303,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         game_idx: Game index (unused, for pool.map)
     
     Returns:
-        1 if new network wins, 0 otherwise
+        1.0 if new network wins, 0.5 if draw, 0.0 if new network loses
     """
     # Seed random number generators uniquely for each worker
     import time
@@ -1815,6 +1838,7 @@ def train(config: TrainingConfig, resume_from: str = None):
         'vs_random_elo': [],
         'vs_random_attacker_wins': [],
         'vs_random_defender_wins': [],
+        'vs_random_total_draws': [],
         'cumulative_elo': [],  # ELO relative to iteration 0
         'elo_gain': []  # ELO gained in network vs network evaluation
     }
@@ -1906,9 +1930,12 @@ def train(config: TrainingConfig, resume_from: str = None):
                 training_history['vs_random_elo'].append(random_eval['elo_diff'])
                 training_history['vs_random_attacker_wins'].append(random_eval['attacker_wins'])
                 training_history['vs_random_defender_wins'].append(random_eval['defender_wins'])
+                training_history['vs_random_total_draws'].append(random_eval['total_draws'])
                 
-                # Check if 100% win rate achieved
-                if random_eval['win_rate'] >= 1.0:
+                # Check if 100% score achieved (win_rate now includes draws as 0.5)
+                # For 100% milestone, we want actual 100% wins (no draws or losses)
+                perfect_score = (random_eval['total_wins'] == random_eval['total_games'])
+                if perfect_score:
                     achieved_100_percent_vs_random = True
                     print("\n" + "=" * 70)
                     print("🎉 MILESTONE: Achieved 100% win rate vs random player!")
