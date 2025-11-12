@@ -144,7 +144,9 @@ class MCTSAgent:
         return self.mcts.select_move(game, temperature)
 
 
-def play_game(agent1, agent2, game_class, display: bool = True) -> int:
+def play_game(agent1, agent2, game_class, display: bool = True, 
+              temperature: float = 0.0, temperature_mode: str = "fixed",
+              temperature_threshold: int = 0, temperature_decay_moves: int = 0) -> int:
     """
     Play a game between two agents.
     
@@ -153,13 +155,20 @@ def play_game(agent1, agent2, game_class, display: bool = True) -> int:
         agent2: agent playing as defenders
         game_class: game class to instantiate (e.g., Brandubh, Tablut)
         display: whether to print the game
+        temperature: sampling temperature for move selection (0 = deterministic)
+        temperature_mode: "fixed" (drop at threshold), "king" (drop when king leaves), or "decay" (linear)
+        temperature_threshold: move number after which temperature drops to 0 (for "fixed" mode)
+        temperature_decay_moves: number of moves for linear decay (for "decay" mode)
     
     Returns:
-        winner: 0 for attackers, 1 for defenders
+        winner: 0 for attackers, 1 for defenders, None for draw
     """
     game = game_class()
     agents = [agent1, agent2]
     move_count = 0
+    
+    # Track king leaving throne for "king" threshold
+    king_left_throne = False
     
     if display:
         print("=" * 50)
@@ -172,8 +181,38 @@ def play_game(agent1, agent2, game_class, display: bool = True) -> int:
     while not game.game_over:
         agent = agents[game.current_player]
         
-        # Select move
-        move = agent.select_move(game)
+        # Determine temperature for this move
+        if temperature_mode == "king":
+            # Drop temperature after king leaves throne
+            if not king_left_throne:
+                # Check if king is still on throne
+                king_pos = None
+                for r in range(game.board_size):
+                    for c in range(game.board_size):
+                        if game.board[r, c] == 2:  # King
+                            king_pos = (r, c)
+                            break
+                    if king_pos:
+                        break
+                
+                # Check if king is on throne (center square)
+                throne_pos = (game.board_size // 2, game.board_size // 2)
+                if king_pos != throne_pos:
+                    king_left_throne = True
+            
+            temp = 0.0 if king_left_throne else temperature
+        elif temperature_mode == "decay":
+            # Linear decay over specified number of moves
+            if move_count < temperature_decay_moves:
+                temp = temperature * (1.0 - move_count / temperature_decay_moves)
+            else:
+                temp = 0.0
+        else:  # "fixed" mode
+            # Drop temperature after specified number of moves
+            temp = 0.0 if move_count >= temperature_threshold else temperature
+        
+        # Select move with temperature
+        move = agent.select_move(game, temperature=temp)
         
         if move is None:
             # No legal moves

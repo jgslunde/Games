@@ -20,12 +20,15 @@ Controls:
 
 Usage:
     python gui_play.py <checkpoint_path> [--game {brandubh,tablut,hnefatafl}] [--simulations N] [--c-puct C]
+                       [--temperature T] [--temperature-mode {fixed,king,decay}] 
+                       [--temperature-threshold N] [--temperature-decay-moves N]
     
 Example:
     python gui_play.py checkpoints/best_model.pth
     python gui_play.py checkpoints/best_model.pth --game tablut
     python gui_play.py checkpoints/best_model.pth --game hnefatafl
     python gui_play.py checkpoints/best_model.pth --simulations 200 --c-puct 1.5
+    python gui_play.py checkpoints/best_model.pth --temperature 1.0 --temperature-mode decay --temperature-decay-moves 40
 """
 
 import sys
@@ -87,7 +90,8 @@ class TaflGUI:
     def __init__(self, checkpoint_path: Optional[str] = None, game_type: str = 'brandubh', num_simulations: int = 100, c_puct: float = 1.4,
                  king_capture_pieces: int = 2, king_can_capture: bool = True, 
                  throne_is_hostile: bool = False, throne_enabled: bool = True, force_rules: bool = False,
-                 add_dirichlet_noise: bool = False):
+                 add_dirichlet_noise: bool = False, temperature: float = 0.0,
+                 temperature_mode: str = "fixed", temperature_threshold: int = 0, temperature_decay_moves: int = 30):
         pygame.init()
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         
@@ -99,6 +103,14 @@ class TaflGUI:
         self.throne_enabled = throne_enabled
         self.force_rules = force_rules
         self.add_dirichlet_noise = add_dirichlet_noise
+        
+        # Temperature settings for AI moves
+        self.temperature = temperature
+        self.temperature_mode = temperature_mode
+        self.temperature_threshold = temperature_threshold
+        self.temperature_decay_moves = temperature_decay_moves
+        self.move_count = 0  # Track moves to calculate temperature
+        self.king_left_throne = False  # Track king movement for "king" mode
         
         # Initialize game
         if self.game_type == 'tablut':
@@ -155,6 +167,12 @@ class TaflGUI:
             print(f"  Dirichlet noise: {'ENABLED' if self.add_dirichlet_noise else 'DISABLED'}")
             if self.add_dirichlet_noise:
                 print("    (AI moves will vary between games)")
+            print(f"  Temperature: {self.temperature}")
+            print(f"  Temperature mode: {self.temperature_mode}")
+            if self.temperature_mode == "fixed":
+                print(f"    Threshold: {self.temperature_threshold} moves")
+            elif self.temperature_mode == "decay":
+                print(f"    Decay over: {self.temperature_decay_moves} moves")
         
         self.clock = pygame.time.Clock()
         self.mcts = None  # MCTS object for evaluation (created when needed)
@@ -405,6 +423,42 @@ class TaflGUI:
             move_idx = encoder.encode_move(move)
             self.move_probs_from_selected[to_r, to_c] = self.policy_probs[move_idx]
     
+    def _get_current_temperature(self):
+        """Calculate current temperature based on move count and temperature mode."""
+        if self.temperature == 0.0:
+            return 0.0
+        
+        if self.temperature_mode == "king":
+            # Check if king has left throne
+            if not self.king_left_throne:
+                # Find king position
+                king_pos = None
+                for r in range(self.board_size):
+                    for c in range(self.board_size):
+                        if self.game.board[r, c] == KING:
+                            king_pos = (r, c)
+                            break
+                    if king_pos:
+                        break
+                
+                # Check if king is still on throne (center)
+                throne_pos = (self.board_size // 2, self.board_size // 2)
+                if king_pos != throne_pos:
+                    self.king_left_throne = True
+            
+            return 0.0 if self.king_left_throne else self.temperature
+        
+        elif self.temperature_mode == "decay":
+            # Linear decay over specified number of moves
+            if self.move_count < self.temperature_decay_moves:
+                return self.temperature * (1.0 - self.move_count / self.temperature_decay_moves)
+            else:
+                return 0.0
+        
+        else:  # "fixed" mode
+            # Drop temperature after threshold
+            return 0.0 if self.move_count >= self.temperature_threshold else self.temperature
+    
     def _start_move_animation(self, move):
         """Start animating a move. The actual move will be executed after animation completes."""
         from_r, from_c, to_r, to_c = move
@@ -472,8 +526,12 @@ class TaflGUI:
         
         print(f"AI making move for {'Attackers' if self.game.current_player == 0 else 'Defenders'}...")
         
-        # Get AI move (temperature=0 for best move)
-        move = self.ai_agent.select_move(self.game, temperature=0.0)
+        # Get current temperature for this move
+        current_temp = self._get_current_temperature()
+        print(f"  Move #{self.move_count + 1}, Temperature: {current_temp:.3f}")
+        
+        # Get AI move
+        move = self.ai_agent.select_move(self.game, temperature=current_temp)
         
         if move is not None:
             from_r, from_c, to_r, to_c = move
@@ -486,6 +544,9 @@ class TaflGUI:
             self.move_highlight_from = (from_r, from_c)
             self.move_highlight_to = (to_r, to_c)
             self.move_highlight_timer = 60  # Will start counting down after animation
+            
+            # Increment move count after making a move
+            self.move_count += 1
             
             self.selected_piece = None
             self.legal_moves_from_selected = []
@@ -946,6 +1007,58 @@ class TaflGUI:
             self.screen.blit(value_text, text_rect)
             y_offset += 80
         
+        # Temperature display (if AI is loaded and temperature > 0)
+        if self.network and self.temperature > 0.0:
+            pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
+                            (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
+            y_offset += 30
+            
+            # Current temperature
+            current_temp = self._get_current_temperature()
+            temp_label = self.font_medium.render("Temperature:", True, TEXT_PRIMARY)
+            self.screen.blit(temp_label, (panel_x + 20, y_offset))
+            y_offset += 35
+            
+            # Temperature value with colored background
+            temp_value_text = self.font_large.render(f"{current_temp:.3f}", True, TEXT_PRIMARY)
+            temp_rect_bg = pygame.Rect(panel_x + 20, y_offset, INFO_PANEL_WIDTH - 40, 50)
+            # Color based on temperature value
+            if current_temp > 0.5:
+                temp_bg_color = (231, 76, 60)  # Red for high exploration
+            elif current_temp > 0.0:
+                temp_bg_color = (230, 126, 34)  # Orange for medium exploration
+            else:
+                temp_bg_color = (46, 204, 113)  # Green for deterministic
+            pygame.draw.rect(self.screen, temp_bg_color, temp_rect_bg, border_radius=8)
+            temp_value_rect = temp_value_text.get_rect(center=temp_rect_bg.center)
+            self.screen.blit(temp_value_text, temp_value_rect)
+            y_offset += 60
+            
+            # Mode and parameters info
+            mode_info = f"Mode: {self.temperature_mode}"
+            mode_info_text = self.font_small.render(mode_info, True, TEXT_SECONDARY)
+            self.screen.blit(mode_info_text, (panel_x + 20, y_offset))
+            y_offset += 25
+            
+            if self.temperature_mode == "fixed":
+                param_info = f"Threshold: {self.temperature_threshold} moves"
+            elif self.temperature_mode == "decay":
+                param_info = f"Decay: {self.temperature_decay_moves} moves"
+            else:  # "king"
+                if self.king_left_throne:
+                    param_info = "King left throne"
+                else:
+                    param_info = "King on throne"
+            
+            param_info_text = self.font_small.render(param_info, True, TEXT_SECONDARY)
+            self.screen.blit(param_info_text, (panel_x + 20, y_offset))
+            y_offset += 25
+            
+            # Move count
+            move_count_text = self.font_small.render(f"Moves: {self.move_count}", True, TEXT_SECONDARY)
+            self.screen.blit(move_count_text, (panel_x + 20, y_offset))
+            y_offset += 35
+        
         # Instructions
         pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
                         (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
@@ -1148,6 +1261,9 @@ class TaflGUI:
                     self.move_highlight_to = (row, col)
                     self.move_highlight_timer = 60  # Will start counting down after animation
                     
+                    # Increment move count after making a move
+                    self.move_count += 1
+                    
                     self.selected_piece = None
                     self.legal_moves_from_selected = []
                     self.move_probs_from_selected = None
@@ -1221,6 +1337,9 @@ class TaflGUI:
                             self.move_probs_from_selected = None
                             self.captured_pieces = []
                             self.move_highlight_timer = 0
+                            # Reset temperature tracking
+                            self.move_count = 0
+                            self.king_left_throne = False
                             if self.network:
                                 self._evaluate_position()
                         elif event.key == pygame.K_m and self.network:
@@ -1265,6 +1384,17 @@ def main():
                        help="MCTS exploration constant (default: 1.4)")
     parser.add_argument("--dirichlet-noise", action="store_true",
                        help="Add Dirichlet noise to root node for exploration during AI moves (adds variety to play)")
+    
+    # Temperature arguments for AI move selection
+    parser.add_argument("--temperature", type=float, default=0.0,
+                       help="Temperature for AI move selection (0 = deterministic, higher = more random) (default: 0.0)")
+    parser.add_argument("--temperature-mode", type=str, default="fixed", choices=["fixed", "king", "decay"],
+                       help="Temperature mode: 'fixed' (drop at threshold), 'king' (drop when king leaves throne), "
+                            "'decay' (linear decay over moves) (default: fixed)")
+    parser.add_argument("--temperature-threshold", type=int, default=0,
+                       help="For 'fixed' mode: move number after which temperature drops to 0 (default: 0)")
+    parser.add_argument("--temperature-decay-moves", type=int, default=30,
+                       help="For 'decay' mode: number of moves over which to decay temperature to 0 (default: 30)")
     
     # Game rule arguments (optional - will be overridden by checkpoint config if present)
     parser.add_argument("--king-capture-pieces", type=int, default=None, choices=[2, 3, 4],
@@ -1321,7 +1451,9 @@ def main():
     gui = TaflGUI(args.checkpoint, game_type=args.game, num_simulations=args.simulations, c_puct=args.c_puct,
                   king_capture_pieces=king_capture_pieces, king_can_capture=king_can_capture,
                   throne_is_hostile=throne_is_hostile, throne_enabled=throne_enabled,
-                  force_rules=args.force_rules, add_dirichlet_noise=args.dirichlet_noise)
+                  force_rules=args.force_rules, add_dirichlet_noise=args.dirichlet_noise,
+                  temperature=args.temperature, temperature_mode=args.temperature_mode,
+                  temperature_threshold=args.temperature_threshold, temperature_decay_moves=args.temperature_decay_moves)
     gui.run()
 
 

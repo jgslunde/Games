@@ -82,7 +82,15 @@ class TrainingConfig:
     
     # Temperature (exploration during self-play)
     temperature = 1.0                 # Sampling temperature for moves
-    temperature_threshold = 15        # Move number after which temperature = 0, or "king" to drop when king leaves throne
+    temperature_mode = "king"         # "fixed": drop at threshold, "king": drop when king leaves, "decay": linear decay
+    temperature_threshold = 15        # Move number after which temperature = 0 (for "fixed" mode)
+    temperature_decay_moves = 30      # Number of moves for linear decay (for "decay" mode)
+    
+    # Temperature (for network evaluation games)
+    eval_temperature = 0.0            # Temperature for evaluation games (0 = deterministic)
+    eval_temperature_mode = "fixed"   # "fixed", "king", or "decay"
+    eval_temperature_threshold = 0    # Move threshold for eval temperature (for "fixed" mode)
+    eval_temperature_decay_moves = 0  # Decay moves for eval (for "decay" mode)
     
     # Dirichlet noise (exploration during self-play)
     add_dirichlet_noise = True        # Add Dirichlet noise to root for exploration
@@ -434,7 +442,8 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
 # =============================================================================
 
 def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, 
-                                num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_threshold, game_idx,
+                                num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_mode,
+                                temperature_threshold, temperature_decay_moves, game_idx,
                                 king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
                                 network_module, network_class_name, game_module, game_class_name,
                                 add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon):
@@ -450,7 +459,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         temperature: Sampling temperature
-        temperature_threshold: Move threshold or "king" for king-based threshold
+        temperature_mode: "fixed", "king", or "decay"
+        temperature_threshold: Move number for temperature drop (for "fixed" mode)
+        temperature_decay_moves: Number of moves for linear decay (for "decay" mode)
         game_idx: Game index for seeding
         king_capture_pieces: Number of pieces to capture king
         king_can_capture: Whether king can capture
@@ -546,13 +557,19 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
             # Select MCTS based on current player
             mcts = mcts_attacker if current_player == 0 else mcts_defender
             
-            # Determine temperature based on move count or king position
-            if temperature_threshold == "king":
+            # Determine temperature based on mode
+            if temperature_mode == "king":
                 # Drop temperature when king is off the throne
                 # KING piece value is 3 in all game variants
                 king_on_throne = (game.board[game.throne] == 3)
                 temp = temperature if king_on_throne else 0.0
-            else:
+            elif temperature_mode == "decay":
+                # Linear decay over specified number of moves
+                if move_count < temperature_decay_moves:
+                    temp = temperature * (1.0 - move_count / temperature_decay_moves)
+                else:
+                    temp = 0.0
+            else:  # "fixed" mode
                 # Drop temperature after a fixed number of moves
                 temp = temperature if move_count < temperature_threshold else 0.0
             
@@ -785,7 +802,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         worker_args = [
             (temp_network_path, config.num_res_blocks, config.num_channels,
              config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
-             config.c_puct, config.temperature, config.temperature_threshold,
+             config.c_puct, config.temperature, config.temperature_mode,
+             config.temperature_threshold, config.temperature_decay_moves,
              i, config.king_capture_pieces, config.king_can_capture,
              config.throne_is_hostile, config.throne_enabled, config.board_size,
              config.network_class.__module__, config.network_class.__name__,
@@ -1290,7 +1308,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                              num_res_blocks, num_channels, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker,
                              network_module, network_class_name, game_module, game_class_name,
-                             game_idx):
+                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1309,6 +1327,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         game_module: Module name for game (e.g., 'brandubh', 'tablut')
         game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
         game_idx: Game index (unused, for pool.map)
+        temperature: Sampling temperature for move selection
+        temperature_mode: "fixed", "king", or "decay"
+        temperature_threshold: Move number for temperature drop (for "fixed" mode)
+        temperature_decay_moves: Number of moves for linear decay (for "decay" mode)
     
     Returns:
         1.0 if new network wins, 0.5 if draw, 0.0 if new network loses
@@ -1385,7 +1407,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     
     # Play game
     if new_plays_attacker:
-        winner = play_game(new_agent, old_agent, GameClass, display=False)
+        winner = play_game(new_agent, old_agent, GameClass, display=False,
+                          temperature=temperature, temperature_mode=temperature_mode,
+                          temperature_threshold=temperature_threshold,
+                          temperature_decay_moves=temperature_decay_moves)
         if winner == 0:
             return 1.0  # New network wins
         elif winner is None:
@@ -1393,7 +1418,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         else:
             return 0.0  # New network loses
     else:
-        winner = play_game(old_agent, new_agent, GameClass, display=False)
+        winner = play_game(old_agent, new_agent, GameClass, display=False,
+                          temperature=temperature, temperature_mode=temperature_mode,
+                          temperature_threshold=temperature_threshold,
+                          temperature_decay_moves=temperature_decay_moves)
         if winner == 1:
             return 1.0  # New network wins
         elif winner is None:
@@ -1470,7 +1498,13 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             config.network_class.__module__,
             config.network_class.__name__,
             config.game_class.__module__,
-            config.game_class.__name__
+            config.game_class.__name__,
+            # game_idx is provided by map()
+            # temperature and mode parameters below
+            temperature=config.eval_temperature,
+            temperature_mode=config.eval_temperature_mode,
+            temperature_threshold=config.eval_temperature_threshold,
+            temperature_decay_moves=config.eval_temperature_decay_moves
         )
         
         worker_func_new_defender = partial(
@@ -1486,7 +1520,13 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             config.network_class.__module__,
             config.network_class.__name__,
             config.game_class.__module__,
-            config.game_class.__name__
+            config.game_class.__name__,
+            # game_idx is provided by map()
+            # temperature and mode parameters below
+            temperature=config.eval_temperature,
+            temperature_mode=config.eval_temperature_mode,
+            temperature_threshold=config.eval_temperature_threshold,
+            temperature_decay_moves=config.eval_temperature_decay_moves
         )
         
         # Play games in parallel using pool.map for true parallelization
@@ -1678,10 +1718,23 @@ def train(config: TrainingConfig, resume_from: str = None):
     print(f"  Defender: {config.eval_mcts_sims_defender}")
     print(f"Exploration constant (c_puct): {config.c_puct}")
     print(f"Temperature: {config.temperature}")
-    if config.temperature_threshold == "king":
-        print(f"Temperature threshold: drop when king leaves throne")
-    else:
-        print(f"Temperature threshold: {config.temperature_threshold} moves")
+    print(f"Temperature mode: {config.temperature_mode}")
+    if config.temperature_mode == "king":
+        print(f"  Temperature drops when king leaves throne")
+    elif config.temperature_mode == "decay":
+        print(f"  Linear decay over {config.temperature_decay_moves} moves")
+    else:  # "fixed"
+        print(f"  Temperature drops at move {config.temperature_threshold}")
+    
+    print(f"Evaluation temperature: {config.eval_temperature}")
+    print(f"Evaluation temperature mode: {config.eval_temperature_mode}")
+    if config.eval_temperature_mode == "king":
+        print(f"  Temperature drops when king leaves throne")
+    elif config.eval_temperature_mode == "decay":
+        print(f"  Linear decay over {config.eval_temperature_decay_moves} moves")
+    else:  # "fixed"
+        print(f"  Temperature drops at move {config.eval_temperature_threshold}")
+    
     print(f"Dirichlet noise: {'enabled' if config.add_dirichlet_noise else 'disabled'}")
     if config.add_dirichlet_noise:
         print(f"  Alpha (concentration): {config.dirichlet_alpha}")
