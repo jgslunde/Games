@@ -84,6 +84,11 @@ class TrainingConfig:
     temperature = 1.0                 # Sampling temperature for moves
     temperature_threshold = 15        # Move number after which temperature = 0, or "king" to drop when king leaves throne
     
+    # Dirichlet noise (exploration during self-play)
+    add_dirichlet_noise = True        # Add Dirichlet noise to root for exploration
+    dirichlet_alpha = 0.3             # Concentration parameter (lower = more concentrated)
+    dirichlet_epsilon = 0.25          # Weight of noise (0.25 = 25% noise, 75% network priors)
+    
     # Neural network
     num_res_blocks = 4                # Residual blocks in network
     num_channels = 64                 # Channels in convolutional layers
@@ -431,7 +436,8 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
 def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, 
                                 num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_threshold, game_idx,
                                 king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
-                                network_module, network_class_name, game_module, game_class_name):
+                                network_module, network_class_name, game_module, game_class_name,
+                                add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -449,16 +455,15 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         king_capture_pieces: Number of pieces to capture king
         king_can_capture: Whether king can capture
         throne_is_hostile: Whether throne is hostile for captures
+        throne_enabled: Whether throne exists and blocks movement
+        board_size: Size of game board
         network_module: Module name for network (e.g., 'network', 'network_tablut')
         network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
         game_module: Module name for game (e.g., 'brandubh', 'tablut')
         game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
-        throne_enabled: Whether throne exists and blocks movement
-        temperature_threshold: Move number threshold for temperature
-        game_idx: Game index (unused, for pool.map)
-        king_capture_pieces: Number of pieces required to capture king (2, 3, or 4)
-        king_can_capture: Whether king can help capture enemy pieces
-        throne_is_hostile: Whether throne counts as hostile square
+        add_dirichlet_noise: Whether to add Dirichlet noise for exploration
+        dirichlet_alpha: Concentration parameter for Dirichlet noise
+        dirichlet_epsilon: Weight of Dirichlet noise (0-1)
     
     Returns:
         dict with game data and MCTS timing information
@@ -515,9 +520,11 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         # Create MCTS instances for each player (with different simulation counts)
         # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
         mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu', 
-                            move_encoder_class=MoveEncoderClass)
+                            add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
+                            dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass)
         mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu',
-                            move_encoder_class=MoveEncoderClass)
+                            add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
+                            dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass)
         mcts_attacker.reset_timing_stats()
         mcts_defender.reset_timing_stats()
         
@@ -782,7 +789,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
              i, config.king_capture_pieces, config.king_can_capture,
              config.throne_is_hostile, config.throne_enabled, config.board_size,
              config.network_class.__module__, config.network_class.__name__,
-             config.game_class.__module__, config.game_class.__name__)
+             config.game_class.__module__, config.game_class.__name__,
+             config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon)
             for i in range(config.num_games_per_iteration)
         ]
         
@@ -1674,6 +1682,10 @@ def train(config: TrainingConfig, resume_from: str = None):
         print(f"Temperature threshold: drop when king leaves throne")
     else:
         print(f"Temperature threshold: {config.temperature_threshold} moves")
+    print(f"Dirichlet noise: {'enabled' if config.add_dirichlet_noise else 'disabled'}")
+    if config.add_dirichlet_noise:
+        print(f"  Alpha (concentration): {config.dirichlet_alpha}")
+        print(f"  Epsilon (weight): {config.dirichlet_epsilon}")
     
     # Training parameters
     print("\n--- Training Parameters ---")

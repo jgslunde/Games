@@ -81,6 +81,11 @@ DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 # MCTS exploration
 DEFAULT_C_PUCT = 1.4
 
+# Dirichlet noise (exploration during self-play)
+DEFAULT_ADD_DIRICHLET_NOISE = True  # Enable Dirichlet noise in self-play for exploration
+DEFAULT_DIRICHLET_ALPHA = 0.3  # Concentration parameter (lower = more concentrated)
+DEFAULT_DIRICHLET_EPSILON = 0.25  # Weight of noise (0.25 = 25% noise, 75% network priors)
+
 # Game rules
 DEFAULT_KING_CAPTURE_PIECES = 2  # 2, 3, or 4 pieces needed to capture king
 DEFAULT_KING_CAN_CAPTURE = True  # Whether king participates in captures
@@ -167,6 +172,16 @@ if __name__ == "__main__":
                        help=f"Sampling temperature for move selection (default: {DEFAULT_TEMPERATURE})")
     parser.add_argument("--temperature-threshold", type=temperature_threshold_type, default=DEFAULT_TEMPERATURE_THRESHOLD,
                        help=f"Move number after which temperature=0, or 'king' to drop when king leaves throne (default: {DEFAULT_TEMPERATURE_THRESHOLD})")
+    
+    # Dirichlet noise (exploration)
+    parser.add_argument("--add-dirichlet-noise", action="store_true", default=DEFAULT_ADD_DIRICHLET_NOISE,
+                       help=f"Add Dirichlet noise to root node during self-play for exploration (default: {DEFAULT_ADD_DIRICHLET_NOISE})")
+    parser.add_argument("--no-dirichlet-noise", action="store_false", dest="add_dirichlet_noise",
+                       help="Disable Dirichlet noise during self-play")
+    parser.add_argument("--dirichlet-alpha", type=float, default=DEFAULT_DIRICHLET_ALPHA,
+                       help=f"Dirichlet concentration parameter - lower values = more concentrated noise (default: {DEFAULT_DIRICHLET_ALPHA})")
+    parser.add_argument("--dirichlet-epsilon", type=float, default=DEFAULT_DIRICHLET_EPSILON,
+                       help=f"Weight of Dirichlet noise - fraction of noise vs network priors (default: {DEFAULT_DIRICHLET_EPSILON})")
     
     # Game rules
     parser.add_argument("--king-capture-pieces", type=int, default=DEFAULT_KING_CAPTURE_PIECES, choices=[2, 3, 4],
@@ -267,6 +282,11 @@ if __name__ == "__main__":
     config.c_puct = args.c_puct
     config.temperature = args.temperature
     config.temperature_threshold = args.temperature_threshold
+    
+    # Dirichlet noise parameters
+    config.add_dirichlet_noise = args.add_dirichlet_noise
+    config.dirichlet_alpha = args.dirichlet_alpha
+    config.dirichlet_epsilon = args.dirichlet_epsilon
     
     # Game rules
     config.king_capture_pieces = args.king_capture_pieces
