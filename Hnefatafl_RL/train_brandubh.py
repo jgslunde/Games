@@ -52,15 +52,15 @@ DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
 
 # Temperature parameters
 DEFAULT_TEMPERATURE = 1.0
-DEFAULT_TEMPERATURE_MODE = "king"  # "fixed", "king", or "decay"
+DEFAULT_TEMPERATURE_MODE = "decay"  # "fixed", "king", or "decay"
 DEFAULT_TEMPERATURE_THRESHOLD = 15  # For "fixed" mode
-DEFAULT_TEMPERATURE_DECAY_MOVES = 30  # For "decay" mode
+DEFAULT_TEMPERATURE_DECAY_MOVES = 20  # For "decay" mode
 
 # Evaluation temperature parameters
-DEFAULT_EVAL_TEMPERATURE = 0.0  # Deterministic play during evaluation
+DEFAULT_EVAL_TEMPERATURE = 1.0  # Deterministic play during evaluation
 DEFAULT_EVAL_TEMPERATURE_MODE = "fixed"  # "fixed", "king", or "decay"
-DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 0  # For "fixed" mode
-DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 0  # For "decay" mode
+DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
+DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 20  # For "decay" mode
 
 # Network architecture
 DEFAULT_RES_BLOCKS = 4
@@ -68,7 +68,7 @@ DEFAULT_CHANNELS = 64
 
 # Replay buffer
 DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
-DEFAULT_MIN_BUFFER_SIZE = 10*DEFAULT_BATCH_SIZE
+DEFAULT_MIN_BUFFER_SIZE = 600_000 # 10*DEFAULT_BATCH_SIZE
 DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
 
 # Learning rate decay and regularization
@@ -102,7 +102,7 @@ DEFAULT_THRONE_ENABLED = False  # Whether throne exists and blocks movement
 
 # Evaluation
 DEFAULT_EVAL_GAMES = 128
-DEFAULT_EVAL_WIN_RATE = 0.55
+DEFAULT_EVAL_WIN_RATE = 0.70
 DEFAULT_EVAL_FREQUENCY = 4
 DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1  # Evaluate every iteration until 100% win rate achieved
 

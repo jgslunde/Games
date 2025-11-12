@@ -1891,22 +1891,123 @@ def train(config: TrainingConfig, resume_from: str = None):
     # Track if 100% win rate vs random has been achieved
     achieved_100_percent_vs_random = False
     
-    # Training metrics
-    training_history = {
-        'iterations': [],
-        'policy_loss': [],
-        'value_loss': [],
-        'total_loss': [],
-        'win_rates': [],
-        'buffer_size': [],
-        'vs_random_win_rate': [],
-        'vs_random_elo': [],
-        'vs_random_attacker_wins': [],
-        'vs_random_defender_wins': [],
-        'vs_random_total_draws': [],
-        'cumulative_elo': [],  # ELO relative to iteration 0
-        'elo_gain': []  # ELO gained in network vs network evaluation
-    }
+    # Load or initialize training history
+    history_path = os.path.join(config.checkpoint_dir, "training_history.json")
+    if resume_from is not None and os.path.exists(history_path):
+        print(f"Loading training history from {history_path}")
+        with open(history_path, 'r') as f:
+            training_history = json.load(f)
+        
+        # Resume cumulative ELO if available
+        if training_history.get('cumulative_elo'):
+            cumulative_elo = training_history['cumulative_elo'][-1]
+            print(f"Resuming with cumulative ELO: {cumulative_elo:+.1f}")
+        
+        # Check if 100% win rate was already achieved
+        if training_history.get('vs_random_win_rate'):
+            last_win_rate = training_history['vs_random_win_rate'][-1]
+            if last_win_rate >= 1.0:
+                achieved_100_percent_vs_random = True
+                print("Note: 100% win rate vs random already achieved")
+    else:
+        # Initialize new training history with metadata
+        training_history = {
+            'metadata': {
+                'start_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'game_type': config.game_class.__name__,
+                'board_size': config.board_size,
+                'network_architecture': {
+                    'type': config.network_class.__name__,
+                    'num_res_blocks': config.num_res_blocks,
+                    'num_channels': config.num_channels,
+                    'policy_size': config.board_size * config.board_size * 4 * (config.board_size - 1),
+                },
+                'game_rules': {
+                    'king_capture_pieces': config.king_capture_pieces,
+                    'king_can_capture': config.king_can_capture,
+                    'throne_is_hostile': config.throne_is_hostile,
+                    'throne_enabled': config.throne_enabled,
+                },
+                'mcts_params': {
+                    'selfplay_simulations_attacker': config.num_mcts_simulations,
+                    'selfplay_simulations_defender': config.num_mcts_simulations_defender,
+                    'eval_simulations_attacker': config.num_eval_simulations,
+                    'eval_simulations_defender': config.num_eval_simulations_defender,
+                    'c_puct': config.c_puct,
+                    'temperature': config.temperature,
+                    'temperature_mode': config.temperature_mode,
+                    'temperature_threshold': config.temperature_threshold,
+                    'temperature_decay_moves': config.temperature_decay_moves,
+                    'add_dirichlet_noise': config.add_dirichlet_noise,
+                    'dirichlet_alpha': config.dirichlet_alpha,
+                    'dirichlet_epsilon': config.dirichlet_epsilon,
+                },
+                'training_params': {
+                    'num_iterations': config.num_iterations,
+                    'games_per_iteration': config.num_games_per_iteration,
+                    'batch_size': config.batch_size,
+                    'epochs_per_iteration': config.epochs_per_iteration,
+                    'batches_per_epoch': config.batches_per_epoch,
+                    'learning_rate_initial': config.learning_rate,
+                    'lr_decay': config.lr_decay,
+                    'weight_decay': config.weight_decay,
+                    'value_loss_weight': config.value_loss_weight,
+                    'use_data_augmentation': config.use_data_augmentation,
+                    'replay_buffer_size': config.replay_buffer_size,
+                    'min_buffer_size_for_training': config.min_buffer_size_for_training,
+                },
+                'boosting_params': {
+                    'use_dynamic_boosting': config.use_dynamic_boosting,
+                    'attacker_win_loss_boost': config.attacker_win_loss_boost,
+                    'defender_win_loss_boost': config.defender_win_loss_boost,
+                    'attacker_draw_penalty': config.attacker_draw_penalty,
+                    'defender_draw_penalty': config.defender_draw_penalty,
+                },
+                'evaluation_params': {
+                    'eval_frequency': config.eval_frequency,
+                    'num_eval_games': config.num_eval_games,
+                    'eval_win_rate_threshold': config.eval_win_rate_threshold,
+                    'eval_vs_random_frequency': config.eval_vs_random_frequency,
+                    'num_eval_vs_random_games': config.num_eval_vs_random_games,
+                    'stop_eval_vs_random_at_100': config.stop_eval_vs_random_at_100,
+                },
+            },
+            'iterations': [],
+            'policy_loss': [],
+            'value_loss': [],
+            'total_loss': [],
+            'learning_rate': [],
+            'selfplay_results': {
+                'attacker_wins': [],
+                'defender_wins': [],
+                'draws': [],
+                'avg_game_length': [],
+            },
+            'win_rates': [],
+            'buffer_size': [],
+            'vs_random_win_rate': [],
+            'vs_random_elo': [],
+            'vs_random_attacker_wins': [],
+            'vs_random_defender_wins': [],
+            'vs_random_total_draws': [],
+            'cumulative_elo': [],  # ELO relative to iteration 0
+            'elo_gain': [],  # ELO gained in network vs network evaluation
+            'timing': {
+                'selfplay_time': [],
+                'training_time': [],
+                'random_eval_time': [],
+                'network_eval_time': [],
+                'total_time': [],
+            },
+        }
+        
+        # Ensure all list fields exist for backwards compatibility
+        for key in ['iterations', 'policy_loss', 'value_loss', 'total_loss', 'win_rates', 
+                    'buffer_size', 'vs_random_win_rate', 'vs_random_elo', 
+                    'vs_random_attacker_wins', 'vs_random_defender_wins', 
+                    'vs_random_total_draws', 'cumulative_elo', 'elo_gain']:
+            if key not in training_history:
+                training_history[key] = []
     
     # Create persistent worker pool to avoid file descriptor leaks
     # Use maxtasksperchild to periodically recycle workers and free resources
@@ -1934,6 +2035,10 @@ def train(config: TrainingConfig, resume_from: str = None):
             
             new_buffer, attacker_game_wins, defender_game_wins = generate_self_play_data(agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
+            
+            # Calculate draws from self-play
+            total_games = config.num_games_per_iteration
+            draws = total_games - attacker_game_wins - defender_game_wins
             
             # Update win rate tracker with actual game results
             if config.use_dynamic_boosting:
@@ -1971,12 +2076,42 @@ def train(config: TrainingConfig, resume_from: str = None):
                       f"Value: {losses['value_loss']:.4f}, "
                       f"Total: {losses['total_loss']:.4f}")
                 
-                # Record metrics
+                # Get current learning rate
+                current_lr = optimizer.param_groups[0]['lr']
+                
+                # Record metrics - only add iteration once during training step
                 training_history['iterations'].append(iteration + 1)
                 training_history['policy_loss'].append(losses['policy_loss'])
                 training_history['value_loss'].append(losses['value_loss'])
                 training_history['total_loss'].append(losses['total_loss'])
                 training_history['buffer_size'].append(len(replay_buffer))
+                training_history['learning_rate'].append(current_lr)
+                
+                # Record self-play results
+                if 'selfplay_results' not in training_history:
+                    training_history['selfplay_results'] = {
+                        'attacker_wins': [],
+                        'defender_wins': [],
+                        'draws': [],
+                        'avg_game_length': [],
+                    }
+                training_history['selfplay_results']['attacker_wins'].append(attacker_game_wins)
+                training_history['selfplay_results']['defender_wins'].append(defender_game_wins)
+                training_history['selfplay_results']['draws'].append(draws)
+                # We don't have avg_game_length here, so we'll skip it or set to 0
+                training_history['selfplay_results']['avg_game_length'].append(0)  # TODO: track this
+                
+                # Record timing for this iteration
+                if 'timing' not in training_history:
+                    training_history['timing'] = {
+                        'selfplay_time': [],
+                        'training_time': [],
+                        'random_eval_time': [],
+                        'network_eval_time': [],
+                        'total_time': [],
+                    }
+                training_history['timing']['selfplay_time'].append(selfplay_time)
+                training_history['timing']['training_time'].append(training_time)
             else:
                 print(f"\n[2/4] Skipping training: buffer size {len(replay_buffer)} < "
                       f"minimum {config.min_buffer_size}")
@@ -2058,13 +2193,22 @@ def train(config: TrainingConfig, resume_from: str = None):
                 save_checkpoint(network, optimizer, iteration + 1, config, 
                               training_history, f"checkpoint_iter_{iteration + 1}.pth")
             
+            # Calculate total iteration time
+            iter_time = time.time() - iter_start_time
+            
+            # Record timing data (append to timing arrays, padding with 0 if evaluation was skipped)
+            if 'timing' in training_history:
+                # Update timing only if we trained (iteration was added to history)
+                if len(training_history['iterations']) > 0 and training_history['iterations'][-1] == iteration + 1:
+                    training_history['timing']['random_eval_time'].append(eval_random_time)
+                    training_history['timing']['network_eval_time'].append(eval_network_time)
+                    training_history['timing']['total_time'].append(iter_time)
+            
             # 7. Save training history
             history_path = os.path.join(config.checkpoint_dir, "training_history.json")
             os.makedirs(config.checkpoint_dir, exist_ok=True)
             with open(history_path, 'w') as f:
                 json.dump(training_history, f, indent=2)
-            
-            iter_time = time.time() - iter_start_time
             
             # Print timing summary
             print("\n" + "-" * 70)

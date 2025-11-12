@@ -151,11 +151,23 @@ def parse_output_file(filepath):
                     break
             continue
         
-        # Self-evaluation win rate
+        # Self-evaluation win rate (old format)
         match = re.search(r'New network win rate: ([\d.]+)% \((\d+)/(\d+)\)', line)
         if match:
             iterations_data[current_iteration]['selfeval_win_rate'] = float(match.group(1))
             iterations_data[current_iteration]['selfeval_total_wins'] = float(match.group(1))
+            continue
+        
+        # Self-evaluation results (new format: "82W-46L-0D (64.1% score)")
+        match = re.search(r'New network results: (\d+)W-(\d+)L-(\d+)D \(([\d.]+)% score\)', line)
+        if match:
+            wins = int(match.group(1))
+            losses = int(match.group(2))
+            draws = int(match.group(3))
+            total_games = wins + losses + draws
+            win_rate = float(match.group(4))
+            iterations_data[current_iteration]['selfeval_win_rate'] = win_rate
+            iterations_data[current_iteration]['selfeval_total_wins'] = win_rate
             continue
         
         # Cumulative ELO vs iteration 0
@@ -216,13 +228,14 @@ def parse_output_file(filepath):
                 data['random_defender_wins'].append(iter_data.get('random_defender_wins', 0))
             
             # Self-evaluation data (tracked separately)
-            if 'cumulative_elo_vs_first' in iter_data:
+            # Only include iterations that have both ELO and win rate data
+            if 'cumulative_elo_vs_first' in iter_data and 'selfeval_attacker_wins' in iter_data:
                 data['selfeval_iterations'].append(iteration)
                 data['cumulative_elo_vs_first'].append(iter_data['cumulative_elo_vs_first'])
                 if 'selfeval_total_wins' in iter_data:
                     data['selfeval_total_wins'].append(iter_data['selfeval_total_wins'])
-                    data['selfeval_attacker_wins'].append(iter_data.get('selfeval_attacker_wins', 0))
-                    data['selfeval_defender_wins'].append(iter_data.get('selfeval_defender_wins', 0))
+                data['selfeval_attacker_wins'].append(iter_data.get('selfeval_attacker_wins', 0))
+                data['selfeval_defender_wins'].append(iter_data.get('selfeval_defender_wins', 0))
     
     return data
 

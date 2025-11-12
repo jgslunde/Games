@@ -178,22 +178,12 @@ if __name__ == "__main__":
                        help=f"MCTS exploration constant (default: {DEFAULT_C_PUCT})")
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
                        help=f"Sampling temperature for move selection in self-play (default: {DEFAULT_TEMPERATURE})")
-    parser.add_argument("--temperature-mode", type=str, default=DEFAULT_TEMPERATURE_MODE,
-                       choices=["fixed", "king", "decay"],
-                       help=f"Temperature mode: 'fixed' (drop at threshold), 'king' (drop when king leaves), 'decay' (linear) (default: {DEFAULT_TEMPERATURE_MODE})")
-    parser.add_argument("--temperature-threshold", type=int, default=DEFAULT_TEMPERATURE_THRESHOLD,
-                       help=f"Move number for temperature drop in 'fixed' mode (default: {DEFAULT_TEMPERATURE_THRESHOLD})")
-    parser.add_argument("--temperature-decay-moves", type=int, default=DEFAULT_TEMPERATURE_DECAY_MOVES,
-                       help=f"Number of moves for linear decay in 'decay' mode (default: {DEFAULT_TEMPERATURE_DECAY_MOVES})")
+    parser.add_argument("--temperature-threshold", type=temperature_threshold_type, default=DEFAULT_TEMPERATURE_THRESHOLD,
+                       help=f"Move number after which temperature=0, or 'king' to drop when king leaves throne (default: {DEFAULT_TEMPERATURE_THRESHOLD})")
     parser.add_argument("--eval-temperature", type=float, default=DEFAULT_EVAL_TEMPERATURE,
                        help=f"Sampling temperature for evaluation games (default: {DEFAULT_EVAL_TEMPERATURE})")
-    parser.add_argument("--eval-temperature-mode", type=str, default=DEFAULT_EVAL_TEMPERATURE_MODE,
-                       choices=["fixed", "king", "decay"],
-                       help=f"Temperature mode for evaluation (default: {DEFAULT_EVAL_TEMPERATURE_MODE})")
-    parser.add_argument("--eval-temperature-threshold", type=int, default=DEFAULT_EVAL_TEMPERATURE_THRESHOLD,
-                       help=f"Move threshold for eval temperature in 'fixed' mode (default: {DEFAULT_EVAL_TEMPERATURE_THRESHOLD})")
-    parser.add_argument("--eval-temperature-decay-moves", type=int, default=DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES,
-                       help=f"Decay moves for eval in 'decay' mode (default: {DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES})")
+    parser.add_argument("--eval-temperature-threshold", type=temperature_threshold_type, default=DEFAULT_EVAL_TEMPERATURE_THRESHOLD,
+                       help=f"Move threshold for evaluation temperature, or 'king' (default: {DEFAULT_EVAL_TEMPERATURE_THRESHOLD})")
     
     # Dirichlet noise (exploration)
     parser.add_argument("--add-dirichlet-noise", action="store_true", default=DEFAULT_ADD_DIRICHLET_NOISE,
@@ -303,13 +293,9 @@ if __name__ == "__main__":
     # MCTS parameters
     config.c_puct = args.c_puct
     config.temperature = args.temperature
-    config.temperature_mode = args.temperature_mode
     config.temperature_threshold = args.temperature_threshold
-    config.temperature_decay_moves = args.temperature_decay_moves
     config.eval_temperature = args.eval_temperature
-    config.eval_temperature_mode = args.eval_temperature_mode
     config.eval_temperature_threshold = args.eval_temperature_threshold
-    config.eval_temperature_decay_moves = args.eval_temperature_decay_moves
     
     # Dirichlet noise parameters
     config.add_dirichlet_noise = args.add_dirichlet_noise
