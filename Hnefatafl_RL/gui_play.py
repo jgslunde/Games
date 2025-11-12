@@ -1007,58 +1007,6 @@ class TaflGUI:
             self.screen.blit(value_text, text_rect)
             y_offset += 80
         
-        # Temperature display (if AI is loaded and temperature > 0)
-        if self.network and self.temperature > 0.0:
-            pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
-                            (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
-            y_offset += 30
-            
-            # Current temperature
-            current_temp = self._get_current_temperature()
-            temp_label = self.font_medium.render("Temperature:", True, TEXT_PRIMARY)
-            self.screen.blit(temp_label, (panel_x + 20, y_offset))
-            y_offset += 35
-            
-            # Temperature value with colored background
-            temp_value_text = self.font_large.render(f"{current_temp:.3f}", True, TEXT_PRIMARY)
-            temp_rect_bg = pygame.Rect(panel_x + 20, y_offset, INFO_PANEL_WIDTH - 40, 50)
-            # Color based on temperature value
-            if current_temp > 0.5:
-                temp_bg_color = (231, 76, 60)  # Red for high exploration
-            elif current_temp > 0.0:
-                temp_bg_color = (230, 126, 34)  # Orange for medium exploration
-            else:
-                temp_bg_color = (46, 204, 113)  # Green for deterministic
-            pygame.draw.rect(self.screen, temp_bg_color, temp_rect_bg, border_radius=8)
-            temp_value_rect = temp_value_text.get_rect(center=temp_rect_bg.center)
-            self.screen.blit(temp_value_text, temp_value_rect)
-            y_offset += 60
-            
-            # Mode and parameters info
-            mode_info = f"Mode: {self.temperature_mode}"
-            mode_info_text = self.font_small.render(mode_info, True, TEXT_SECONDARY)
-            self.screen.blit(mode_info_text, (panel_x + 20, y_offset))
-            y_offset += 25
-            
-            if self.temperature_mode == "fixed":
-                param_info = f"Threshold: {self.temperature_threshold} moves"
-            elif self.temperature_mode == "decay":
-                param_info = f"Decay: {self.temperature_decay_moves} moves"
-            else:  # "king"
-                if self.king_left_throne:
-                    param_info = "King left throne"
-                else:
-                    param_info = "King on throne"
-            
-            param_info_text = self.font_small.render(param_info, True, TEXT_SECONDARY)
-            self.screen.blit(param_info_text, (panel_x + 20, y_offset))
-            y_offset += 25
-            
-            # Move count
-            move_count_text = self.font_small.render(f"Moves: {self.move_count}", True, TEXT_SECONDARY)
-            self.screen.blit(move_count_text, (panel_x + 20, y_offset))
-            y_offset += 35
-        
         # Instructions
         pygame.draw.line(self.screen, PANEL_ACCENT, (panel_x + 20, y_offset), 
                         (panel_x + INFO_PANEL_WIDTH - 20, y_offset), 2)
@@ -1186,6 +1134,13 @@ class TaflGUI:
             winner = self.font_medium.render(winner_text, True, winner_color)
             text_rect = winner.get_rect(center=(panel_x + INFO_PANEL_WIDTH//2, banner_y + 55))
             self.screen.blit(winner, text_rect)
+        
+        # Compact temperature debug display at bottom (if AI loaded and temperature > 0)
+        if self.network and self.temperature > 0.0:
+            current_temp = self._get_current_temperature()
+            temp_debug_text = self.font_tiny.render(f"T={current_temp:.2f} M={self.move_count}", True, TEXT_SECONDARY)
+            temp_debug_rect = temp_debug_text.get_rect(bottomright=(panel_x + INFO_PANEL_WIDTH - 10, WINDOW_HEIGHT - 10))
+            self.screen.blit(temp_debug_text, temp_debug_rect)
     
     def _handle_click(self, pos: Tuple[int, int], button: int):
         """Handle mouse click."""
