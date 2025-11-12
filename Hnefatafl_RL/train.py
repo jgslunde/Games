@@ -1663,6 +1663,13 @@ def train(config: TrainingConfig, resume_from: str = None):
         config: TrainingConfig object
         resume_from: path to checkpoint to resume from
     """
+    # Enable denormal (subnormal) flushing to zero for faster inference
+    # This prevents tiny weights from causing 10-100x inference slowdown
+    # Denormal numbers are extremely slow on CPUs, and flushing them to zero
+    # has negligible impact on training quality but massive performance benefit
+    torch.set_flush_denormal(True)
+    print("Enabled denormal flushing (torch.set_flush_denormal(True)) for fast inference")
+    
     # Validate that required game configuration is set
     if config.game_class is None:
         raise ValueError("config.game_class must be set (e.g., to Brandubh)")

@@ -1328,6 +1328,10 @@ class TaflGUI:
 
 
 def main():
+    # Enable denormal flushing for fast inference
+    # This prevents trained weights with tiny values from causing 10-100x slowdown
+    torch.set_flush_denormal(True)
+    
     parser = argparse.ArgumentParser(description="Tafl Game GUI with Optional AI Evaluation")
     parser.add_argument("--checkpoint", type=str, default=None,
                        help="Path to model checkpoint (.pth file). If not provided, plays without AI evaluation.")

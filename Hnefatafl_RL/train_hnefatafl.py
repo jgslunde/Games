@@ -104,7 +104,7 @@ DEFAULT_THRONE_ENABLED = True  # Whether throne exists and blocks movement
 DEFAULT_EVAL_GAMES = 128
 DEFAULT_EVAL_WIN_RATE = 0.65
 DEFAULT_EVAL_FREQUENCY = 4
-DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1  # Evaluate every iteration until 100% win rate achieved
+DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 2  # Evaluate every iteration until 100% win rate achieved
 
 # Checkpointing
 DEFAULT_SAVE_FREQUENCY = 1
