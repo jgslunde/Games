@@ -7,6 +7,7 @@ For other board sizes or game variants, create a similar training script.
 
 import argparse
 import multiprocessing as mp
+from math import sqrt
 
 # Import the generic training module
 from train import TrainingConfig, train
@@ -42,7 +43,7 @@ DEFAULT_SIMS_DEFENDER_SELFPLAY = 350
 DEFAULT_SIMS_ATTACKER_EVAL = 250
 DEFAULT_SIMS_DEFENDER_EVAL = 350
 DEFAULT_BATCH_SIZE = 256
-DEFAULT_LEARNING_RATE = 1e-3*(DEFAULT_BATCH_SIZE/256)
+DEFAULT_LEARNING_RATE = 1e-3*sqrt(DEFAULT_BATCH_SIZE/256)
 DEFAULT_EPOCHS = 10
 DEFAULT_BATCHES_PER_EPOCH = 100
 DEFAULT_EVAL_VS_RANDOM = 64
@@ -72,7 +73,8 @@ DEFAULT_MIN_BUFFER_SIZE = 600_000 # 10*DEFAULT_BATCH_SIZE
 DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
 
 # Learning rate decay and regularization
-DEFAULT_LR_DECAY = 0.995
+DEFAULT_LR_DECAY = 0.98
+DEFAULT_LR_FLOOR = 3e-5
 DEFAULT_WEIGHT_DECAY = 1e-4
 DEFAULT_VALUE_LOSS_WEIGHT = 0.25
 
@@ -139,6 +141,8 @@ if __name__ == "__main__":
                        help=f"Learning rate (default: {DEFAULT_LEARNING_RATE})")
     parser.add_argument("--lr-decay", type=float, default=DEFAULT_LR_DECAY,
                        help=f"Learning rate decay per iteration (default: {DEFAULT_LR_DECAY})")
+    parser.add_argument("--lr-floor", type=float, default=DEFAULT_LR_FLOOR,
+                       help=f"Minimum learning rate floor (default: {DEFAULT_LR_FLOOR})")
     parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY,
                        help=f"L2 regularization weight decay (default: {DEFAULT_WEIGHT_DECAY})")
     parser.add_argument("--value-loss-weight", type=float, default=DEFAULT_VALUE_LOSS_WEIGHT,
@@ -283,6 +287,7 @@ if __name__ == "__main__":
     config.batch_size = args.batch_size
     config.learning_rate = args.lr
     config.lr_decay = args.lr_decay
+    config.lr_floor = args.lr_floor
     config.weight_decay = args.weight_decay
     config.value_loss_weight = args.value_loss_weight
     

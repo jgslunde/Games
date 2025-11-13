@@ -107,6 +107,7 @@ class TrainingConfig:
     batches_per_epoch = 100           # Number of batches to sample per epoch (limits training data)
     learning_rate = 0.001             # Initial learning rate
     lr_decay = 0.95                   # Learning rate decay per iteration
+    lr_floor = 1e-6                   # Minimum learning rate (floor below which LR won't decay)
     weight_decay = 1e-4               # L2 regularization
     value_loss_weight = 10.0           # Weight for value loss (policy loss weight is always 1.0)
     
@@ -1997,19 +1998,19 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     print(f"Network initialized: {total_params:,} total parameters ({trainable_params:,} trainable)")
     
     # Initialize optimizer with fused=True for faster CPU training
-    # Note: fused Adam is faster but only available on CPU/CUDA, not all devices
+    # Note: fused AdamW is faster but only available on CPU/CUDA, not all devices
     try:
-        optimizer = optim.Adam(network.parameters(), 
-                              lr=config.learning_rate,
-                              weight_decay=config.weight_decay,
-                              fused=True)
-        print("Using fused Adam optimizer for better training performance")
+        optimizer = optim.AdamW(network.parameters(), 
+                               lr=config.learning_rate,
+                               weight_decay=config.weight_decay,
+                               fused=True)
+        print("Using fused AdamW optimizer for better training performance")
     except Exception:
-        # Fall back to standard Adam if fused not available
-        optimizer = optim.Adam(network.parameters(), 
-                              lr=config.learning_rate,
-                              weight_decay=config.weight_decay)
-        print("Using standard Adam optimizer (fused not available)")
+        # Fall back to standard AdamW if fused not available
+        optimizer = optim.AdamW(network.parameters(), 
+                               lr=config.learning_rate,
+                               weight_decay=config.weight_decay)
+        print("Using standard AdamW optimizer (fused not available)")
     
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.lr_decay)
@@ -2315,6 +2316,13 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 # Learning rate decay (only after training)
                 scheduler.step()
                 current_lr = optimizer.param_groups[0]['lr']
+                
+                # Apply learning rate floor
+                if current_lr < config.lr_floor:
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = config.lr_floor
+                    current_lr = config.lr_floor
+                
                 print(f"\nLearning rate: {current_lr:.6f}")
             else:
                 print(f"\n[2/4] Skipping training: buffer size {len(replay_buffer)} < "

@@ -73,6 +73,7 @@ DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
 
 # Learning rate decay and regularization
 DEFAULT_LR_DECAY = 0.99
+DEFAULT_LR_FLOOR = 1e-6
 DEFAULT_WEIGHT_DECAY = 1e-4
 DEFAULT_VALUE_LOSS_WEIGHT = 20.0
 
@@ -139,6 +140,8 @@ if __name__ == "__main__":
                        help=f"Learning rate (default: {DEFAULT_LEARNING_RATE})")
     parser.add_argument("--lr-decay", type=float, default=DEFAULT_LR_DECAY,
                        help=f"Learning rate decay per iteration (default: {DEFAULT_LR_DECAY})")
+    parser.add_argument("--lr-floor", type=float, default=DEFAULT_LR_FLOOR,
+                       help=f"Minimum learning rate floor (default: {DEFAULT_LR_FLOOR})")
     parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY,
                        help=f"L2 regularization weight decay (default: {DEFAULT_WEIGHT_DECAY})")
     parser.add_argument("--value-loss-weight", type=float, default=DEFAULT_VALUE_LOSS_WEIGHT,
@@ -273,6 +276,7 @@ if __name__ == "__main__":
     config.batch_size = args.batch_size
     config.learning_rate = args.lr
     config.lr_decay = args.lr_decay
+    config.lr_floor = args.lr_floor
     config.weight_decay = args.weight_decay
     config.value_loss_weight = args.value_loss_weight
     
