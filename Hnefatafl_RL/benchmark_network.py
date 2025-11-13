@@ -19,7 +19,11 @@ import numpy as np
 from network import BrandubhNet
 from network_tablut import TablutNet
 from network_hnefatafl import HnefataflNet
+torch.set_flush_denormal(True)
 
+# Suppress NumPy warnings about subnormals being zero (expected behavior)
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='numpy._core.getlimits')
 
 def count_parameters(network):
     """Count the total number of trainable parameters in a network."""
@@ -133,6 +137,9 @@ def main():
     if not args.no_flush_denormal:
         torch.set_flush_denormal(True)
         print("Denormal flushing: ENABLED (fast mode)")
+        # Suppress NumPy warnings about subnormals being zero (expected behavior)
+        import warnings
+        warnings.filterwarnings('ignore', category=UserWarning, module='numpy._core.getlimits')
     else:
         torch.set_flush_denormal(False)
         print("Denormal flushing: DISABLED (slow mode - for comparison)")

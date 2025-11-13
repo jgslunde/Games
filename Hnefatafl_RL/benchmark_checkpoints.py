@@ -22,7 +22,11 @@ import glob
 from network import BrandubhNet
 from network_tablut import TablutNet
 from network_hnefatafl import HnefataflNet
+torch.set_flush_denormal(True)
 
+# Suppress NumPy warnings about subnormals being zero (expected behavior)
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='numpy._core.getlimits')
 
 def count_parameters(network):
     """Count the total number of trainable parameters in a network."""
@@ -44,8 +48,9 @@ def benchmark_checkpoint(checkpoint_path, network_class, board_size, num_iterati
         dict with timing statistics
     """
     try:
-        # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # Load checkpoint with weights_only=False to allow numpy objects
+        # (PyTorch 2.6+ defaults to weights_only=True for security)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
         # Handle different checkpoint formats
         if 'network_state_dict' in checkpoint:
@@ -145,6 +150,9 @@ def main():
     if not args.no_flush_denormal:
         torch.set_flush_denormal(True)
         print("Denormal flushing: ENABLED (eliminates slowdown)")
+        # Suppress NumPy warnings about subnormals being zero (expected behavior)
+        import warnings
+        warnings.filterwarnings('ignore', category=UserWarning, module='numpy._core.getlimits')
     else:
         torch.set_flush_denormal(False)
         print("Denormal flushing: DISABLED (will reproduce 2-3x slowdown with trained weights)")

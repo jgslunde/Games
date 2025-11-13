@@ -958,7 +958,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         defender_boost: Loss boost factor for defender-won games
     
     Returns:
-        dict with 'policy_loss', 'value_loss', 'total_loss'
+        dict with 'policy_loss', 'value_loss', 'total_loss', 'policy_grad', 'value_grad'
     """
     # Compile network for faster training (~18% speedup)
     # This creates a compiled wrapper that's only used during training
@@ -969,6 +969,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     total_policy_loss = 0.0
     total_value_loss = 0.0
     total_loss = 0.0
+    total_policy_grad = 0.0
+    total_value_grad = 0.0
     num_batches = 0
     
     samples_per_epoch = min(len(buffer), config.batch_size * config.batches_per_epoch)
@@ -978,6 +980,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         epoch_policy_loss = 0.0
         epoch_value_loss = 0.0
         epoch_total_loss = 0.0
+        epoch_policy_grad = 0.0
+        epoch_value_grad = 0.0
         
         for batch_idx in range(batches_per_epoch):
             # Sample batch
@@ -1020,9 +1024,33 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             # Backward pass (set_to_none=True is faster than default zero_grad)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            
+            # Compute gradient norms after backward pass
+            # We compute separate gradients for policy and value heads
+            policy_grad_norm = 0.0
+            value_grad_norm = 0.0
+            
+            for name, param in network.named_parameters():
+                if param.grad is not None:
+                    grad_norm = param.grad.norm().item()
+                    # Separate policy head from value head gradients
+                    # Policy head typically has 'policy' in the name, value head has 'value'
+                    if 'policy' in name.lower():
+                        policy_grad_norm += grad_norm ** 2
+                    elif 'value' in name.lower():
+                        value_grad_norm += grad_norm ** 2
+                    else:
+                        # Shared layers contribute to both
+                        policy_grad_norm += (grad_norm ** 2) / 2
+                        value_grad_norm += (grad_norm ** 2) / 2
+            
+            # Take square root to get L2 norm
+            policy_grad_norm = policy_grad_norm ** 0.5
+            value_grad_norm = value_grad_norm ** 0.5
+            
             optimizer.step()
             
-            # Accumulate losses
+            # Accumulate losses and gradients
             batch_policy_loss = policy_loss.item()
             batch_value_loss = value_loss.item()
             batch_total_loss = loss.item()
@@ -1030,25 +1058,34 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             total_policy_loss += batch_policy_loss
             total_value_loss += batch_value_loss
             total_loss += batch_total_loss
+            total_policy_grad += policy_grad_norm
+            total_value_grad += value_grad_norm
             
             epoch_policy_loss += batch_policy_loss
             epoch_value_loss += batch_value_loss
             epoch_total_loss += batch_total_loss
+            epoch_policy_grad += policy_grad_norm
+            epoch_value_grad += value_grad_norm
             
             num_batches += 1
         
-        # Print per-epoch losses
+        # Print per-epoch losses and gradients
         avg_epoch_policy = epoch_policy_loss / batches_per_epoch
         avg_epoch_value = epoch_value_loss / batches_per_epoch
         avg_epoch_total = epoch_total_loss / batches_per_epoch
+        avg_epoch_policy_grad = epoch_policy_grad / batches_per_epoch
+        avg_epoch_value_grad = epoch_value_grad / batches_per_epoch
         print(f"  Epoch {epoch+1}/{config.num_epochs}: "
               f"policy={avg_epoch_policy:.4f}, value={avg_epoch_value:.4f}, "
-              f"total={avg_epoch_total:.4f}")
+              f"total={avg_epoch_total:.4f}, "
+              f"policy_grad={avg_epoch_policy_grad:.4f}, value_grad={avg_epoch_value_grad:.4f}")
     
     return {
         'policy_loss': total_policy_loss / num_batches,
         'value_loss': total_value_loss / num_batches,
-        'total_loss': total_loss / num_batches
+        'total_loss': total_loss / num_batches,
+        'policy_grad': total_policy_grad / num_batches,
+        'value_grad': total_value_grad / num_batches
     }
 
 
@@ -1670,6 +1707,10 @@ def train(config: TrainingConfig, resume_from: str = None):
     torch.set_flush_denormal(True)
     print("Enabled denormal flushing (torch.set_flush_denormal(True)) for fast inference")
     
+    # Suppress NumPy warnings about subnormals being zero (expected behavior)
+    import warnings
+    warnings.filterwarnings('ignore', category=UserWarning, module='numpy._core.getlimits')
+    
     # Validate that required game configuration is set
     if config.game_class is None:
         raise ValueError("config.game_class must be set (e.g., to Brandubh)")
@@ -1983,6 +2024,8 @@ def train(config: TrainingConfig, resume_from: str = None):
             'policy_loss': [],
             'value_loss': [],
             'total_loss': [],
+            'policy_grad': [],
+            'value_grad': [],
             'learning_rate': [],
             'selfplay_results': {
                 'attacker_wins': [],
@@ -2007,14 +2050,15 @@ def train(config: TrainingConfig, resume_from: str = None):
                 'total_time': [],
             },
         }
-        
-        # Ensure all list fields exist for backwards compatibility
-        for key in ['iterations', 'policy_loss', 'value_loss', 'total_loss', 'win_rates', 
-                    'buffer_size', 'vs_random_win_rate', 'vs_random_elo', 
-                    'vs_random_attacker_wins', 'vs_random_defender_wins', 
-                    'vs_random_total_draws', 'cumulative_elo', 'elo_gain']:
-            if key not in training_history:
-                training_history[key] = []
+    
+    # Ensure all list fields exist for backwards compatibility
+    # This applies whether we're resuming or starting fresh
+    for key in ['iterations', 'policy_loss', 'value_loss', 'total_loss', 'policy_grad', 'value_grad', 
+                'win_rates', 'buffer_size', 'vs_random_win_rate', 'vs_random_elo', 
+                'vs_random_attacker_wins', 'vs_random_defender_wins', 
+                'vs_random_total_draws', 'cumulative_elo', 'elo_gain']:
+        if key not in training_history:
+            training_history[key] = []
     
     # Create persistent worker pool to avoid file descriptor leaks
     # Use maxtasksperchild to periodically recycle workers and free resources
@@ -2082,6 +2126,8 @@ def train(config: TrainingConfig, resume_from: str = None):
                 print(f"Final losses - Policy: {losses['policy_loss']:.4f}, "
                       f"Value: {losses['value_loss']:.4f}, "
                       f"Total: {losses['total_loss']:.4f}")
+                print(f"Final gradients - Policy: {losses['policy_grad']:.4f}, "
+                      f"Value: {losses['value_grad']:.4f}")
                 
                 # Get current learning rate
                 current_lr = optimizer.param_groups[0]['lr']
@@ -2091,6 +2137,8 @@ def train(config: TrainingConfig, resume_from: str = None):
                 training_history['policy_loss'].append(losses['policy_loss'])
                 training_history['value_loss'].append(losses['value_loss'])
                 training_history['total_loss'].append(losses['total_loss'])
+                training_history['policy_grad'].append(losses['policy_grad'])
+                training_history['value_grad'].append(losses['value_grad'])
                 training_history['buffer_size'].append(len(replay_buffer))
                 training_history['learning_rate'].append(current_lr)
                 
