@@ -2178,6 +2178,11 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                     }
                 training_history['timing']['selfplay_time'].append(selfplay_time)
                 training_history['timing']['training_time'].append(training_time)
+                
+                # Learning rate decay (only after training)
+                scheduler.step()
+                current_lr = optimizer.param_groups[0]['lr']
+                print(f"\nLearning rate: {current_lr:.6f}")
             else:
                 print(f"\n[2/4] Skipping training: buffer size {len(replay_buffer)} < "
                       f"minimum {config.min_buffer_size}")
@@ -2249,12 +2254,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 print(f"\n[4/4] Skipping network evaluation (every {config.eval_frequency} iterations)")
                 eval_network_time = 0
             
-            # 5. Learning rate decay
-            scheduler.step()
-            current_lr = optimizer.param_groups[0]['lr']
-            print(f"\nLearning rate: {current_lr:.6f}")
-            
-            # 6. Save checkpoint (only save the current network checkpoint, not best)
+            # 5. Save checkpoint (only save the current network checkpoint, not best)
             if (iteration + 1) % config.save_frequency == 0:
                 save_checkpoint(network, optimizer, iteration + 1, config, 
                               training_history, f"checkpoint_iter_{iteration + 1}.pth")
@@ -2270,7 +2270,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                     training_history['timing']['network_eval_time'].append(eval_network_time)
                     training_history['timing']['total_time'].append(iter_time)
             
-            # 7. Save training history
+            # 6. Save training history
             history_path = os.path.join(config.checkpoint_dir, "training_history.json")
             os.makedirs(config.checkpoint_dir, exist_ok=True)
             with open(history_path, 'w') as f:
