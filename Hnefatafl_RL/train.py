@@ -990,6 +990,14 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     samples_per_epoch = min(train_size, config.batch_size * config.batches_per_epoch)
     batches_per_epoch = samples_per_epoch // config.batch_size
     
+    # Print header for training output
+    print("\n  " + "-" * 110)
+    print(f"  {'Epoch':>5} | {'Policy':>8} {'Value':>8} {'L2':>10} {'Total':>8} | "
+          f"{'PolGrad':>8} {'ValGrad':>8} | {'ValPol':>8} {'ValVal':>8} {'ValL2':>10} {'ValTot':>8}")
+    print(f"  {'':>5} | {'Loss':>8} {'Loss':>8} {'Loss':>10} {'Loss':>8} | "
+          f"{'':>8} {'':>8} | {'Loss':>8} {'Loss':>8} {'Loss':>10} {'Loss':>8}")
+    print("  " + "-" * 110)
+    
     for epoch in range(config.num_epochs):
         epoch_policy_loss = 0.0
         epoch_value_loss = 0.0
@@ -1108,91 +1116,94 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             
             num_batches += 1
         
-        # Print per-epoch losses and gradients
+        # Validation pass for this epoch - evaluate on validation set without gradients
+        network_compiled.eval()
+        val_policy_loss = 0.0
+        val_value_loss = 0.0
+        val_batches = 0
+        
+        with torch.no_grad():
+            # Process validation data in batches
+            val_batch_size = config.batch_size
+            for i in range(0, len(val_indices), val_batch_size):
+                batch_val_indices = val_indices[i:i + val_batch_size]
+                
+                # Extract validation samples
+                states = []
+                policies = []
+                values = []
+                attacker_won_flags = []
+                
+                for idx in batch_val_indices:
+                    state, policy, value, attacker_won = buffer_list[idx]
+                    states.append(state)
+                    policies.append(policy)
+                    values.append(value)
+                    attacker_won_flags.append(attacker_won)
+                
+                # Convert to tensors
+                states = torch.from_numpy(np.array(states, dtype=np.float32)).to(device)
+                policies = torch.from_numpy(np.array(policies, dtype=np.float32)).to(device)
+                values = torch.from_numpy(np.array(values, dtype=np.float32)).unsqueeze(1).to(device)
+                attacker_won_flags = torch.from_numpy(np.array(attacker_won_flags, dtype=bool)).to(device)
+                
+                # Forward pass
+                pred_policies, pred_values = network_compiled(states)
+                
+                # Compute per-sample losses
+                policy_loss_per_sample = -torch.sum(policies * 
+                                          torch.log_softmax(pred_policies, dim=1), dim=1)
+                value_loss_per_sample = (pred_values.squeeze(1) - values.squeeze(1)) ** 2
+                
+                # Apply boost factors (same as training)
+                if attacker_boost != 1.0 or defender_boost != 1.0:
+                    boost_weights = torch.where(attacker_won_flags, 
+                                               attacker_boost, 
+                                               defender_boost)
+                    mean_weight = torch.mean(boost_weights)
+                    normalized_weights = boost_weights / mean_weight
+                    policy_loss_per_sample = policy_loss_per_sample * normalized_weights
+                    value_loss_per_sample = value_loss_per_sample * normalized_weights
+                
+                # Aggregate losses
+                batch_policy_loss = torch.mean(policy_loss_per_sample).item()
+                batch_value_loss = torch.mean(value_loss_per_sample).item()
+                
+                val_policy_loss += batch_policy_loss
+                val_value_loss += batch_value_loss
+                val_batches += 1
+        
+        # Average validation losses
+        val_policy_loss /= val_batches
+        val_value_loss /= val_batches
+        
+        # Compute L2 loss for validation (same as training, just for reporting)
+        l2_loss = 0.0
+        for param in network.parameters():
+            if param.requires_grad:
+                l2_loss += torch.sum(param ** 2).item()
+        val_l2_loss = 0.5 * config.weight_decay * l2_loss
+        val_total_loss = val_policy_loss + config.value_loss_weight * val_value_loss
+        
+        # Back to training mode for next epoch
+        network_compiled.train()
+        
+        # Print per-epoch losses in columnar format
         avg_epoch_policy = epoch_policy_loss / batches_per_epoch
         avg_epoch_value = epoch_value_loss / batches_per_epoch
         avg_epoch_total = epoch_total_loss / batches_per_epoch
         avg_epoch_policy_grad = epoch_policy_grad / batches_per_epoch
         avg_epoch_value_grad = epoch_value_grad / batches_per_epoch
         avg_epoch_l2 = epoch_l2_loss / batches_per_epoch
-        print(f"  Epoch {epoch+1}/{config.num_epochs}: "
-              f"policy={avg_epoch_policy:.4f}, value={avg_epoch_value:.4f}, "
-              f"l2={avg_epoch_l2:.6f}, total={avg_epoch_total:.4f}, "
-              f"policy_grad={avg_epoch_policy_grad:.4f}, value_grad={avg_epoch_value_grad:.4f}")
+        
+        print(f"  {epoch+1:>5} | {avg_epoch_policy:>8.4f} {avg_epoch_value:>8.4f} {avg_epoch_l2:>10.6f} {avg_epoch_total:>8.4f} | "
+              f"{avg_epoch_policy_grad:>8.4f} {avg_epoch_value_grad:>8.4f} | "
+              f"{val_policy_loss:>8.4f} {val_value_loss:>8.4f} {val_l2_loss:>10.6f} {val_total_loss:>8.4f}")
     
-    # Validation pass - evaluate on validation set without gradients
-    network_compiled.eval()
-    val_policy_loss = 0.0
-    val_value_loss = 0.0
-    val_l2_loss = 0.0
-    val_batches = 0
+    print("  " + "-" * 110)
     
-    with torch.no_grad():
-        # Process validation data in batches
-        val_batch_size = config.batch_size
-        for i in range(0, len(val_indices), val_batch_size):
-            batch_val_indices = val_indices[i:i + val_batch_size]
-            
-            # Extract validation samples
-            states = []
-            policies = []
-            values = []
-            attacker_won_flags = []
-            
-            for idx in batch_val_indices:
-                state, policy, value, attacker_won = buffer_list[idx]
-                states.append(state)
-                policies.append(policy)
-                values.append(value)
-                attacker_won_flags.append(attacker_won)
-            
-            # Convert to tensors
-            states = torch.from_numpy(np.array(states, dtype=np.float32)).to(device)
-            policies = torch.from_numpy(np.array(policies, dtype=np.float32)).to(device)
-            values = torch.from_numpy(np.array(values, dtype=np.float32)).unsqueeze(1).to(device)
-            attacker_won_flags = torch.from_numpy(np.array(attacker_won_flags, dtype=bool)).to(device)
-            
-            # Forward pass
-            pred_policies, pred_values = network_compiled(states)
-            
-            # Compute per-sample losses
-            policy_loss_per_sample = -torch.sum(policies * 
-                                      torch.log_softmax(pred_policies, dim=1), dim=1)
-            value_loss_per_sample = (pred_values.squeeze(1) - values.squeeze(1)) ** 2
-            
-            # Apply boost factors (same as training)
-            if attacker_boost != 1.0 or defender_boost != 1.0:
-                boost_weights = torch.where(attacker_won_flags, 
-                                           attacker_boost, 
-                                           defender_boost)
-                mean_weight = torch.mean(boost_weights)
-                normalized_weights = boost_weights / mean_weight
-                policy_loss_per_sample = policy_loss_per_sample * normalized_weights
-                value_loss_per_sample = value_loss_per_sample * normalized_weights
-            
-            # Aggregate losses
-            batch_policy_loss = torch.mean(policy_loss_per_sample).item()
-            batch_value_loss = torch.mean(value_loss_per_sample).item()
-            
-            val_policy_loss += batch_policy_loss
-            val_value_loss += batch_value_loss
-            val_batches += 1
-    
-    # Compute L2 loss for validation (same as training, just for reporting)
-    l2_loss = 0.0
-    for param in network.parameters():
-        if param.requires_grad:
-            l2_loss += torch.sum(param ** 2).item()
-    val_l2_loss = 0.5 * config.weight_decay * l2_loss
-    
-    # Average validation losses
-    val_policy_loss /= val_batches
-    val_value_loss /= val_batches
-    val_total_loss = val_policy_loss + config.value_loss_weight * val_value_loss
-    
-    print(f"\n  Validation: policy={val_policy_loss:.4f}, value={val_value_loss:.4f}, "
-          f"l2={val_l2_loss:.6f}, total={val_total_loss:.4f}")
-    
+    # Compute average validation losses across all epochs for return value
+    # Use the last epoch's validation losses as the final validation metrics
     return {
         'policy_loss': total_policy_loss / num_batches,
         'value_loss': total_value_loss / num_batches,
@@ -2258,16 +2269,12 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 training_time = time.time() - training_start
                 
                 print(f"Training time: {training_time:.1f}s")
-                print(f"Final losses - Policy: {losses['policy_loss']:.4f}, "
-                      f"Value: {losses['value_loss']:.4f}, "
-                      f"L2: {losses['l2_loss']:.4f}, "
-                      f"Total: {losses['total_loss']:.4f}")
-                print(f"Final gradients - Policy: {losses['policy_grad']:.4f}, "
-                      f"Value: {losses['value_grad']:.4f}")
-                print(f"Validation losses - Policy: {losses['val_policy_loss']:.4f}, "
-                      f"Value: {losses['val_value_loss']:.4f}, "
-                      f"L2: {losses['val_l2_loss']:.4f}, "
-                      f"Total: {losses['val_total_loss']:.4f}")
+                print(f"\nFinal Summary (averaged over all epochs):")
+                print(f"  Training   - Policy: {losses['policy_loss']:.4f}, Value: {losses['value_loss']:.4f}, "
+                      f"L2: {losses['l2_loss']:.6f}, Total: {losses['total_loss']:.4f}")
+                print(f"  Gradients  - Policy: {losses['policy_grad']:.4f}, Value: {losses['value_grad']:.4f}")
+                print(f"  Validation - Policy: {losses['val_policy_loss']:.4f}, Value: {losses['val_value_loss']:.4f}, "
+                      f"L2: {losses['val_l2_loss']:.6f}, Total: {losses['val_total_loss']:.4f}")
                 
                 # Get current learning rate
                 current_lr = optimizer.param_groups[0]['lr']
