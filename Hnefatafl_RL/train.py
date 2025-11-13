@@ -971,6 +971,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     total_loss = 0.0
     total_policy_grad = 0.0
     total_value_grad = 0.0
+    total_l2_loss = 0.0
     num_batches = 0
     
     samples_per_epoch = min(len(buffer), config.batch_size * config.batches_per_epoch)
@@ -982,6 +983,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         epoch_total_loss = 0.0
         epoch_policy_grad = 0.0
         epoch_value_grad = 0.0
+        epoch_l2_loss = 0.0
         
         for batch_idx in range(batches_per_epoch):
             # Sample batch
@@ -1019,6 +1021,15 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             # Aggregate losses
             policy_loss = torch.mean(policy_loss_per_sample)
             value_loss = torch.mean(value_loss_per_sample)
+            
+            # Compute L2 regularization loss explicitly for reporting
+            # Note: optimizer's weight_decay already applies this, we're just computing it for logging
+            l2_loss = 0.0
+            for param in network.parameters():
+                if param.requires_grad:
+                    l2_loss += torch.sum(param ** 2).item()
+            l2_loss = 0.5 * config.weight_decay * l2_loss  # 0.5 factor is standard in L2 regularization
+            
             loss = policy_loss + config.value_loss_weight * value_loss
             
             # Backward pass (set_to_none=True is faster than default zero_grad)
@@ -1060,12 +1071,14 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             total_loss += batch_total_loss
             total_policy_grad += policy_grad_norm
             total_value_grad += value_grad_norm
+            total_l2_loss += l2_loss
             
             epoch_policy_loss += batch_policy_loss
             epoch_value_loss += batch_value_loss
             epoch_total_loss += batch_total_loss
             epoch_policy_grad += policy_grad_norm
             epoch_value_grad += value_grad_norm
+            epoch_l2_loss += l2_loss
             
             num_batches += 1
         
@@ -1075,9 +1088,10 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         avg_epoch_total = epoch_total_loss / batches_per_epoch
         avg_epoch_policy_grad = epoch_policy_grad / batches_per_epoch
         avg_epoch_value_grad = epoch_value_grad / batches_per_epoch
+        avg_epoch_l2 = epoch_l2_loss / batches_per_epoch
         print(f"  Epoch {epoch+1}/{config.num_epochs}: "
               f"policy={avg_epoch_policy:.4f}, value={avg_epoch_value:.4f}, "
-              f"total={avg_epoch_total:.4f}, "
+              f"l2={avg_epoch_l2:.6f}, total={avg_epoch_total:.4f}, "
               f"policy_grad={avg_epoch_policy_grad:.4f}, value_grad={avg_epoch_value_grad:.4f}")
     
     return {
@@ -1085,7 +1099,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         'value_loss': total_value_loss / num_batches,
         'total_loss': total_loss / num_batches,
         'policy_grad': total_policy_grad / num_batches,
-        'value_grad': total_value_grad / num_batches
+        'value_grad': total_value_grad / num_batches,
+        'l2_loss': total_l2_loss / num_batches
     }
 
 
