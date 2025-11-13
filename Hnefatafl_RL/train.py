@@ -958,13 +958,25 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         defender_boost: Loss boost factor for defender-won games
     
     Returns:
-        dict with 'policy_loss', 'value_loss', 'total_loss', 'policy_grad', 'value_grad'
+        dict with 'policy_loss', 'value_loss', 'total_loss', 'policy_grad', 'value_grad',
+        'val_policy_loss', 'val_value_loss', 'val_l2_loss', 'val_total_loss'
     """
     # Compile network for faster training (~18% speedup)
     # This creates a compiled wrapper that's only used during training
     network_compiled = torch.compile(network, mode='default')
     network_compiled.train()
     device = config.device
+    
+    # Split buffer into training (85%) and validation (15%)
+    buffer_list = list(buffer.buffer)
+    total_samples = len(buffer_list)
+    val_size = int(0.15 * total_samples)
+    train_size = total_samples - val_size
+    
+    # Shuffle and split
+    indices = np.random.permutation(total_samples)
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:]
     
     total_policy_loss = 0.0
     total_value_loss = 0.0
@@ -974,7 +986,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     total_l2_loss = 0.0
     num_batches = 0
     
-    samples_per_epoch = min(len(buffer), config.batch_size * config.batches_per_epoch)
+    samples_per_epoch = min(train_size, config.batch_size * config.batches_per_epoch)
     batches_per_epoch = samples_per_epoch // config.batch_size
     
     for epoch in range(config.num_epochs):
@@ -986,14 +998,27 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         epoch_l2_loss = 0.0
         
         for batch_idx in range(batches_per_epoch):
-            # Sample batch
-            states, policies, values, attacker_won_flags = buffer.sample(config.batch_size)
+            # Sample batch from training indices only
+            batch_train_indices = np.random.choice(train_indices, config.batch_size, replace=False)
+            
+            # Extract samples
+            states = []
+            policies = []
+            values = []
+            attacker_won_flags = []
+            
+            for idx in batch_train_indices:
+                state, policy, value, attacker_won = buffer_list[idx]
+                states.append(state)
+                policies.append(policy)
+                values.append(value)
+                attacker_won_flags.append(attacker_won)
             
             # Convert to tensors
-            states = torch.from_numpy(states).to(device)
-            policies = torch.from_numpy(policies).to(device)
-            values = torch.from_numpy(values).unsqueeze(1).to(device)
-            attacker_won_flags = torch.from_numpy(attacker_won_flags).to(device)
+            states = torch.from_numpy(np.array(states, dtype=np.float32)).to(device)
+            policies = torch.from_numpy(np.array(policies, dtype=np.float32)).to(device)
+            values = torch.from_numpy(np.array(values, dtype=np.float32)).unsqueeze(1).to(device)
+            attacker_won_flags = torch.from_numpy(np.array(attacker_won_flags, dtype=bool)).to(device)
             
             # Forward pass (using compiled network for speed)
             pred_policies, pred_values = network_compiled(states)
@@ -1094,13 +1119,90 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
               f"l2={avg_epoch_l2:.6f}, total={avg_epoch_total:.4f}, "
               f"policy_grad={avg_epoch_policy_grad:.4f}, value_grad={avg_epoch_value_grad:.4f}")
     
+    # Validation pass - evaluate on validation set without gradients
+    network_compiled.eval()
+    val_policy_loss = 0.0
+    val_value_loss = 0.0
+    val_l2_loss = 0.0
+    val_batches = 0
+    
+    with torch.no_grad():
+        # Process validation data in batches
+        val_batch_size = config.batch_size
+        for i in range(0, len(val_indices), val_batch_size):
+            batch_val_indices = val_indices[i:i + val_batch_size]
+            
+            # Extract validation samples
+            states = []
+            policies = []
+            values = []
+            attacker_won_flags = []
+            
+            for idx in batch_val_indices:
+                state, policy, value, attacker_won = buffer_list[idx]
+                states.append(state)
+                policies.append(policy)
+                values.append(value)
+                attacker_won_flags.append(attacker_won)
+            
+            # Convert to tensors
+            states = torch.from_numpy(np.array(states, dtype=np.float32)).to(device)
+            policies = torch.from_numpy(np.array(policies, dtype=np.float32)).to(device)
+            values = torch.from_numpy(np.array(values, dtype=np.float32)).unsqueeze(1).to(device)
+            attacker_won_flags = torch.from_numpy(np.array(attacker_won_flags, dtype=bool)).to(device)
+            
+            # Forward pass
+            pred_policies, pred_values = network_compiled(states)
+            
+            # Compute per-sample losses
+            policy_loss_per_sample = -torch.sum(policies * 
+                                      torch.log_softmax(pred_policies, dim=1), dim=1)
+            value_loss_per_sample = (pred_values.squeeze(1) - values.squeeze(1)) ** 2
+            
+            # Apply boost factors (same as training)
+            if attacker_boost != 1.0 or defender_boost != 1.0:
+                boost_weights = torch.where(attacker_won_flags, 
+                                           attacker_boost, 
+                                           defender_boost)
+                mean_weight = torch.mean(boost_weights)
+                normalized_weights = boost_weights / mean_weight
+                policy_loss_per_sample = policy_loss_per_sample * normalized_weights
+                value_loss_per_sample = value_loss_per_sample * normalized_weights
+            
+            # Aggregate losses
+            batch_policy_loss = torch.mean(policy_loss_per_sample).item()
+            batch_value_loss = torch.mean(value_loss_per_sample).item()
+            
+            val_policy_loss += batch_policy_loss
+            val_value_loss += batch_value_loss
+            val_batches += 1
+    
+    # Compute L2 loss for validation (same as training, just for reporting)
+    l2_loss = 0.0
+    for param in network.parameters():
+        if param.requires_grad:
+            l2_loss += torch.sum(param ** 2).item()
+    val_l2_loss = 0.5 * config.weight_decay * l2_loss
+    
+    # Average validation losses
+    val_policy_loss /= val_batches
+    val_value_loss /= val_batches
+    val_total_loss = val_policy_loss + config.value_loss_weight * val_value_loss
+    
+    print(f"\n  Validation: policy={val_policy_loss:.4f}, value={val_value_loss:.4f}, "
+          f"l2={val_l2_loss:.6f}, total={val_total_loss:.4f}")
+    
     return {
         'policy_loss': total_policy_loss / num_batches,
         'value_loss': total_value_loss / num_batches,
         'total_loss': total_loss / num_batches,
         'policy_grad': total_policy_grad / num_batches,
         'value_grad': total_value_grad / num_batches,
-        'l2_loss': total_l2_loss / num_batches
+        'l2_loss': total_l2_loss / num_batches,
+        'val_policy_loss': val_policy_loss,
+        'val_value_loss': val_value_loss,
+        'val_l2_loss': val_l2_loss,
+        'val_total_loss': val_total_loss
     }
 
 
@@ -2053,6 +2155,10 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             'total_loss': [],
             'policy_grad': [],
             'value_grad': [],
+            'val_policy_loss': [],
+            'val_value_loss': [],
+            'val_l2_loss': [],
+            'val_total_loss': [],
             'learning_rate': [],
             'selfplay_results': {
                 'attacker_wins': [],
@@ -2080,7 +2186,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     
     # Ensure all list fields exist for backwards compatibility
     # This applies whether we're resuming or starting fresh
-    for key in ['iterations', 'policy_loss', 'value_loss', 'l2_loss', 'total_loss', 'policy_grad', 'value_grad', 
+    for key in ['iterations', 'policy_loss', 'value_loss', 'l2_loss', 'total_loss', 'policy_grad', 'value_grad',
+                'val_policy_loss', 'val_value_loss', 'val_l2_loss', 'val_total_loss',
                 'win_rates', 'buffer_size', 'vs_random_win_rate', 'vs_random_elo', 
                 'vs_random_attacker_wins', 'vs_random_defender_wins', 
                 'vs_random_total_draws', 'cumulative_elo', 'elo_gain']:
@@ -2156,6 +2263,10 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                       f"Total: {losses['total_loss']:.4f}")
                 print(f"Final gradients - Policy: {losses['policy_grad']:.4f}, "
                       f"Value: {losses['value_grad']:.4f}")
+                print(f"Validation losses - Policy: {losses['val_policy_loss']:.4f}, "
+                      f"Value: {losses['val_value_loss']:.4f}, "
+                      f"L2: {losses['val_l2_loss']:.4f}, "
+                      f"Total: {losses['val_total_loss']:.4f}")
                 
                 # Get current learning rate
                 current_lr = optimizer.param_groups[0]['lr']
@@ -2168,6 +2279,10 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 training_history['total_loss'].append(losses['total_loss'])
                 training_history['policy_grad'].append(losses['policy_grad'])
                 training_history['value_grad'].append(losses['value_grad'])
+                training_history['val_policy_loss'].append(losses['val_policy_loss'])
+                training_history['val_value_loss'].append(losses['val_value_loss'])
+                training_history['val_l2_loss'].append(losses['val_l2_loss'])
+                training_history['val_total_loss'].append(losses['val_total_loss'])
                 training_history['buffer_size'].append(len(replay_buffer))
                 training_history['learning_rate'].append(current_lr)
                 
