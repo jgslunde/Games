@@ -245,7 +245,9 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-dir", type=str, default=DEFAULT_CHECKPOINT_DIR,
                        help=f"Directory for saving checkpoints (default: {DEFAULT_CHECKPOINT_DIR})")
     parser.add_argument("--resume", type=str, default=DEFAULT_RESUME,
-                       help="Resume from checkpoint file")
+                       help="Resume from checkpoint file (loads weights, optimizer state, and training history)")
+    parser.add_argument("--load-weights", type=str, default=None,
+                       help="Load only network weights from checkpoint file (starts training fresh otherwise)")
     
     args = parser.parse_args()
     
@@ -330,4 +332,4 @@ if __name__ == "__main__":
     config.checkpoint_dir = args.checkpoint_dir
     
     # Run training
-    train(config, resume_from=args.resume)
+    train(config, resume_from=args.resume, load_weights_from=args.load_weights)

@@ -37,10 +37,10 @@ def temperature_threshold_type(value):
 
 DEFAULT_ITERATIONS = 1000
 DEFAULT_GAMES = 512
-DEFAULT_SIMS_ATTACKER_SELFPLAY = 500
-DEFAULT_SIMS_DEFENDER_SELFPLAY = 700
-DEFAULT_SIMS_ATTACKER_EVAL = 500
-DEFAULT_SIMS_DEFENDER_EVAL = 700
+DEFAULT_SIMS_ATTACKER_SELFPLAY = 250
+DEFAULT_SIMS_DEFENDER_SELFPLAY = 350
+DEFAULT_SIMS_ATTACKER_EVAL = 250
+DEFAULT_SIMS_DEFENDER_EVAL = 350
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_LEARNING_RATE = 1e-3*(DEFAULT_BATCH_SIZE/256)
 DEFAULT_EPOCHS = 10
@@ -63,8 +63,8 @@ DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
 DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 20  # For "decay" mode
 
 # Network architecture
-DEFAULT_RES_BLOCKS = 6
-DEFAULT_CHANNELS = 96
+DEFAULT_RES_BLOCKS = 4
+DEFAULT_CHANNELS = 64
 
 # Replay buffer
 DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
@@ -255,7 +255,9 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-dir", type=str, default=DEFAULT_CHECKPOINT_DIR,
                        help=f"Directory for saving checkpoints (default: {DEFAULT_CHECKPOINT_DIR})")
     parser.add_argument("--resume", type=str, default=DEFAULT_RESUME,
-                       help="Resume from checkpoint file")
+                       help="Resume from checkpoint file (loads weights, optimizer state, and training history)")
+    parser.add_argument("--load-weights", type=str, default=None,
+                       help="Load only network weights from checkpoint file (starts training fresh otherwise)")
     
     args = parser.parse_args()
     
@@ -344,4 +346,4 @@ if __name__ == "__main__":
     config.checkpoint_dir = args.checkpoint_dir
     
     # Run training
-    train(config, resume_from=args.resume)
+    train(config, resume_from=args.resume, load_weights_from=args.load_weights)

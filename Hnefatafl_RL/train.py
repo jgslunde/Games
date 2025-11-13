@@ -1692,14 +1692,19 @@ def load_checkpoint(filepath: str, network: BrandubhNet,
 # MAIN TRAINING LOOP
 # =============================================================================
 
-def train(config: TrainingConfig, resume_from: str = None):
+def train(config: TrainingConfig, resume_from: str = None, load_weights_from: str = None):
     """
     Main training loop.
     
     Args:
         config: TrainingConfig object
-        resume_from: path to checkpoint to resume from
+        resume_from: path to checkpoint to resume from (loads weights, optimizer, history)
+        load_weights_from: path to checkpoint to load only weights from (starts fresh otherwise)
     """
+    # Validate that resume_from and load_weights_from are not both specified
+    if resume_from is not None and load_weights_from is not None:
+        raise ValueError("Cannot specify both --resume and --load-weights. Use one or the other.")
+    
     # Enable denormal (subnormal) flushing to zero for faster inference
     # This prevents tiny weights from causing 10-100x inference slowdown
     # Denormal numbers are extremely slow on CPUs, and flushing them to zero
@@ -1896,6 +1901,12 @@ def train(config: TrainingConfig, resume_from: str = None):
     start_iteration = 0
     if resume_from is not None:
         start_iteration = load_checkpoint(resume_from, network, optimizer)
+    elif load_weights_from is not None:
+        # Load only weights, not optimizer state or training history
+        print(f"Loading weights from {load_weights_from}")
+        checkpoint = torch.load(load_weights_from, weights_only=False)
+        network.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded weights from checkpoint (starting training from iteration 0)")
     
     # Note: We do NOT compile the network here because:
     # 1. Compiled networks can't be pickled for multiprocessing
@@ -1913,9 +1924,11 @@ def train(config: TrainingConfig, resume_from: str = None):
         checkpoint = torch.load(best_model_path, map_location=config.device, weights_only=False)
         best_network.load_state_dict(checkpoint['model_state_dict'])
     else:
-        # Starting fresh or no best model exists yet
+        # Starting fresh, loading weights only, or no best model exists yet
         # Clean state dict to remove _orig_mod. prefix from compiled network
         best_network.load_state_dict(clean_state_dict(network.state_dict()))
+        if load_weights_from is not None:
+            print("Initialized best network with loaded weights")
     
     # Initialize replay buffer
     replay_buffer = ReplayBuffer(config.replay_buffer_size)
@@ -1977,10 +1990,10 @@ def train(config: TrainingConfig, resume_from: str = None):
                     'throne_enabled': config.throne_enabled,
                 },
                 'mcts_params': {
-                    'selfplay_simulations_attacker': config.num_mcts_simulations,
-                    'selfplay_simulations_defender': config.num_mcts_simulations_defender,
-                    'eval_simulations_attacker': config.num_eval_simulations,
-                    'eval_simulations_defender': config.num_eval_simulations_defender,
+                    'selfplay_simulations_attacker': config.num_mcts_sims_attacker,
+                    'selfplay_simulations_defender': config.num_mcts_sims_defender,
+                    'eval_simulations_attacker': config.eval_mcts_sims_attacker,
+                    'eval_simulations_defender': config.eval_mcts_sims_defender,
                     'c_puct': config.c_puct,
                     'temperature': config.temperature,
                     'temperature_mode': config.temperature_mode,
@@ -1994,7 +2007,7 @@ def train(config: TrainingConfig, resume_from: str = None):
                     'num_iterations': config.num_iterations,
                     'games_per_iteration': config.num_games_per_iteration,
                     'batch_size': config.batch_size,
-                    'epochs_per_iteration': config.epochs_per_iteration,
+                    'epochs_per_iteration': config.num_epochs,
                     'batches_per_epoch': config.batches_per_epoch,
                     'learning_rate_initial': config.learning_rate,
                     'lr_decay': config.lr_decay,
@@ -2002,22 +2015,20 @@ def train(config: TrainingConfig, resume_from: str = None):
                     'value_loss_weight': config.value_loss_weight,
                     'use_data_augmentation': config.use_data_augmentation,
                     'replay_buffer_size': config.replay_buffer_size,
-                    'min_buffer_size_for_training': config.min_buffer_size_for_training,
+                    'min_buffer_size_for_training': config.min_buffer_size,
                 },
                 'boosting_params': {
                     'use_dynamic_boosting': config.use_dynamic_boosting,
                     'attacker_win_loss_boost': config.attacker_win_loss_boost,
-                    'defender_win_loss_boost': config.defender_win_loss_boost,
-                    'attacker_draw_penalty': config.attacker_draw_penalty,
-                    'defender_draw_penalty': config.defender_draw_penalty,
+                    'attacker_draw_penalty': config.draw_penalty_attacker,
+                    'defender_draw_penalty': config.draw_penalty_defender,
                 },
                 'evaluation_params': {
                     'eval_frequency': config.eval_frequency,
-                    'num_eval_games': config.num_eval_games,
-                    'eval_win_rate_threshold': config.eval_win_rate_threshold,
+                    'num_eval_games': config.eval_games,
+                    'eval_win_rate_threshold': config.eval_win_rate,
                     'eval_vs_random_frequency': config.eval_vs_random_frequency,
-                    'num_eval_vs_random_games': config.num_eval_vs_random_games,
-                    'stop_eval_vs_random_at_100': config.stop_eval_vs_random_at_100,
+                    'num_eval_vs_random_games': config.eval_vs_random_games,
                 },
             },
             'iterations': [],
