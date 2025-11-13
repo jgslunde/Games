@@ -2049,6 +2049,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             'iterations': [],
             'policy_loss': [],
             'value_loss': [],
+            'l2_loss': [],
             'total_loss': [],
             'policy_grad': [],
             'value_grad': [],
@@ -2079,7 +2080,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     
     # Ensure all list fields exist for backwards compatibility
     # This applies whether we're resuming or starting fresh
-    for key in ['iterations', 'policy_loss', 'value_loss', 'total_loss', 'policy_grad', 'value_grad', 
+    for key in ['iterations', 'policy_loss', 'value_loss', 'l2_loss', 'total_loss', 'policy_grad', 'value_grad', 
                 'win_rates', 'buffer_size', 'vs_random_win_rate', 'vs_random_elo', 
                 'vs_random_attacker_wins', 'vs_random_defender_wins', 
                 'vs_random_total_draws', 'cumulative_elo', 'elo_gain']:
@@ -2151,6 +2152,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 print(f"Training time: {training_time:.1f}s")
                 print(f"Final losses - Policy: {losses['policy_loss']:.4f}, "
                       f"Value: {losses['value_loss']:.4f}, "
+                      f"L2: {losses['l2_loss']:.4f}, "
                       f"Total: {losses['total_loss']:.4f}")
                 print(f"Final gradients - Policy: {losses['policy_grad']:.4f}, "
                       f"Value: {losses['value_grad']:.4f}")
@@ -2162,6 +2164,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 training_history['iterations'].append(iteration + 1)
                 training_history['policy_loss'].append(losses['policy_loss'])
                 training_history['value_loss'].append(losses['value_loss'])
+                training_history['l2_loss'].append(losses['l2_loss'])
                 training_history['total_loss'].append(losses['total_loss'])
                 training_history['policy_grad'].append(losses['policy_grad'])
                 training_history['value_grad'].append(losses['value_grad'])
