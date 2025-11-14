@@ -53,15 +53,24 @@ def parse_output_file(filepath):
         'selfeval_total_wins': [],
         'selfeval_win_rate': [],
         'cumulative_elo_vs_first': [],
+        'elo_difference': [],  # Individual ELO improvement per iteration
         
         # Training losses
         'policy_loss': [],
         'value_loss': [],
+        'policy_grad': [],
+        'value_grad': [],
+        'val_policy_loss': [],
+        'val_value_loss': [],
         
-        # Epoch-level losses
+        # Epoch-level losses and gradients
         'epoch_steps': [],  # Global step counter across all iterations
         'epoch_policy_loss': [],
         'epoch_value_loss': [],
+        'epoch_policy_grad': [],
+        'epoch_value_grad': [],
+        'epoch_val_policy_loss': [],
+        'epoch_val_value_loss': [],
         
         # Buffer and time
         'buffer_size': [],
@@ -100,11 +109,32 @@ def parse_output_file(filepath):
             iterations_data[current_iteration]['buffer_size'] = int(match.group(1))
             continue
         
-        # Final losses
+        # Final losses (old format)
         match = re.search(r'Final losses - Policy: ([\d.]+), Value: ([\d.]+)', line)
         if match:
             iterations_data[current_iteration]['policy_loss'] = float(match.group(1))
             iterations_data[current_iteration]['value_loss'] = float(match.group(2))
+            continue
+        
+        # Final Summary (new format) - Training losses
+        match = re.search(r'Training\s+-\s+Policy:\s+([\d.]+),\s+Value:\s+([\d.]+)', line)
+        if match and 'Final Summary' in ''.join(lines[max(0, i-5):i]):
+            iterations_data[current_iteration]['policy_loss'] = float(match.group(1))
+            iterations_data[current_iteration]['value_loss'] = float(match.group(2))
+            continue
+        
+        # Final Summary (new format) - Gradients
+        match = re.search(r'Gradients\s+-\s+Policy:\s+([\d.]+),\s+Value:\s+([\d.]+)', line)
+        if match and 'Final Summary' in ''.join(lines[max(0, i-5):i]):
+            iterations_data[current_iteration]['policy_grad'] = float(match.group(1))
+            iterations_data[current_iteration]['value_grad'] = float(match.group(2))
+            continue
+        
+        # Final Summary (new format) - Validation losses
+        match = re.search(r'Validation\s+-\s+Policy:\s+([\d.]+),\s+Value:\s+([\d.]+)', line)
+        if match and 'Final Summary' in ''.join(lines[max(0, i-5):i]):
+            iterations_data[current_iteration]['val_policy_loss'] = float(match.group(1))
+            iterations_data[current_iteration]['val_value_loss'] = float(match.group(2))
             continue
         
         # Random evaluation results
@@ -176,6 +206,18 @@ def parse_output_file(filepath):
             iterations_data[current_iteration]['cumulative_elo_vs_first'] = float(match.group(1))
             continue
         
+        # ELO difference (individual improvement when network is NOT accepted)
+        match = re.search(r'ELO difference: ([+-]?[\d.]+)', line)
+        if match:
+            iterations_data[current_iteration]['elo_difference'] = float(match.group(1))
+            continue
+        
+        # ELO gain (individual improvement when network IS accepted)
+        match = re.search(r'ELO gain: ([+-]?[\d.]+)', line)
+        if match:
+            iterations_data[current_iteration]['elo_difference'] = float(match.group(1))
+            continue
+        
         # Total time for iteration
         match = re.search(r'Total:\s+([\d.]+)s', line)
         if match and 'Timing Summary:' in ''.join(lines[max(0, i-10):i]):
@@ -183,6 +225,7 @@ def parse_output_file(filepath):
             continue
         
         # Epoch-level losses (e.g., "  Epoch 1/10: policy=2.3456, value=0.5678, total=2.9134")
+        # Old format
         match = re.search(r'Epoch (\d+)/\d+: policy=([\d.]+), value=([\d.]+)', line)
         if match:
             policy_loss = float(match.group(2))
@@ -190,6 +233,36 @@ def parse_output_file(filepath):
             data['epoch_steps'].append(global_epoch_step)
             data['epoch_policy_loss'].append(policy_loss)
             data['epoch_value_loss'].append(value_loss)
+            data['epoch_policy_grad'].append(0.0)  # Not available in old format
+            data['epoch_value_grad'].append(0.0)
+            data['epoch_val_policy_loss'].append(0.0)  # Not available in old format
+            data['epoch_val_value_loss'].append(0.0)
+            global_epoch_step += 1
+            continue
+        
+        # Epoch-level losses (new columnar format)
+        # e.g., "      1 |   3.5152   0.5707   0.368899   3.6578 |   1.5566   0.7306 |   3.4958   0.5636   0.373004   3.6367"
+        match = re.match(r'\s+(\d+)\s+\|\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+\|\s+([\d.]+)\s+([\d.]+)\s+\|\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)', line)
+        if match:
+            epoch_num = int(match.group(1))
+            policy_loss = float(match.group(2))
+            value_loss = float(match.group(3))
+            l2_loss = float(match.group(4))
+            total_loss = float(match.group(5))
+            policy_grad = float(match.group(6))
+            value_grad = float(match.group(7))
+            val_policy_loss = float(match.group(8))
+            val_value_loss = float(match.group(9))
+            val_l2_loss = float(match.group(10))
+            val_total_loss = float(match.group(11))
+            
+            data['epoch_steps'].append(global_epoch_step)
+            data['epoch_policy_loss'].append(policy_loss)
+            data['epoch_value_loss'].append(value_loss)
+            data['epoch_policy_grad'].append(policy_grad)
+            data['epoch_value_grad'].append(value_grad)
+            data['epoch_val_policy_loss'].append(val_policy_loss)
+            data['epoch_val_value_loss'].append(val_value_loss)
             global_epoch_step += 1
             continue
     
@@ -205,6 +278,12 @@ def parse_output_file(filepath):
             data['selfplay_draws'].append(iter_data['selfplay_draws'])
             data['policy_loss'].append(iter_data['policy_loss'])
             data['value_loss'].append(iter_data['value_loss'])
+            
+            # Gradients and validation losses (new format)
+            data['policy_grad'].append(iter_data.get('policy_grad', 0))
+            data['value_grad'].append(iter_data.get('value_grad', 0))
+            data['val_policy_loss'].append(iter_data.get('val_policy_loss', 0))
+            data['val_value_loss'].append(iter_data.get('val_value_loss', 0))
             
             # Optional data - always append to keep arrays aligned
             if 'buffer_size' in iter_data:
@@ -232,6 +311,10 @@ def parse_output_file(filepath):
             if 'cumulative_elo_vs_first' in iter_data and 'selfeval_attacker_wins' in iter_data:
                 data['selfeval_iterations'].append(iteration)
                 data['cumulative_elo_vs_first'].append(iter_data['cumulative_elo_vs_first'])
+                if 'elo_difference' in iter_data:
+                    data['elo_difference'].append(iter_data['elo_difference'])
+                else:
+                    data['elo_difference'].append(0.0)  # Default to 0 if not present
                 if 'selfeval_total_wins' in iter_data:
                     data['selfeval_total_wins'].append(iter_data['selfeval_total_wins'])
                 data['selfeval_attacker_wins'].append(iter_data.get('selfeval_attacker_wins', 0))
@@ -279,11 +362,20 @@ def merge_data_from_files(file_data_list):
         'selfeval_total_wins': [],
         'selfeval_win_rate': [],
         'cumulative_elo_vs_first': [],
+        'elo_difference': [],
         'policy_loss': [],
         'value_loss': [],
+        'policy_grad': [],
+        'value_grad': [],
+        'val_policy_loss': [],
+        'val_value_loss': [],
         'epoch_steps': [],
         'epoch_policy_loss': [],
         'epoch_value_loss': [],
+        'epoch_policy_grad': [],
+        'epoch_value_grad': [],
+        'epoch_val_policy_loss': [],
+        'epoch_val_value_loss': [],
         'buffer_size': [],
         'total_time': [],
     }
@@ -297,6 +389,7 @@ def merge_data_from_files(file_data_list):
             adjusted_elo = [elo + cumulative_elo_offset for elo in data['cumulative_elo_vs_first']]
             merged['cumulative_elo_vs_first'].extend(adjusted_elo)
             merged['selfeval_iterations'].extend(data['selfeval_iterations'])
+            merged['elo_difference'].extend(data['elo_difference'])
             
             # Update offset for next file (use the last ELO value from current file)
             cumulative_elo_offset = adjusted_elo[-1]
@@ -320,9 +413,17 @@ def merge_data_from_files(file_data_list):
         
         merged['policy_loss'].extend(data['policy_loss'])
         merged['value_loss'].extend(data['value_loss'])
+        merged['policy_grad'].extend(data['policy_grad'])
+        merged['value_grad'].extend(data['value_grad'])
+        merged['val_policy_loss'].extend(data['val_policy_loss'])
+        merged['val_value_loss'].extend(data['val_value_loss'])
         
         merged['epoch_policy_loss'].extend(data['epoch_policy_loss'])
         merged['epoch_value_loss'].extend(data['epoch_value_loss'])
+        merged['epoch_policy_grad'].extend(data['epoch_policy_grad'])
+        merged['epoch_value_grad'].extend(data['epoch_value_grad'])
+        merged['epoch_val_policy_loss'].extend(data['epoch_val_policy_loss'])
+        merged['epoch_val_value_loss'].extend(data['epoch_val_value_loss'])
         # Adjust epoch steps to be cumulative across files
         if merged['epoch_steps']:
             max_step = merged['epoch_steps'][-1] + 1
@@ -338,21 +439,36 @@ def merge_data_from_files(file_data_list):
 
 
 def plot_elo(data, output_dir):
-    """Plot 1: ELO versus random and ELO versus first version."""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    """Plot 1: ELO versus first version and individual ELO differences."""
+    fig, ax1 = plt.subplots(figsize=(10, 6))
     
-    if data['random_elo']:
-        ax.plot(data['random_iterations'], data['random_elo'], 'o-', label='ELO vs Random', linewidth=2, markersize=4)
-    
+    # Plot cumulative ELO on left y-axis
+    color1 = 'tab:blue'
+    ax1.set_xlabel('Iteration', fontsize=12)
+    ax1.set_ylabel('Cumulative ELO vs First Version', fontsize=12, color=color1)
     if data['cumulative_elo_vs_first']:
-        ax.plot(data['selfeval_iterations'], data['cumulative_elo_vs_first'], 's-', label='ELO vs First Version', linewidth=2, markersize=4)
+        ax1.plot(data['selfeval_iterations'], data['cumulative_elo_vs_first'], 's-', 
+                color=color1, label='Cumulative ELO', linewidth=2, markersize=5)
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_ylim(bottom=0)
     
-    ax.set_xlabel('Iteration', fontsize=12)
-    ax.set_ylabel('ELO Rating', fontsize=12)
-    ax.set_title('ELO Ratings During Training', fontsize=14, fontweight='bold')
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(bottom=0)
+    # Plot individual ELO differences on right y-axis
+    ax2 = ax1.twinx()
+    color2 = 'tab:orange'
+    ax2.set_ylabel('Individual ELO Difference', fontsize=12, color=color2)
+    if data['elo_difference']:
+        ax2.plot(data['selfeval_iterations'], data['elo_difference'], 'o-', 
+                color=color2, label='ELO Difference', linewidth=2, markersize=4, alpha=0.7)
+    ax2.tick_params(axis='y', labelcolor=color2)
+    ax2.axhline(y=0, color=color2, linestyle='--', linewidth=1, alpha=0.5)
+    
+    ax1.set_title('ELO Ratings During Training', fontsize=14, fontweight='bold')
+    
+    # Add legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=11)
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'plot_elo.png'), dpi=150)
@@ -360,8 +476,8 @@ def plot_elo(data, output_dir):
 
 
 def plot_win_rates(data, output_dir):
-    """Plot 2: Win rates for self-play, random, and self-evaluation."""
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    """Plot 2: Win rates for self-play and self-evaluation."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
     iterations = data['iterations']
     
@@ -380,25 +496,8 @@ def plot_win_rates(data, output_dir):
     ax.grid(True, alpha=0.3)
     ax.set_ylim([0, 105])
     
-    # Random evaluation win rates
-    ax = axes[1]
-    if data['random_attacker_wins']:
-        ax.plot(data['random_iterations'], data['random_attacker_wins'], 'o-', label='Attacker', linewidth=2, markersize=4)
-    if data['random_defender_wins']:
-        ax.plot(data['random_iterations'], data['random_defender_wins'], 's-', label='Defender', linewidth=2, markersize=4)
-    # Draw rate for random is not explicitly stated, so we calculate it
-    if data['random_attacker_wins'] and data['random_defender_wins']:
-        draw_rate = [100 - (a + d) / 2 for a, d in zip(data['random_attacker_wins'], data['random_defender_wins'])]
-        ax.plot(data['random_iterations'], draw_rate, '^-', label='Draw (approx)', linewidth=2, markersize=4)
-    ax.set_xlabel('Iteration', fontsize=12)
-    ax.set_ylabel('Win Rate (%)', fontsize=12)
-    ax.set_title('Random Evaluation Win Rates', fontsize=13, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim([0, 105])
-    
     # Self-evaluation win rates (network vs network)
-    ax = axes[2]
+    ax = axes[1]
     if data['selfeval_attacker_wins']:
         ax.plot(data['selfeval_iterations'], data['selfeval_attacker_wins'], 
                 'o-', label='Attacker', linewidth=2, markersize=4)
@@ -422,27 +521,31 @@ def plot_win_rates(data, output_dir):
 
 
 def plot_losses(data, output_dir):
-    """Plot 3: Policy loss and value loss with dual y-axes."""
+    """Plot 3: Policy loss and value loss with dual y-axes, showing training and validation."""
     fig, ax1 = plt.subplots(figsize=(10, 6))
     
     iterations = data['iterations']
     
     color1 = 'tab:blue'
+    color1_val = 'lightblue'
     ax1.set_xlabel('Iteration', fontsize=12)
     ax1.set_ylabel('Policy Loss', fontsize=12, color=color1)
     if data['policy_loss']:
-        ax1.plot(iterations, data['policy_loss'], 'o-', color=color1, label='Policy Loss', linewidth=2, markersize=4)
+        ax1.plot(iterations, data['policy_loss'], 'o-', color=color1, label='Policy Loss (Train)', linewidth=2, markersize=4)
+    if data['val_policy_loss']:
+        ax1.plot(iterations, data['val_policy_loss'], 'o--', color=color1_val, label='Policy Loss (Val)', linewidth=2, markersize=4, alpha=0.7)
     ax1.tick_params(axis='y', labelcolor=color1)
     ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(bottom=0)
     
     ax2 = ax1.twinx()
     color2 = 'tab:red'
+    color2_val = 'lightcoral'
     ax2.set_ylabel('Value Loss', fontsize=12, color=color2)
     if data['value_loss']:
-        ax2.plot(iterations, data['value_loss'], 's-', color=color2, label='Value Loss', linewidth=2, markersize=4)
+        ax2.plot(iterations, data['value_loss'], 's-', color=color2, label='Value Loss (Train)', linewidth=2, markersize=4)
+    if data['val_value_loss']:
+        ax2.plot(iterations, data['val_value_loss'], 's--', color=color2_val, label='Value Loss (Val)', linewidth=2, markersize=4, alpha=0.7)
     ax2.tick_params(axis='y', labelcolor=color2)
-    ax2.set_ylim(bottom=0)
     
     # Add title
     ax1.set_title('Training Losses (Per Iteration)', fontsize=14, fontweight='bold')
@@ -450,7 +553,7 @@ def plot_losses(data, output_dir):
     # Add legends
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=11)
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'plot_losses.png'), dpi=150)
@@ -458,29 +561,35 @@ def plot_losses(data, output_dir):
 
 
 def plot_epoch_losses(data, output_dir):
-    """Plot 5: Epoch-level policy loss and value loss with dual y-axes across all iterations."""
+    """Plot 5: Epoch-level policy loss and value loss with dual y-axes across all iterations, showing training and validation."""
     fig, ax1 = plt.subplots(figsize=(12, 6))
     
     epoch_steps = data['epoch_steps']
     
     color1 = 'tab:blue'
+    color1_val = 'lightblue'
     ax1.set_xlabel('Training Epoch (Cumulative)', fontsize=12)
     ax1.set_ylabel('Policy Loss', fontsize=12, color=color1)
     if data['epoch_policy_loss']:
         ax1.plot(epoch_steps, data['epoch_policy_loss'], '-', color=color1, 
-                label='Policy Loss', linewidth=1.5, alpha=0.7)
+                label='Policy Loss (Train)', linewidth=1.5, alpha=0.8)
+    if data['epoch_val_policy_loss']:
+        ax1.plot(epoch_steps, data['epoch_val_policy_loss'], '--', color=color1_val, 
+                label='Policy Loss (Val)', linewidth=1.5, alpha=0.6)
     ax1.tick_params(axis='y', labelcolor=color1)
     ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(bottom=0)
     
     ax2 = ax1.twinx()
     color2 = 'tab:red'
+    color2_val = 'lightcoral'
     ax2.set_ylabel('Value Loss', fontsize=12, color=color2)
     if data['epoch_value_loss']:
         ax2.plot(epoch_steps, data['epoch_value_loss'], '-', color=color2, 
-                label='Value Loss', linewidth=1.5, alpha=0.7)
+                label='Value Loss (Train)', linewidth=1.5, alpha=0.8)
+    if data['epoch_val_value_loss']:
+        ax2.plot(epoch_steps, data['epoch_val_value_loss'], '--', color=color2_val, 
+                label='Value Loss (Val)', linewidth=1.5, alpha=0.6)
     ax2.tick_params(axis='y', labelcolor=color2)
-    ax2.set_ylim(bottom=0)
     
     # Add title
     ax1.set_title('Training Losses (Per Epoch - All Iterations)', fontsize=14, fontweight='bold')
@@ -488,10 +597,58 @@ def plot_epoch_losses(data, output_dir):
     # Add legends
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=11)
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'plot_epoch_losses.png'), dpi=150)
+    plt.close()
+
+
+def plot_gradients(data, output_dir):
+    """Plot 6: Per-iteration gradient norms for policy and value heads."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    iterations = data['iterations']
+    
+    if data['policy_grad']:
+        ax.plot(iterations, data['policy_grad'], 'o-', color='tab:blue', 
+               label='Policy Gradient Norm', linewidth=2, markersize=4)
+    if data['value_grad']:
+        ax.plot(iterations, data['value_grad'], 's-', color='tab:red', 
+               label='Value Gradient Norm', linewidth=2, markersize=4)
+    
+    ax.set_xlabel('Iteration', fontsize=12)
+    ax.set_ylabel('Gradient Norm', fontsize=12)
+    ax.set_title('Gradient Norms (Per Iteration)', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper right', fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'plot_gradients.png'), dpi=150)
+    plt.close()
+
+
+def plot_epoch_gradients(data, output_dir):
+    """Plot 7: Per-epoch gradient norms for policy and value heads across all iterations."""
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    epoch_steps = data['epoch_steps']
+    
+    if data['epoch_policy_grad']:
+        ax.plot(epoch_steps, data['epoch_policy_grad'], '-', color='tab:blue', 
+               label='Policy Gradient Norm', linewidth=1.5, alpha=0.8)
+    if data['epoch_value_grad']:
+        ax.plot(epoch_steps, data['epoch_value_grad'], '-', color='tab:red', 
+               label='Value Gradient Norm', linewidth=1.5, alpha=0.8)
+    
+    ax.set_xlabel('Training Epoch (Cumulative)', fontsize=12)
+    ax.set_ylabel('Gradient Norm', fontsize=12)
+    ax.set_title('Gradient Norms (Per Epoch - All Iterations)', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper right', fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'plot_epoch_gradients.png'), dpi=150)
     plt.close()
 
 
@@ -573,23 +730,33 @@ def main():
     print(f"  - Self-evaluations: {len(data['cumulative_elo_vs_first'])} data points")
     print(f"  - Policy loss: {len(data['policy_loss'])} data points")
     print(f"  - Value loss: {len(data['value_loss'])} data points")
+    print(f"  - Gradients: {len(data['policy_grad'])} data points")
     print(f"  - Epoch-level losses: {len(data['epoch_policy_loss'])} epochs")
+    print(f"  - Epoch-level gradients: {len(data['epoch_policy_grad'])} epochs")
     
     plot_elo(data, output_dir)
-    print(f"  ✓ Saved plot_elo.png")
+    print("  ✓ Saved plot_elo.png")
     
     plot_win_rates(data, output_dir)
-    print(f"  ✓ Saved plot_win_rates.png")
+    print("  ✓ Saved plot_win_rates.png")
     
     plot_losses(data, output_dir)
-    print(f"  ✓ Saved plot_losses.png")
+    print("  ✓ Saved plot_losses.png")
+    
+    if data['policy_grad']:
+        plot_gradients(data, output_dir)
+        print("  ✓ Saved plot_gradients.png")
     
     plot_buffer_and_time(data, output_dir)
-    print(f"  ✓ Saved plot_buffer_time.png")
+    print("  ✓ Saved plot_buffer_time.png")
     
     if data['epoch_policy_loss']:
         plot_epoch_losses(data, output_dir)
-        print(f"  ✓ Saved plot_epoch_losses.png")
+        print("  ✓ Saved plot_epoch_losses.png")
+    
+    if data['epoch_policy_grad']:
+        plot_epoch_gradients(data, output_dir)
+        print("  ✓ Saved plot_epoch_gradients.png")
     
     print(f"\nAll plots saved to {output_dir}/")
 
