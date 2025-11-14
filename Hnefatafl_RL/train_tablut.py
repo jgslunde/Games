@@ -65,6 +65,7 @@ DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 0  # For "decay" mode
 # Network architecture
 DEFAULT_RES_BLOCKS = 5
 DEFAULT_CHANNELS = 64
+DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 64
 
 # Replay buffer
 DEFAULT_REPLAY_BUFFER_SIZE = 6_000_000
@@ -175,6 +176,8 @@ if __name__ == "__main__":
                        help=f"Number of residual blocks (default: {DEFAULT_RES_BLOCKS})")
     parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS,
                        help=f"Number of channels in conv layers (default: {DEFAULT_CHANNELS})")
+    parser.add_argument("--value-head-size", type=int, default=DEFAULT_VALUE_HEAD_HIDDEN_SIZE,
+                       help=f"Size of value head hidden layer (default: {DEFAULT_VALUE_HEAD_HIDDEN_SIZE})")
     
     # MCTS parameters
     parser.add_argument("--c-puct", type=float, default=DEFAULT_C_PUCT,
@@ -295,6 +298,7 @@ if __name__ == "__main__":
     # Network architecture
     config.num_res_blocks = args.res_blocks
     config.num_channels = args.channels
+    config.value_head_hidden_size = args.value_head_size
     
     # MCTS parameters
     config.c_puct = args.c_puct

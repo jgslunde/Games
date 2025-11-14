@@ -38,11 +38,11 @@ def temperature_threshold_type(value):
 
 DEFAULT_ITERATIONS = 1000
 DEFAULT_GAMES = 512
-DEFAULT_SIMS_ATTACKER_SELFPLAY = 600
-DEFAULT_SIMS_DEFENDER_SELFPLAY = 800
-DEFAULT_SIMS_ATTACKER_EVAL = 600
-DEFAULT_SIMS_DEFENDER_EVAL = 800
-DEFAULT_BATCH_SIZE = 256
+DEFAULT_SIMS_ATTACKER_SELFPLAY = 800
+DEFAULT_SIMS_DEFENDER_SELFPLAY = 1000
+DEFAULT_SIMS_ATTACKER_EVAL = 800
+DEFAULT_SIMS_DEFENDER_EVAL = 1000
+DEFAULT_BATCH_SIZE = 512
 DEFAULT_LEARNING_RATE = 1e-3*sqrt(DEFAULT_BATCH_SIZE/256)
 DEFAULT_EPOCHS = 10
 DEFAULT_BATCHES_PER_EPOCH = 100
@@ -60,22 +60,23 @@ DEFAULT_TEMPERATURE_DECAY_MOVES = 20  # For "decay" mode
 # Evaluation temperature parameters
 DEFAULT_EVAL_TEMPERATURE = 1.0  # Deterministic play during evaluation
 DEFAULT_EVAL_TEMPERATURE_MODE = "fixed"  # "fixed", "king", or "decay"
-DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
+DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 15  # For "fixed" mode
 DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 20  # For "decay" mode
 
 # Network architecture
 DEFAULT_RES_BLOCKS = 6
-DEFAULT_CHANNELS = 96
+DEFAULT_CHANNELS = 48
+DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 256
 
 # Replay buffer
 DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
-DEFAULT_MIN_BUFFER_SIZE = 600_000 # 10*DEFAULT_BATCH_SIZE
+DEFAULT_MIN_BUFFER_SIZE = 1_000_000 # 10*DEFAULT_BATCH_SIZE
 DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
 
 # Learning rate decay and regularization
-DEFAULT_LR_DECAY = 0.98
+DEFAULT_LR_DECAY = 0.99
 DEFAULT_LR_FLOOR = 3e-5
-DEFAULT_WEIGHT_DECAY = 1e-4
+DEFAULT_WEIGHT_DECAY = 5e-3
 DEFAULT_VALUE_LOSS_WEIGHT = 0.25
 
 # Dynamic loss boosting
@@ -176,6 +177,8 @@ if __name__ == "__main__":
                        help=f"Number of residual blocks (default: {DEFAULT_RES_BLOCKS})")
     parser.add_argument("--channels", type=int, default=DEFAULT_CHANNELS,
                        help=f"Number of channels in conv layers (default: {DEFAULT_CHANNELS})")
+    parser.add_argument("--value-head-size", type=int, default=DEFAULT_VALUE_HEAD_HIDDEN_SIZE,
+                       help=f"Size of value head hidden layer (default: {DEFAULT_VALUE_HEAD_HIDDEN_SIZE})")
     
     # MCTS parameters
     parser.add_argument("--c-puct", type=float, default=DEFAULT_C_PUCT,
@@ -306,6 +309,7 @@ if __name__ == "__main__":
     # Network architecture
     config.num_res_blocks = args.res_blocks
     config.num_channels = args.channels
+    config.value_head_hidden_size = args.value_head_size
     
     # MCTS parameters
     config.c_puct = args.c_puct

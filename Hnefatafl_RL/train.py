@@ -100,6 +100,7 @@ class TrainingConfig:
     # Neural network
     num_res_blocks = 4                # Residual blocks in network
     num_channels = 64                 # Channels in convolutional layers
+    value_head_hidden_size = 64       # Hidden layer size in value head
     
     # Training
     batch_size = 32                   # Training batch size
@@ -442,7 +443,7 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
 # SELF-PLAY
 # =============================================================================
 
-def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, 
+def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
                                 num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_mode,
                                 temperature_threshold, temperature_decay_moves, game_idx,
                                 king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
@@ -456,6 +457,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         network_path: Path to saved network weights file
         num_res_blocks: Number of residual blocks in network
         num_channels: Number of channels in network
+        value_head_hidden_size: Hidden layer size in value head
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
@@ -519,7 +521,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels,
         from mcts import MCTS
         
         # Reconstruct network on CPU and load from file
-        network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels)
+        network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels, 
+                             value_head_hidden_size=value_head_hidden_size)
         checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
         network.load_state_dict(checkpoint['model_state_dict'])
         network.to('cpu')
@@ -801,7 +804,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         # Create a list of argument tuples for each worker call
         # Each tuple contains all arguments needed for _play_self_play_game_worker
         worker_args = [
-            (temp_network_path, config.num_res_blocks, config.num_channels,
+            (temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
              config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
              config.c_puct, config.temperature, config.temperature_mode,
              config.temperature_threshold, config.temperature_decay_moves,
@@ -1222,7 +1225,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 # EVALUATION
 # =============================================================================
 
-def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
+def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
                                 num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
                                 network_module, network_class_name, game_module, game_class_name):
     """
@@ -1233,6 +1236,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
         network_path: Path to saved network weights file
         num_res_blocks: Number of residual blocks
         num_channels: Number of channels
+        value_head_hidden_size: Hidden layer size in value head
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
@@ -1283,7 +1287,8 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels,
     from agent import Agent, RandomAgent, play_game
     
     # Reconstruct network on CPU and load from file
-    network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels)
+    network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
+                         value_head_hidden_size=value_head_hidden_size)
     checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
     network.load_state_dict(checkpoint['model_state_dict'])
     network.to('cpu')
@@ -1386,6 +1391,7 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             temp_network_path,
             config.num_res_blocks,
             config.num_channels,
+            config.value_head_hidden_size,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.c_puct,
@@ -1401,6 +1407,7 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             temp_network_path,
             config.num_res_blocks,
             config.num_channels,
+            config.value_head_hidden_size,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.c_puct,
@@ -1471,7 +1478,7 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
 
 
 def _evaluate_networks_worker(new_network_path, old_network_path,
-                             num_res_blocks, num_channels, num_sims_attacker, num_sims_defender, c_puct,
+                             num_res_blocks, num_channels, value_head_hidden_size, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker,
                              network_module, network_class_name, game_module, game_class_name,
                              game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves):
@@ -1484,6 +1491,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         old_network_path: Path to saved old network weights file
         num_res_blocks: Number of residual blocks
         num_channels: Number of channels
+        value_head_hidden_size: Hidden layer size in value head
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
@@ -1538,7 +1546,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     from agent import Agent, play_game
     
     # Reconstruct networks on CPU and load from files
-    new_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels)
+    new_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
+                             value_head_hidden_size=value_head_hidden_size)
     checkpoint = torch.load(new_network_path, map_location='cpu', weights_only=False)
     new_network.load_state_dict(checkpoint['model_state_dict'])
     new_network.to('cpu')
@@ -1548,7 +1557,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Each worker has its own cache directory, so no contention
     new_network = new_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
-    old_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels)
+    old_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
+                             value_head_hidden_size=value_head_hidden_size)
     checkpoint = torch.load(old_network_path, map_location='cpu', weights_only=False)
     old_network.load_state_dict(checkpoint['model_state_dict'])
     old_network.to('cpu')
@@ -1657,6 +1667,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temp_old_path,
             config.num_res_blocks,
             config.num_channels,
+            config.value_head_hidden_size,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.c_puct,
@@ -1679,6 +1690,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temp_old_path,
             config.num_res_blocks,
             config.num_channels,
+            config.value_head_hidden_size,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.c_puct,
@@ -2001,7 +2013,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     
     # Initialize network
     network = config.network_class(num_res_blocks=config.num_res_blocks,
-                                   num_channels=config.num_channels).to(config.device)
+                                   num_channels=config.num_channels,
+                                   value_head_hidden_size=config.value_head_hidden_size).to(config.device)
     
     # Calculate and display network size
     total_params = sum(p.numel() for p in network.parameters())
@@ -2044,7 +2057,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     
     # Initialize best network (for evaluation)
     best_network = config.network_class(num_res_blocks=config.num_res_blocks,
-                                        num_channels=config.num_channels).to(config.device)
+                                        num_channels=config.num_channels,
+                                        value_head_hidden_size=config.value_head_hidden_size).to(config.device)
     
     # Load best network from best_model.pth if resuming and it exists, otherwise copy current network
     best_model_path = os.path.join(config.checkpoint_dir, 'best_model.pth')

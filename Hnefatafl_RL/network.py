@@ -47,10 +47,11 @@ class BrandubhNet(nn.Module):
     - Compact channel count for faster training
     """
     
-    def __init__(self, num_res_blocks: int = 4, num_channels: int = 64):
+    def __init__(self, num_res_blocks: int = 4, num_channels: int = 64, value_head_hidden_size: int = 64):
         super().__init__()
         
         self.num_channels = num_channels
+        self.value_head_hidden_size = value_head_hidden_size
         
         # Initial convolution
         self.conv_input = nn.Conv2d(4, num_channels, kernel_size=3, padding=1)
@@ -74,8 +75,8 @@ class BrandubhNet(nn.Module):
         self.conv_value = nn.Conv2d(num_channels, 1, kernel_size=1)
         self.bn_value = nn.BatchNorm2d(1)
         # FC layers are now much smaller: 1*7*7=49 inputs instead of 16*7*7=784
-        self.fc_value1 = nn.Linear(1 * 7 * 7, 64)
-        self.fc_value2 = nn.Linear(64, 1)
+        self.fc_value1 = nn.Linear(1 * 7 * 7, value_head_hidden_size)
+        self.fc_value2 = nn.Linear(value_head_hidden_size, 1)
     
     def forward(self, x):
         """
