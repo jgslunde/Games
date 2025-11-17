@@ -405,8 +405,8 @@ def merge_data_from_files(file_data_list):
             merged['selfeval_iterations'].extend(data['selfeval_iterations'])
             merged['elo_difference'].extend(data['elo_difference'])
             
-            # Update offset for next file (use the last ELO value from current file)
-            cumulative_elo_offset = adjusted_elo[-1]
+            # Update offset for next file (add the ORIGINAL last ELO, not the adjusted one)
+            cumulative_elo_offset += data['cumulative_elo_vs_first'][-1]
         
         # For other self-evaluation metrics
         merged['selfeval_attacker_wins'].extend(data['selfeval_attacker_wins'])

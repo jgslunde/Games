@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import json
+from datetime import datetime
 from collections import deque
 from typing import List, Tuple, Dict
 import numpy as np
@@ -971,27 +972,46 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     network_compiled.train()
     device = config.device
     
-    # Split buffer into training (85%) and validation (15%)
+    # Pre-convert buffer to numpy arrays for O(1) indexing instead of O(n) deque access
+    # This is a one-time cost that makes all subsequent batch sampling much faster
     buffer_list = list(buffer.buffer)
     total_samples = len(buffer_list)
-    val_size = int(0.15 * total_samples)
-    train_size = total_samples - val_size
     
-    # Shuffle and split
-    indices = np.random.permutation(total_samples)
-    train_indices = indices[:train_size]
-    val_indices = indices[train_size:]
+    # Pre-allocate arrays and copy data (much faster than repeated indexing)
+    all_states = np.zeros((total_samples, 4, 7, 7), dtype=np.float32)
+    all_policies = np.zeros((total_samples, config.policy_size), dtype=np.float32)
+    all_values = np.zeros(total_samples, dtype=np.float32)
+    all_attacker_won = np.zeros(total_samples, dtype=bool)
+    
+    for i, (state, policy, value, attacker_won) in enumerate(buffer_list):
+        all_states[i] = state
+        all_policies[i] = policy
+        all_values[i] = value
+        all_attacker_won[i] = attacker_won
+    
+    # Now we can safely delete the buffer list to free memory
+    del buffer_list
+    
+    # Separate training and validation data volumes
+    # Training: Use exactly batch_size * batches_per_epoch samples
+    # Validation: Use 0.25x the training volume (adds ~5-8% overhead since validation is 3-5x cheaper)
+    # Total data used per iteration: 1.25x the specified training volume
+    train_samples_per_epoch = min(total_samples, config.batch_size * config.batches_per_epoch)
+    val_samples_per_epoch = train_samples_per_epoch // 4  # 0.25x training volume
+    
+    batches_per_epoch = train_samples_per_epoch // config.batch_size
+    
+    # Pre-sample validation indices once (validation set is fixed for this training call)
+    val_indices = np.random.choice(total_samples, val_samples_per_epoch, replace=False)
     
     total_policy_loss = 0.0
     total_value_loss = 0.0
     total_loss = 0.0
     total_policy_grad = 0.0
     total_value_grad = 0.0
-    total_l2_loss = 0.0
+    # Note: L2 loss is not accumulated - it's a snapshot of network weights, not a per-batch metric
+    final_l2_loss = 0.0  # Will be set to the last epoch's L2 value
     num_batches = 0
-    
-    samples_per_epoch = min(train_size, config.batch_size * config.batches_per_epoch)
-    batches_per_epoch = samples_per_epoch // config.batch_size
     
     # Print header for training output
     print("\n  " + "-" * 110)
@@ -1007,30 +1027,23 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         epoch_total_loss = 0.0
         epoch_policy_grad = 0.0
         epoch_value_grad = 0.0
-        epoch_l2_loss = 0.0
+        # L2 loss will be computed once at the end of the epoch (not accumulated per batch)
         
         for batch_idx in range(batches_per_epoch):
-            # Sample batch from training indices only
-            batch_train_indices = np.random.choice(train_indices, config.batch_size, replace=False)
+            # Sample batch randomly from entire buffer (standard RL practice)
+            batch_train_indices = np.random.choice(total_samples, config.batch_size, replace=False)
             
-            # Extract samples
-            states = []
-            policies = []
-            values = []
-            attacker_won_flags = []
+            # Extract samples using fast numpy array indexing (O(1) per sample)
+            states = all_states[batch_train_indices]
+            policies = all_policies[batch_train_indices]
+            values = all_values[batch_train_indices]
+            attacker_won_flags = all_attacker_won[batch_train_indices]
             
-            for idx in batch_train_indices:
-                state, policy, value, attacker_won = buffer_list[idx]
-                states.append(state)
-                policies.append(policy)
-                values.append(value)
-                attacker_won_flags.append(attacker_won)
-            
-            # Convert to tensors
-            states = torch.from_numpy(np.array(states, dtype=np.float32)).to(device)
-            policies = torch.from_numpy(np.array(policies, dtype=np.float32)).to(device)
-            values = torch.from_numpy(np.array(values, dtype=np.float32)).unsqueeze(1).to(device)
-            attacker_won_flags = torch.from_numpy(np.array(attacker_won_flags, dtype=bool)).to(device)
+            # Convert to tensors (already numpy arrays, so no need for np.array())
+            states = torch.from_numpy(states).to(device)
+            policies = torch.from_numpy(policies).to(device)
+            values = torch.from_numpy(values).unsqueeze(1).to(device)
+            attacker_won_flags = torch.from_numpy(attacker_won_flags).to(device)
             
             # Forward pass (using compiled network for speed)
             pred_policies, pred_values = network_compiled(states)
@@ -1108,16 +1121,24 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             total_loss += batch_total_loss
             total_policy_grad += policy_grad_norm
             total_value_grad += value_grad_norm
-            total_l2_loss += l2_loss
+            # Note: L2 loss is computed once per epoch, not per batch
             
             epoch_policy_loss += batch_policy_loss
             epoch_value_loss += batch_value_loss
             epoch_total_loss += batch_total_loss
             epoch_policy_grad += policy_grad_norm
             epoch_value_grad += value_grad_norm
-            epoch_l2_loss += l2_loss
+            # Note: epoch_l2_loss is computed once at end of epoch, not accumulated per batch
             
             num_batches += 1
+        
+        # Compute L2 loss once at the end of the epoch (current network state)
+        epoch_l2_loss = 0.0
+        for param in network.parameters():
+            if param.requires_grad:
+                epoch_l2_loss += torch.sum(param ** 2).item()
+        epoch_l2_loss = 0.5 * config.weight_decay * epoch_l2_loss
+        final_l2_loss = epoch_l2_loss  # Store for return value
         
         # Validation pass for this epoch - evaluate on validation set without gradients
         network_compiled.eval()
@@ -1126,29 +1147,25 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         val_batches = 0
         
         with torch.no_grad():
-            # Process validation data in batches
+            # Process validation data in batches (0.5x training volume)
             val_batch_size = config.batch_size
-            for i in range(0, len(val_indices), val_batch_size):
-                batch_val_indices = val_indices[i:i + val_batch_size]
+            for batch_idx in range(val_samples_per_epoch // val_batch_size):
+                # Sample validation batch
+                start_idx = batch_idx * val_batch_size
+                end_idx = start_idx + val_batch_size
+                batch_val_indices = val_indices[start_idx:end_idx]
                 
-                # Extract validation samples
-                states = []
-                policies = []
-                values = []
-                attacker_won_flags = []
-                
-                for idx in batch_val_indices:
-                    state, policy, value, attacker_won = buffer_list[idx]
-                    states.append(state)
-                    policies.append(policy)
-                    values.append(value)
-                    attacker_won_flags.append(attacker_won)
+                # Extract validation samples using fast numpy array indexing
+                states = all_states[batch_val_indices]
+                policies = all_policies[batch_val_indices]
+                values = all_values[batch_val_indices]
+                attacker_won_flags = all_attacker_won[batch_val_indices]
                 
                 # Convert to tensors
-                states = torch.from_numpy(np.array(states, dtype=np.float32)).to(device)
-                policies = torch.from_numpy(np.array(policies, dtype=np.float32)).to(device)
-                values = torch.from_numpy(np.array(values, dtype=np.float32)).unsqueeze(1).to(device)
-                attacker_won_flags = torch.from_numpy(np.array(attacker_won_flags, dtype=bool)).to(device)
+                states = torch.from_numpy(states).to(device)
+                policies = torch.from_numpy(policies).to(device)
+                values = torch.from_numpy(values).unsqueeze(1).to(device)
+                attacker_won_flags = torch.from_numpy(attacker_won_flags).to(device)
                 
                 # Forward pass
                 pred_policies, pred_values = network_compiled(states)
@@ -1197,9 +1214,9 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         avg_epoch_total = epoch_total_loss / batches_per_epoch
         avg_epoch_policy_grad = epoch_policy_grad / batches_per_epoch
         avg_epoch_value_grad = epoch_value_grad / batches_per_epoch
-        avg_epoch_l2 = epoch_l2_loss / batches_per_epoch
+        # epoch_l2_loss is already the final value (computed once), no need to average
         
-        print(f"  {epoch+1:>5} | {avg_epoch_policy:>8.4f} {avg_epoch_value:>8.4f} {avg_epoch_l2:>10.6f} {avg_epoch_total:>8.4f} | "
+        print(f"  {epoch+1:>5} | {avg_epoch_policy:>8.4f} {avg_epoch_value:>8.4f} {epoch_l2_loss:>10.6f} {avg_epoch_total:>8.4f} | "
               f"{avg_epoch_policy_grad:>8.4f} {avg_epoch_value_grad:>8.4f} | "
               f"{val_policy_loss:>8.4f} {val_value_loss:>8.4f} {val_l2_loss:>10.6f} {val_total_loss:>8.4f}")
     
@@ -1213,7 +1230,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         'total_loss': total_loss / num_batches,
         'policy_grad': total_policy_grad / num_batches,
         'value_grad': total_value_grad / num_batches,
-        'l2_loss': total_l2_loss / num_batches,
+        'l2_loss': final_l2_loss,  # L2 loss from the last epoch (network state after training)
         'val_policy_loss': val_policy_loss,
         'val_value_loss': val_value_loss,
         'val_l2_loss': val_l2_loss,
@@ -2233,7 +2250,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             iter_start_time = time.time()
             
             print("\n" + "=" * 70)
-            print(f"Iteration {iteration + 1}/{config.num_iterations}")
+            print(f"Iteration {iteration + 1}/{config.num_iterations} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print("=" * 70)
             
             # 1. Self-play
