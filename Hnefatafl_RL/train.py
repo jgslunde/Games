@@ -23,7 +23,7 @@ import time
 import json
 from datetime import datetime
 from collections import deque
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 import numpy as np
 import multiprocessing as mp
 from functools import partial
@@ -444,6 +444,14 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
 # SELF-PLAY
 # =============================================================================
 
+def _play_self_play_game_worker_wrapper(args):
+    """
+    Wrapper for _play_self_play_game_worker that unpacks tuple arguments.
+    Required for pool.imap_unordered() which passes a single argument.
+    """
+    return _play_self_play_game_worker(*args)
+
+
 def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
                                 num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_mode,
                                 temperature_threshold, temperature_decay_moves, game_idx,
@@ -766,7 +774,7 @@ def play_self_play_game(agent: Agent, config: TrainingConfig) -> Dict:
     }
 
 
-def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None) -> Tuple[ReplayBuffer, int, int]:
+def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None) -> Tuple[ReplayBuffer, int, int, Any]:
     """
     Generate self-play games and store in replay buffer.
     Uses multiprocessing to parallelize game generation.
@@ -778,10 +786,11 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         temp_network_path: Path to temporary network file (avoids pickling large tensors)
     
     Returns:
-        Tuple of (buffer, attacker_wins, defender_wins) where:
+        Tuple of (buffer, attacker_wins, defender_wins, pool) where:
         - buffer: ReplayBuffer with collected experience
         - attacker_wins: Number of games won by attacker
         - defender_wins: Number of games won by defender
+        - pool: The multiprocessing pool (may be recreated if terminated)
     """
     buffer = ReplayBuffer(config.replay_buffer_size)
     
@@ -802,42 +811,108 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         cleanup_temp_file = False
     
     try:
-        # Create a list of argument tuples for each worker call
-        # Each tuple contains all arguments needed for _play_self_play_game_worker
-        worker_args = [
-            (temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
-             config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
-             config.c_puct, config.temperature, config.temperature_mode,
-             config.temperature_threshold, config.temperature_decay_moves,
-             i, config.king_capture_pieces, config.king_can_capture,
-             config.throne_is_hostile, config.throne_enabled, config.board_size,
-             config.network_class.__module__, config.network_class.__name__,
-             config.game_class.__module__, config.game_class.__name__,
-             config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon)
-            for i in range(config.num_games_per_iteration)
-        ]
+        # Create a generator that yields worker arguments indefinitely
+        # This ensures workers always have new games to play
+        def generate_worker_args():
+            game_idx = 0
+            while True:
+                yield (temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
+                       config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
+                       config.c_puct, config.temperature, config.temperature_mode,
+                       config.temperature_threshold, config.temperature_decay_moves,
+                       game_idx, config.king_capture_pieces, config.king_can_capture,
+                       config.throne_is_hostile, config.throne_enabled, config.board_size,
+                       config.network_class.__module__, config.network_class.__name__,
+                       config.game_class.__module__, config.game_class.__name__,
+                       config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon)
+                game_idx += 1
         
         # Play games in parallel
         if config.num_workers > 1:
             if pool is not None:
-                # Use provided persistent pool with starmap
+                # Use provided persistent pool with imap_unordered for dynamic load balancing
+                # Workers continuously play games until we have enough completed games
                 try:
-                    game_results = list(pool.starmap(_play_self_play_game_worker, worker_args, chunksize=1))
+                    game_results = []
+                    completed = 0
+                    # Use imap_unordered with chunksize=1 to get results as soon as they finish
+                    for result in pool.imap_unordered(_play_self_play_game_worker_wrapper, 
+                                                      generate_worker_args(), 
+                                                      chunksize=1):
+                        game_results.append(result)
+                        completed += 1
+                        
+                        # Progress indicator at 25%, 50%, and 75% completion
+                        if completed == config.num_games_per_iteration // 4:  # 25%
+                            print(f"  Progress: {completed}/{config.num_games_per_iteration} games (25%)")
+                        elif completed == config.num_games_per_iteration // 2:  # 50%
+                            print(f"  Progress: {completed}/{config.num_games_per_iteration} games (50%)")
+                        elif completed == 3 * config.num_games_per_iteration // 4:  # 75%
+                            print(f"  Progress: {completed}/{config.num_games_per_iteration} games (75%)")
+                        
+                        # Once we have enough games, terminate remaining workers
+                        if completed >= config.num_games_per_iteration:
+                            print(f"  Reached {config.num_games_per_iteration} games, terminating remaining workers...")
+                            pool.terminate()  # Forcefully kill all workers
+                            pool.join()  # Wait for cleanup
+                            # Recreate the pool for the next iteration
+                            pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
+                            break
                 except Exception as e:
                     # Re-raise to ensure proper error propagation
                     print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
+                    # Clean up pool on error and recreate
+                    try:
+                        pool.terminate()
+                        pool.join()
+                    except Exception:
+                        pass
+                    # Recreate pool for next iteration
+                    pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
                     raise
             else:
                 # Create temporary pool (for backward compatibility)
                 with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
                     try:
-                        game_results = list(temp_pool.starmap(_play_self_play_game_worker, worker_args, chunksize=1))
+                        game_results = []
+                        completed = 0
+                        for result in temp_pool.imap_unordered(_play_self_play_game_worker_wrapper,
+                                                                generate_worker_args(),
+                                                                chunksize=1):
+                            game_results.append(result)
+                            completed += 1
+                            
+                            # Progress indicator at 25%, 50%, and 75% completion
+                            if completed == config.num_games_per_iteration // 4:  # 25%
+                                print(f"  Progress: {completed}/{config.num_games_per_iteration} games (25%)")
+                            elif completed == config.num_games_per_iteration // 2:  # 50%
+                                print(f"  Progress: {completed}/{config.num_games_per_iteration} games (50%)")
+                            elif completed == 3 * config.num_games_per_iteration // 4:  # 75%
+                                print(f"  Progress: {completed}/{config.num_games_per_iteration} games (75%)")
+                            
+                            # Once we have enough games, terminate remaining workers
+                            if completed >= config.num_games_per_iteration:
+                                print(f"  Reached {config.num_games_per_iteration} games, terminating remaining workers...")
+                                temp_pool.terminate()
+                                temp_pool.join()
+                                break
                     except Exception as e:
                         print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
                         raise
         else:
-            # Single-threaded fallback
-            game_results = [_play_self_play_game_worker(*args) for args in worker_args]
+            # Single-threaded fallback - play exactly the requested number of games
+            game_results = []
+            for i in range(config.num_games_per_iteration):
+                args = (temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
+                        config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
+                        config.c_puct, config.temperature, config.temperature_mode,
+                        config.temperature_threshold, config.temperature_decay_moves,
+                        i, config.king_capture_pieces, config.king_can_capture,
+                        config.throne_is_hostile, config.throne_enabled, config.board_size,
+                        config.network_class.__module__, config.network_class.__name__,
+                        config.game_class.__module__, config.game_class.__name__,
+                        config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon)
+                game_results.append(_play_self_play_game_worker(*args))
     finally:
         # Clean up temporary file
         if cleanup_temp_file:
@@ -937,7 +1012,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         print(f"  Terminal eval:     {mcts_timing_totals['terminal_eval']:7.1f}s ({100*mcts_timing_totals['terminal_eval']/total_mcts_time:5.1f}%)")
         print(f"  Total MCTS time:   {total_mcts_time:7.1f}s")
     
-    return buffer, attacker_wins, defender_wins
+    return buffer, attacker_wins, defender_wins, pool
 
 
 # =============================================================================
@@ -2261,7 +2336,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                          c_puct=config.c_puct,
                          device=config.device)
             
-            new_buffer, attacker_game_wins, defender_game_wins = generate_self_play_data(agent, config, pool=worker_pool)
+            new_buffer, attacker_game_wins, defender_game_wins, worker_pool = generate_self_play_data(agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
             
             # Calculate draws from self-play

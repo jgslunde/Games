@@ -13,11 +13,16 @@ Example:
     python play.py model1.pth model2.pth --game hnefatafl --simulations 200
     python play.py model1.pth model2.pth --king-capture-pieces 4 --throne-is-hostile
     python play.py model1.pth model2.pth --num-games 10 --swap-colors  # 20 games total
+    python play.py model1.pth model2.pth --num-games 50 --num-workers 16  # Parallel games
+    python play.py model1.pth model2.pth --time-per-move 1.0  # 1 second per move
+    python play.py model1.pth model2.pth --num-games 100 --num-workers 32 --time-per-move 0.5
 """
 
 import argparse
 import sys
 import torch
+import multiprocessing as mp
+import numpy as np
 
 from brandubh import Brandubh
 from tablut import Tablut
@@ -26,6 +31,126 @@ from network import BrandubhNet
 from network_tablut import TablutNet
 from network_hnefatafl import HnefataflNet
 from agent import Agent
+
+
+def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1_plays_attacker, 
+                              game_name, simulations, king_capture_pieces, king_can_capture,
+                              throne_is_hostile, throne_enabled, time_per_move):
+    """
+    Worker function for playing a single game in a separate process.
+    Returns tuple: (agent1_won, winner_role, move_count)
+    """
+    # Create game environment
+    if game_name == 'brandubh':
+        game_cls = Brandubh
+        network_cls = BrandubhNet
+    elif game_name == 'tablut':
+        game_cls = Tablut
+        network_cls = TablutNet
+    elif game_name == 'hnefatafl':
+        game_cls = Hnefatafl
+        network_cls = HnefataflNet
+    else:
+        raise ValueError(f"Unknown game: {game_name}")
+    
+    game_state = game_cls(
+        king_capture_pieces=king_capture_pieces,
+        king_can_capture=king_can_capture,
+        throne_is_hostile=throne_is_hostile,
+        throne_enabled=throne_enabled
+    )
+    
+    # Load models
+    device = torch.device('cpu')
+    
+    # Load checkpoints
+    checkpoint1 = torch.load(checkpoint1_path, map_location=device, weights_only=False)
+    checkpoint2 = torch.load(checkpoint2_path, map_location=device, weights_only=False)
+    
+    # Extract architecture config from checkpoints
+    if 'config' in checkpoint1:
+        config1 = checkpoint1['config']
+        num_res_blocks1 = config1.get('num_res_blocks', 4)
+        num_channels1 = config1.get('num_channels', 64)
+    else:
+        num_res_blocks1 = checkpoint1.get('num_res_blocks', 4)
+        num_channels1 = checkpoint1.get('num_channels', 64)
+    
+    if 'config' in checkpoint2:
+        config2 = checkpoint2['config']
+        num_res_blocks2 = config2.get('num_res_blocks', 4)
+        num_channels2 = config2.get('num_channels', 64)
+    else:
+        num_res_blocks2 = checkpoint2.get('num_res_blocks', 4)
+        num_channels2 = checkpoint2.get('num_channels', 64)
+    
+    # Create networks with correct architecture
+    network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1).to(device)
+    network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2).to(device)
+    
+    # Load state dicts - handle different checkpoint formats
+    if 'network_state_dict' in checkpoint1:
+        network1.load_state_dict(checkpoint1['network_state_dict'])
+    elif 'model_state_dict' in checkpoint1:
+        network1.load_state_dict(checkpoint1['model_state_dict'])
+    else:
+        network1.load_state_dict(checkpoint1)
+    
+    if 'network_state_dict' in checkpoint2:
+        network2.load_state_dict(checkpoint2['network_state_dict'])
+    elif 'model_state_dict' in checkpoint2:
+        network2.load_state_dict(checkpoint2['model_state_dict'])
+    else:
+        network2.load_state_dict(checkpoint2)
+    
+    network1.eval()
+    network2.eval()
+    
+    # Create agents
+    agent1 = Agent(network1, simulations=simulations, device=device)
+    agent2 = Agent(network2, simulations=simulations, device=device)
+    
+    # Play game
+    move_count = 0
+    max_moves = 200
+    
+    while not game_state.is_terminal() and move_count < max_moves:
+        current_player_is_attacker = (game_state.current_player == 1)
+        
+        # Determine which agent makes the move
+        if current_player_is_attacker == agent1_plays_attacker:
+            current_agent = agent1
+        else:
+            current_agent = agent2
+        
+        # Select move with time limit if specified
+        if time_per_move is not None:
+            move_info = current_agent.select_move_with_time_limit(game_state, time_per_move, temperature=0.0)
+        else:
+            move_info = current_agent.select_move_with_stats(game_state, temperature=0.0)
+        
+        move = move_info['move']
+        game_state = game_state.make_move(move)
+        move_count += 1
+    
+    # Determine winner
+    if game_state.is_terminal():
+        reward = game_state.get_reward()
+        if reward == 1:  # Attacker won
+            winner_role = 'attacker'
+            agent1_won = agent1_plays_attacker
+        elif reward == -1:  # Defender won
+            winner_role = 'defender'
+            agent1_won = not agent1_plays_attacker
+        else:  # Draw
+            winner_role = 'draw'
+            agent1_won = None
+    else:
+        # Max moves reached - consider it a draw
+        winner_role = 'draw'
+        agent1_won = None
+    
+    return (agent1_won, winner_role, move_count)
 
 
 def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, game_class=None):
@@ -93,7 +218,7 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, g
         sys.exit(1)
 
 
-def play_game_between_agents(agent1, agent2, game_class, rules, display=True, temperature=0.0):
+def play_game_between_agents(agent1, agent2, game_class, rules, display=True, temperature=0.0, time_per_move=None):
     """
     Play a game between two AI agents.
     
@@ -104,6 +229,7 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
         rules: Dictionary of game rules
         display: Whether to print the board state
         temperature: Temperature for move selection (0=deterministic)
+        time_per_move: Optional time limit per move in seconds (if None, uses simulations)
     
     Returns:
         winner: 0 for Attackers, 1 for Defenders, None for draw
@@ -120,6 +246,8 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
               f"King can capture={rules['king_can_capture']}, "
               f"Throne hostile={rules['throne_is_hostile']}, "
               f"Throne enabled={rules['throne_enabled']}")
+        if time_per_move is not None:
+            print(f"Time per move: {time_per_move} seconds")
         print("\nInitial board:")
         print(game)
         print("\n")
@@ -128,8 +256,11 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
         # Get current agent
         current_agent = agent1 if game.current_player == 0 else agent2
         
-        # Get move from agent with statistics
-        move, value, visit_prob = current_agent.select_move_with_stats(game, temperature=temperature)
+        # Get move from agent with statistics (using time limit if specified)
+        if time_per_move is not None:
+            move, value, visit_prob = current_agent.select_move_with_time_limit(game, time_per_move, temperature=temperature)
+        else:
+            move, value, visit_prob = current_agent.select_move_with_stats(game, temperature=temperature)
         
         if move is None:
             # No legal moves - opponent wins
@@ -175,7 +306,9 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
     return game.winner, move_count
 
 
-def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True, display=False, temperature=0.0):
+def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True, 
+                        display=False, temperature=0.0, time_per_move=None, num_workers=1,
+                        checkpoint1_path=None, checkpoint2_path=None, game_name=None, simulations=None):
     """
     Play multiple games and collect statistics.
     
@@ -189,6 +322,12 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                          If False, each pairing is played twice (once per color)
         display: Whether to print board state for each game
         temperature: Temperature for move selection (0=deterministic)
+        time_per_move: Optional time limit per move in seconds
+        num_workers: Number of parallel workers (if > 1, uses multiprocessing)
+        checkpoint1_path: Path to checkpoint1 (required for multiprocessing)
+        checkpoint2_path: Path to checkpoint2 (required for multiprocessing)
+        game_name: Name of game variant (required for multiprocessing)
+        simulations: Number of MCTS simulations (required for multiprocessing)
     """
     # Track wins by role and agent
     agent1_attacker_wins = 0
@@ -211,57 +350,131 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
         print(f"\nPlaying {num_games * 2} games (each pairing played twice with colors swapped)...\n")
         games_to_play = num_games * 2
     
-    for i in range(games_to_play):
-        # Determine which agent plays which color
-        if alternate_colors:
-            # Alternate who plays attacker/defender
-            if i % 2 == 0:
-                # Agent1 as attacker, Agent2 as defender
+    # Use multiprocessing if num_workers > 1
+    if num_workers > 1:
+        if checkpoint1_path is None or checkpoint2_path is None or game_name is None or simulations is None:
+            raise ValueError("For multiprocessing, checkpoint paths, game_name, and simulations must be provided")
+        
+        print(f"Using {num_workers} parallel workers...")
+        
+        # Extract rule parameters (only the ones that exist in game classes)
+        king_capture_pieces = rules.get('king_capture_pieces', 2)
+        king_can_capture = rules.get('king_can_capture', True)
+        throne_is_hostile = rules.get('throne_is_hostile', False)
+        throne_enabled = rules.get('throne_enabled', True)
+        
+        # Create list of game configurations
+        game_configs = []
+        for i in range(games_to_play):
+            if alternate_colors:
+                agent1_plays_attacker = (i % 2 == 0)
+            else:
+                agent1_plays_attacker = (i % 2 == 0)
+            
+            game_configs.append((
+                i, checkpoint1_path, checkpoint2_path, agent1_plays_attacker,
+                game_name, simulations, king_capture_pieces, king_can_capture,
+                throne_is_hostile, throne_enabled, time_per_move
+            ))
+        
+        # Play games in parallel
+        with mp.Pool(processes=num_workers) as pool:
+            results = pool.starmap(play_single_game_worker, game_configs)
+        
+        # Process results
+        for i, (agent1_won, winner_role, moves) in enumerate(results):
+            if alternate_colors:
+                agent1_plays_attacker = (i % 2 == 0)
+            else:
+                agent1_plays_attacker = (i % 2 == 0)
+            
+            # Update game counts
+            if agent1_plays_attacker:
                 agent1_attacker_games += 1
                 agent2_defender_games += 1
-                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=display, temperature=temperature)
-                if winner == 0:
-                    agent1_attacker_wins += 1
-                elif winner == 1:
-                    agent2_defender_wins += 1
             else:
-                # Agent2 as attacker, Agent1 as defender
                 agent2_attacker_games += 1
                 agent1_defender_games += 1
-                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=display, temperature=temperature)
-                if winner == 0:
-                    agent2_attacker_wins += 1
-                elif winner == 1:
-                    agent1_defender_wins += 1
-        else:
-            # Play each pairing twice: once with agent1 as attacker, once with agent2 as attacker
-            game_in_pair = i % 2
-            if game_in_pair == 0:
-                # Agent1 as attacker, Agent2 as defender
-                agent1_attacker_games += 1
-                agent2_defender_games += 1
-                winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, display=display, temperature=temperature)
-                if winner == 0:
+            
+            # Update win counts
+            if agent1_won is True:
+                if agent1_plays_attacker:
                     agent1_attacker_wins += 1
-                elif winner == 1:
-                    agent2_defender_wins += 1
-            else:
-                # Agent2 as attacker, Agent1 as defender
-                agent2_attacker_games += 1
-                agent1_defender_games += 1
-                winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, display=display, temperature=temperature)
-                if winner == 0:
-                    agent2_attacker_wins += 1
-                elif winner == 1:
+                else:
                     agent1_defender_wins += 1
-        
-        if winner is None:
-            draws += 1
-        
-        total_moves += moves
-        
-        if (i + 1) % 10 == 0 or games_to_play <= 10:
-            print(f"Completed {i + 1}/{games_to_play} games...")
+            elif agent1_won is False:
+                if agent1_plays_attacker:
+                    agent2_defender_wins += 1
+                else:
+                    agent2_attacker_wins += 1
+            else:
+                draws += 1
+            
+            total_moves += moves
+            
+            if (i + 1) % 10 == 0 or games_to_play <= 10:
+                print(f"Completed {i + 1}/{games_to_play} games...")
+    else:
+        # Sequential game playing (original implementation)
+        for i in range(games_to_play):
+            # Determine which agent plays which color
+            if alternate_colors:
+                # Alternate who plays attacker/defender
+                if i % 2 == 0:
+                    # Agent1 as attacker, Agent2 as defender
+                    agent1_attacker_games += 1
+                    agent2_defender_games += 1
+                    winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, 
+                                                             display=display, temperature=temperature, 
+                                                             time_per_move=time_per_move)
+                    if winner == 0:
+                        agent1_attacker_wins += 1
+                    elif winner == 1:
+                        agent2_defender_wins += 1
+                else:
+                    # Agent2 as attacker, Agent1 as defender
+                    agent2_attacker_games += 1
+                    agent1_defender_games += 1
+                    winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, 
+                                                             display=display, temperature=temperature,
+                                                             time_per_move=time_per_move)
+                    if winner == 0:
+                        agent2_attacker_wins += 1
+                    elif winner == 1:
+                        agent1_defender_wins += 1
+            else:
+                # Play each pairing twice: once with agent1 as attacker, once with agent2 as attacker
+                game_in_pair = i % 2
+                if game_in_pair == 0:
+                    # Agent1 as attacker, Agent2 as defender
+                    agent1_attacker_games += 1
+                    agent2_defender_games += 1
+                    winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, 
+                                                             display=display, temperature=temperature,
+                                                             time_per_move=time_per_move)
+                    if winner == 0:
+                        agent1_attacker_wins += 1
+                    elif winner == 1:
+                        agent2_defender_wins += 1
+                else:
+                    # Agent2 as attacker, Agent1 as defender
+                    agent2_attacker_games += 1
+                    agent1_defender_games += 1
+                    winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, 
+                                                             display=display, temperature=temperature,
+                                                             time_per_move=time_per_move)
+                    if winner == 0:
+                        agent2_attacker_wins += 1
+                    elif winner == 1:
+                        agent1_defender_wins += 1
+            
+            if winner is None:
+                draws += 1
+            
+            total_moves += moves
+            
+            if (i + 1) % 10 == 0 or games_to_play <= 10:
+                print(f"Completed {i + 1}/{games_to_play} games...")
     
     # Calculate overall statistics
     agent1_wins = agent1_attacker_wins + agent1_defender_wins
@@ -295,6 +508,38 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
         print(f"  As Defender: {agent2_defender_wins}/{agent2_defender_games} ({100 * agent2_defender_wins / agent2_defender_games:.1f}%)")
     
     print(f"\nAverage game length: {total_moves / games_to_play:.1f} moves")
+    
+    # Calculate ELO difference using expected score formula
+    # E(A) = 1 / (1 + 10^((R_B - R_A)/400))
+    # If agent1 scored S out of N games, then S/N = E(A)
+    # Solving for (R_A - R_B): ELO_diff = 400 * log10(S / (N - S))
+    
+    agent1_score = agent1_wins + 0.5 * draws  # Count draws as 0.5
+    agent1_games = games_to_play
+    
+    if agent1_score == 0 or agent1_score == agent1_games:
+        # Extreme cases - use approximation
+        if agent1_score == 0:
+            elo_diff = -800  # Effectively lost all games
+            print(f"\nELO Difference: {elo_diff:.1f} (Agent 1 vs Agent 2)")
+            print(f"  Agent 1 is approximately {abs(elo_diff):.0f} ELO points weaker")
+        else:
+            elo_diff = 800  # Effectively won all games
+            print(f"\nELO Difference: {elo_diff:.1f} (Agent 1 vs Agent 2)")
+            print(f"  Agent 1 is approximately {elo_diff:.0f} ELO points stronger")
+    else:
+        # Normal case
+        expected_score = agent1_score / agent1_games
+        elo_diff = 400 * np.log10(expected_score / (1 - expected_score))
+        
+        print(f"\nELO Difference: {elo_diff:.1f} (Agent 1 vs Agent 2)")
+        if abs(elo_diff) < 5:
+            print(f"  Agents are approximately equal in strength")
+        elif elo_diff > 0:
+            print(f"  Agent 1 is approximately {elo_diff:.0f} ELO points stronger")
+        else:
+            print(f"  Agent 1 is approximately {abs(elo_diff):.0f} ELO points weaker")
+    
     print("=" * 50)
 
 
@@ -318,6 +563,10 @@ def main():
                        help="Dirichlet alpha parameter (default: 0.3)")
     parser.add_argument("--num-games", type=int, default=1,
                        help="Number of games to play (default: 1).")
+    parser.add_argument("--num-workers", type=int, default=1,
+                       help="Number of parallel workers for playing multiple games (default: 1, sequential)")
+    parser.add_argument("--time-per-move", type=float, default=None,
+                       help="Time limit per move in seconds (overrides --simulations if specified)")
     parser.add_argument("--display", action="store_true",
                        help="Display board state during play (default: shown for single game, hidden for multiple games)")
     parser.add_argument("--swap-colors", action="store_true",
@@ -422,14 +671,21 @@ def main():
     if args.num_games == 1 and not args.swap_colors:
         # Single game - display by default (unless --display explicitly set to override)
         display = args.display if args.display else True
-        play_game_between_agents(agent1, agent2, game_class, rules, display=display, temperature=args.temperature)
+        play_game_between_agents(agent1, agent2, game_class, rules, display=display, 
+                                temperature=args.temperature, time_per_move=args.time_per_move)
     else:
         # Multiple games - hide display by default (unless --display explicitly set)
         play_multiple_games(agent1, agent2, game_class, rules, 
                           num_games=args.num_games, 
                           alternate_colors=not args.swap_colors,
                           display=args.display,
-                          temperature=args.temperature)
+                          temperature=args.temperature,
+                          time_per_move=args.time_per_move,
+                          num_workers=args.num_workers,
+                          checkpoint1_path=args.checkpoint1,
+                          checkpoint2_path=args.checkpoint2,
+                          game_name=args.game,
+                          simulations=args.simulations)
 
 
 if __name__ == "__main__":

@@ -105,6 +105,77 @@ class Agent:
         
         return move, value, visit_prob
     
+    def select_move_with_time_limit(self, game, time_limit: float, temperature: float = 0.0):
+        """
+        Select a move using a time limit instead of fixed simulation count.
+        
+        Args:
+            game: current game state
+            time_limit: time limit in seconds for MCTS search
+            temperature: sampling temperature (0 = deterministic)
+        
+        Returns:
+            move: (from_row, from_col, to_row, to_col)
+            value: network value estimate from current player's perspective
+            visit_prob: proportion of MCTS visits to selected move
+        """
+        import time
+        
+        # Get legal moves - if none, return immediately
+        legal_moves = game.get_legal_moves()
+        if not legal_moves:
+            return None, 0.0, 0.0
+        
+        # Run MCTS for the specified time limit
+        start_time = time.time()
+        simulations = 0
+        
+        # Initialize MCTS tree
+        self.mcts.root = self.mcts.select_root(game)
+        
+        # Run simulations until time limit
+        while time.time() - start_time < time_limit:
+            self.mcts._run_single_simulation(game)
+            simulations += 1
+            
+            # Check time every 10 simulations to reduce overhead
+            if simulations % 10 == 0:
+                if time.time() - start_time >= time_limit:
+                    break
+        
+        # Get visit counts and select move
+        visit_counts = {}
+        for move, edge in self.mcts.root.children.items():
+            visit_counts[move] = edge.visit_count
+        
+        if not visit_counts:
+            # Fallback to random legal move
+            move = legal_moves[0]
+            return move, 0.0, 0.0
+        
+        # Calculate probabilities
+        total_visits = sum(visit_counts.values())
+        visit_probs = {m: v / total_visits for m, v in visit_counts.items()}
+        
+        moves = list(visit_probs.keys())
+        probs = np.array(list(visit_probs.values()))
+        
+        if temperature == 0:
+            # Choose most visited
+            move_idx = np.argmax(probs)
+            move = moves[move_idx]
+        else:
+            # Sample proportionally to visit counts
+            move_idx = np.random.choice(len(moves), p=probs)
+            move = moves[move_idx]
+        
+        visit_prob = probs[move_idx]
+        
+        # Get value estimate from root node
+        value = self.mcts.root.mean_value if self.mcts.root else 0.0
+        
+        return move, value, visit_prob
+    
     def load_weights(self, path: str):
         """Load network weights from file."""
         self.network.load_state_dict(torch.load(path, map_location=self.device))
