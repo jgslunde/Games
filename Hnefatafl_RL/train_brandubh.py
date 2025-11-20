@@ -93,6 +93,10 @@ DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 DEFAULT_C_PUCT = 1.4
 DEFAULT_FPU_VALUE = -1.0  # First Play Urgency - Q-value for unvisited nodes
 
+# Dynamic simulation balancing
+DEFAULT_USE_DYNAMIC_SIM_BALANCING = True  # Dynamically adjust simulation counts to target 50% win rate
+DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE = 0.2  # Fraction of win rate difference used for adjustment
+
 # Dirichlet noise (exploration during self-play)
 DEFAULT_ADD_DIRICHLET_NOISE = True  # Enable Dirichlet noise in self-play for exploration
 DEFAULT_DIRICHLET_ALPHA = 0.3  # Concentration parameter (lower = more concentrated)
@@ -186,6 +190,15 @@ if __name__ == "__main__":
                        help=f"MCTS exploration constant (default: {DEFAULT_C_PUCT})")
     parser.add_argument("--fpu-value", type=float, default=DEFAULT_FPU_VALUE,
                        help=f"First Play Urgency - Q-value for unvisited nodes (default: {DEFAULT_FPU_VALUE})")
+    
+    # Dynamic simulation balancing
+    parser.add_argument("--use-dynamic-sim-balancing", action="store_true", default=DEFAULT_USE_DYNAMIC_SIM_BALANCING,
+                       help=f"Dynamically adjust simulation counts to target 50%% win rate (default: {DEFAULT_USE_DYNAMIC_SIM_BALANCING})")
+    parser.add_argument("--no-dynamic-sim-balancing", action="store_false", dest="use_dynamic_sim_balancing",
+                       help="Disable dynamic simulation balancing (use fixed counts)")
+    parser.add_argument("--dynamic-sim-adjustment-rate", type=float, default=DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE,
+                       help=f"Fraction of win rate difference used for simulation adjustment (default: {DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE})")
+    
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
                        help=f"Sampling temperature for move selection in self-play (default: {DEFAULT_TEMPERATURE})")
     parser.add_argument("--temperature-mode", type=str, default=DEFAULT_TEMPERATURE_MODE, 
@@ -318,6 +331,8 @@ if __name__ == "__main__":
     # MCTS parameters
     config.c_puct = args.c_puct
     config.fpu_value = args.fpu_value
+    config.use_dynamic_sim_balancing = args.use_dynamic_sim_balancing
+    config.dynamic_sim_adjustment_rate = args.dynamic_sim_adjustment_rate
     config.temperature = args.temperature
     config.temperature_mode = args.temperature_mode
     config.temperature_threshold = args.temperature_threshold

@@ -82,6 +82,10 @@ class TrainingConfig:
     fpu_value = -1.0                  # First Play Urgency: Q-value for unvisited nodes (default: -1.0, conservative)
     num_workers = mp.cpu_count()      # Number of parallel workers (default: all CPUs)
     
+    # Dynamic simulation balancing (target 50% win rate)
+    use_dynamic_sim_balancing = False # Dynamically adjust attacker/defender simulation counts to balance win rates
+    dynamic_sim_adjustment_rate = 0.1 # Fraction of win rate difference used for adjustment (default: 0.1 = 10%)
+    
     # Temperature (exploration during self-play)
     temperature = 1.0                 # Sampling temperature for moves
     temperature_mode = "king"         # "fixed": drop at threshold, "king": drop when king leaves, "decay": linear decay
@@ -388,6 +392,102 @@ class WinRateTracker:
         if total == 0:
             return 0.5, 0.5
         return self.attacker_wins_smooth / total, self.defender_wins_smooth / total
+
+
+class SimulationBalancer:
+    """
+    Dynamically adjusts MCTS simulation counts for attacker and defender
+    to balance win rates towards 50%.
+    
+    The algorithm maintains the total simulation count constant while
+    redistributing simulations based on win rate imbalance.
+    """
+    
+    def __init__(self, initial_attacker_sims: int, initial_defender_sims: int, 
+                 adjustment_rate: float = 0.1):
+        """
+        Args:
+            initial_attacker_sims: Starting simulation count for attacker
+            initial_defender_sims: Starting simulation count for defender
+            adjustment_rate: Fraction of win rate difference to apply (e.g., 0.1 = 10%)
+        """
+        self.total_sims = initial_attacker_sims + initial_defender_sims
+        self.attacker_sims = initial_attacker_sims
+        self.defender_sims = initial_defender_sims
+        self.adjustment_rate = adjustment_rate
+        
+        # Track history for debugging
+        self.history = []
+    
+    def update(self, attacker_wins: int, defender_wins: int):
+        """
+        Update simulation counts based on win rates.
+        
+        Algorithm: For a win rate difference of X%, take adjustment_rate * X% 
+        of simulations from the winning side and give to the losing side.
+        
+        Example: If defenders won 75% and attackers 25%, with 500 sims each:
+        - Win rate difference: 75% - 25% = 50%
+        - Transfer: 0.1 * 50% * 500 = 25 simulations
+        - New counts: attacker = 525, defender = 475
+        
+        Args:
+            attacker_wins: Number of attacker wins
+            defender_wins: Number of defender wins
+        """
+        total_games = attacker_wins + defender_wins
+        
+        if total_games == 0:
+            return  # No data to adjust with
+        
+        # Calculate win rates
+        attacker_rate = attacker_wins / total_games
+        defender_rate = defender_wins / total_games
+        
+        # Calculate win rate difference (as decimal, e.g., 0.50 for 50%)
+        win_rate_diff = abs(defender_rate - attacker_rate)
+        
+        # Calculate how many simulations to transfer
+        # Transfer = adjustment_rate * win_rate_diff * total_sims / 2
+        # (divide by 2 because we're taking from one side and giving to the other)
+        transfer_amount = self.adjustment_rate * win_rate_diff * self.total_sims / 2
+        
+        # Determine direction: if defenders are winning more, give sims to attackers
+        if defender_rate > attacker_rate:
+            # Transfer from defender to attacker
+            self.attacker_sims += transfer_amount
+            self.defender_sims -= transfer_amount
+        else:
+            # Transfer from attacker to defender
+            self.defender_sims += transfer_amount
+            self.attacker_sims -= transfer_amount
+        
+        # Ensure we maintain the total and don't go below minimum (at least 1 sim each)
+        self.attacker_sims = max(1, min(self.total_sims - 1, self.attacker_sims))
+        self.defender_sims = self.total_sims - self.attacker_sims
+        
+        # Round to integers for practical use
+        self.attacker_sims = int(round(self.attacker_sims))
+        self.defender_sims = int(round(self.defender_sims))
+        
+        # Record history
+        self.history.append({
+            'attacker_wins': attacker_wins,
+            'defender_wins': defender_wins,
+            'attacker_rate': attacker_rate,
+            'defender_rate': defender_rate,
+            'attacker_sims': self.attacker_sims,
+            'defender_sims': self.defender_sims,
+        })
+    
+    def get_simulation_counts(self) -> Tuple[int, int]:
+        """
+        Get current simulation counts.
+        
+        Returns:
+            (attacker_sims, defender_sims) tuple
+        """
+        return self.attacker_sims, self.defender_sims
 
 
 # =============================================================================
@@ -833,7 +933,8 @@ def play_self_play_game(agent: Agent, config: TrainingConfig) -> Dict:
     }
 
 
-def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None) -> Tuple[ReplayBuffer, int, int, Any]:
+def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None,
+                           attacker_sims: int = None, defender_sims: int = None) -> Tuple[ReplayBuffer, int, int, Any]:
     """
     Generate self-play games and store in replay buffer.
     Uses multiprocessing to parallelize game generation.
@@ -843,6 +944,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         config: Training configuration
         pool: Optional multiprocessing pool to use (if None, creates temporary pool)
         temp_network_path: Path to temporary network file (avoids pickling large tensors)
+        attacker_sims: Override for attacker simulation count (uses config value if None)
+        defender_sims: Override for defender simulation count (uses config value if None)
     
     Returns:
         Tuple of (buffer, attacker_wins, defender_wins, pool) where:
@@ -853,7 +956,13 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
     """
     buffer = ReplayBuffer(config.replay_buffer_size)
     
+    # Use provided simulation counts or fall back to config
+    num_sims_attacker = attacker_sims if attacker_sims is not None else config.num_mcts_sims_attacker
+    num_sims_defender = defender_sims if defender_sims is not None else config.num_mcts_sims_defender
+    
     print(f"Generating {config.num_games_per_iteration} self-play games using {config.num_workers} workers...")
+    if attacker_sims is not None or defender_sims is not None:
+        print(f"  Using dynamic simulation counts: Attacker {num_sims_attacker}, Defender {num_sims_defender}")
     
     # Save network to temporary file to avoid pickling issues with many workers
     import tempfile
@@ -883,7 +992,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
             game_idx = 0
             while True:
                 yield (temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
-                       config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
+                       num_sims_attacker, num_sims_defender,
                        config.c_puct, config.temperature, config.temperature_mode,
                        config.temperature_threshold, config.temperature_decay_moves,
                        game_idx, config.king_capture_pieces, config.king_can_capture,
@@ -979,7 +1088,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
             game_results = []
             for i in range(config.num_games_per_iteration):
                 args = (temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
-                        config.num_mcts_sims_attacker, config.num_mcts_sims_defender,
+                        num_sims_attacker, num_sims_defender,
                         config.c_puct, config.temperature, config.temperature_mode,
                         config.temperature_threshold, config.temperature_decay_moves,
                         i, config.king_capture_pieces, config.king_can_capture,
@@ -2284,6 +2393,20 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         win_rate_tracker = None
         print(f"Using static loss boosting (attacker={config.attacker_win_loss_boost}x)")
     
+    # Initialize simulation balancer for dynamic MCTS simulation adjustment
+    if config.use_dynamic_sim_balancing:
+        sim_balancer = SimulationBalancer(
+            initial_attacker_sims=config.num_mcts_sims_attacker,
+            initial_defender_sims=config.num_mcts_sims_defender,
+            adjustment_rate=config.dynamic_sim_adjustment_rate
+        )
+        print(f"Using dynamic simulation balancing (adjustment_rate={config.dynamic_sim_adjustment_rate}, "
+              f"total_sims={config.num_mcts_sims_attacker + config.num_mcts_sims_defender})")
+    else:
+        sim_balancer = None
+        print(f"Using fixed simulation counts (attacker={config.num_mcts_sims_attacker}, "
+              f"defender={config.num_mcts_sims_defender})")
+    
     # ELO tracking - cumulative ELO relative to initial random network
     cumulative_elo = 0.0  # Start at 0 (random network baseline)
     
@@ -2444,12 +2567,26 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                          c_puct=config.c_puct,
                          device=config.device)
             
-            new_buffer, attacker_game_wins, defender_game_wins, worker_pool = generate_self_play_data(agent, config, pool=worker_pool)
+            # Get current simulation counts (dynamic or static)
+            if sim_balancer is not None:
+                attacker_sims, defender_sims = sim_balancer.get_simulation_counts()
+                new_buffer, attacker_game_wins, defender_game_wins, worker_pool = generate_self_play_data(
+                    agent, config, pool=worker_pool, attacker_sims=attacker_sims, defender_sims=defender_sims)
+            else:
+                new_buffer, attacker_game_wins, defender_game_wins, worker_pool = generate_self_play_data(
+                    agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
             
             # Calculate draws from self-play
             total_games = config.num_games_per_iteration
             draws = total_games - attacker_game_wins - defender_game_wins
+            
+            # Update simulation balancer based on win rates
+            if sim_balancer is not None:
+                sim_balancer.update(attacker_game_wins, defender_game_wins)
+                new_attacker_sims, new_defender_sims = sim_balancer.get_simulation_counts()
+                print(f"Simulation counts adjusted: Attacker {attacker_sims} -> {new_attacker_sims}, "
+                      f"Defender {defender_sims} -> {new_defender_sims}")
             
             # Update win rate tracker with actual game results
             if config.use_dynamic_boosting:
