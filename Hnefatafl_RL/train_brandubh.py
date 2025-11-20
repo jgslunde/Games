@@ -65,12 +65,12 @@ DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 16  # For "decay" mode
 
 # Network architecture
 DEFAULT_RES_BLOCKS = 6
-DEFAULT_CHANNELS = 96
-DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 64
+DEFAULT_CHANNELS = 48
+DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 256
 
 # Replay buffer
 DEFAULT_REPLAY_BUFFER_SIZE = 6_000_000
-DEFAULT_MIN_BUFFER_SIZE = 600_000 # 10*DEFAULT_BATCH_SIZE
+DEFAULT_MIN_BUFFER_SIZE = 200_000 # 10*DEFAULT_BATCH_SIZE
 DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
 
 # Learning rate decay and regularization
@@ -91,6 +91,7 @@ DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 
 # MCTS exploration
 DEFAULT_C_PUCT = 1.4
+DEFAULT_FPU_VALUE = -1.0  # First Play Urgency - Q-value for unvisited nodes
 
 # Dirichlet noise (exploration during self-play)
 DEFAULT_ADD_DIRICHLET_NOISE = True  # Enable Dirichlet noise in self-play for exploration
@@ -183,6 +184,8 @@ if __name__ == "__main__":
     # MCTS parameters
     parser.add_argument("--c-puct", type=float, default=DEFAULT_C_PUCT,
                        help=f"MCTS exploration constant (default: {DEFAULT_C_PUCT})")
+    parser.add_argument("--fpu-value", type=float, default=DEFAULT_FPU_VALUE,
+                       help=f"First Play Urgency - Q-value for unvisited nodes (default: {DEFAULT_FPU_VALUE})")
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
                        help=f"Sampling temperature for move selection in self-play (default: {DEFAULT_TEMPERATURE})")
     parser.add_argument("--temperature-mode", type=str, default=DEFAULT_TEMPERATURE_MODE, 
@@ -314,6 +317,7 @@ if __name__ == "__main__":
     
     # MCTS parameters
     config.c_puct = args.c_puct
+    config.fpu_value = args.fpu_value
     config.temperature = args.temperature
     config.temperature_mode = args.temperature_mode
     config.temperature_threshold = args.temperature_threshold

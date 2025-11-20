@@ -79,6 +79,7 @@ class TrainingConfig:
     num_mcts_sims_attacker = 100      # MCTS simulations for attacker in self-play
     num_mcts_sims_defender = 100      # MCTS simulations for defender in self-play
     c_puct = 1.4                      # MCTS exploration constant
+    fpu_value = -1.0                  # First Play Urgency: Q-value for unvisited nodes (default: -1.0, conservative)
     num_workers = mp.cpu_count()      # Number of parallel workers (default: all CPUs)
     
     # Temperature (exploration during self-play)
@@ -502,7 +503,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                                 temperature_threshold, temperature_decay_moves, game_idx,
                                 king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
                                 network_module, network_class_name, game_module, game_class_name,
-                                add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, temp_dir=None):
+                                add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, fpu_value, temp_dir=None):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -532,6 +533,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         add_dirichlet_noise: Whether to add Dirichlet noise for exploration
         dirichlet_alpha: Concentration parameter for Dirichlet noise
         dirichlet_epsilon: Weight of Dirichlet noise (0-1)
+        fpu_value: First Play Urgency - Q-value for unvisited nodes
     
     Returns:
         dict with game data and MCTS timing information
@@ -600,10 +602,12 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
         mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu', 
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
-                            dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass)
+                            dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
+                            fpu_value=fpu_value)
         mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu',
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
-                            dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass)
+                            dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
+                            fpu_value=fpu_value)
         mcts_attacker.reset_timing_stats()
         mcts_defender.reset_timing_stats()
         
@@ -887,7 +891,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                        config.network_class.__module__, config.network_class.__name__,
                        config.game_class.__module__, config.game_class.__name__,
                        config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
-                       config.temp_dir)
+                       config.fpu_value, config.temp_dir)
                 game_idx += 1
         
         # Play games in parallel
@@ -983,7 +987,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                         config.network_class.__module__, config.network_class.__name__,
                         config.game_class.__module__, config.game_class.__name__,
                         config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
-                        config.temp_dir)
+                        config.fpu_value, config.temp_dir)
                 game_results.append(_play_self_play_game_worker(*args))
     finally:
         # Clean up temporary file
@@ -1645,7 +1649,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                              num_res_blocks, num_channels, value_head_hidden_size, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker,
                              network_module, network_class_name, game_module, game_class_name,
-                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, temp_dir=None):
+                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_value, temp_dir=None):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1669,6 +1673,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         temperature_mode: "fixed", "king", or "decay"
         temperature_threshold: Move number for temperature drop (for "fixed" mode)
         temperature_decay_moves: Number of moves for linear decay (for "decay" mode)
+        fpu_value: First Play Urgency - Q-value for unvisited nodes
     
     Returns:
         1.0 if new network wins, 0.5 if draw, 0.0 if new network loses
@@ -1750,10 +1755,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     new_agent = Agent(new_network, num_simulations=new_sims,
                       c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
-                      move_encoder_class=MoveEncoderClass)
+                      move_encoder_class=MoveEncoderClass, fpu_value=fpu_value)
     old_agent = Agent(old_network, num_simulations=old_sims,
                       c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
-                      move_encoder_class=MoveEncoderClass)
+                      move_encoder_class=MoveEncoderClass, fpu_value=fpu_value)
     
     # Play game
     if new_plays_attacker:
@@ -1863,6 +1868,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_mode=config.eval_temperature_mode,
             temperature_threshold=config.eval_temperature_threshold,
             temperature_decay_moves=config.eval_temperature_decay_moves,
+            fpu_value=config.fpu_value,
             temp_dir=config.temp_dir
         )
         
@@ -1887,6 +1893,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_mode=config.eval_temperature_mode,
             temperature_threshold=config.eval_temperature_threshold,
             temperature_decay_moves=config.eval_temperature_decay_moves,
+            fpu_value=config.fpu_value,
             temp_dir=config.temp_dir
         )
         

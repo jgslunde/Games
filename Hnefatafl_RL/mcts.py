@@ -86,7 +86,7 @@ class MCTSNode:
         
         self._is_expanded = True
     
-    def select_child(self, c_puct: float = 1.4) -> Tuple[Tuple, 'MCTSNode']:
+    def select_child(self, c_puct: float = 1.4, fpu_value: float = 0.0) -> Tuple[Tuple, 'MCTSNode']:
         """
         Select best child using PUCT algorithm.
         Lazily initializes child game state on first selection.
@@ -95,6 +95,7 @@ class MCTSNode:
         
         Args:
             c_puct: exploration constant
+            fpu_value: First Play Urgency - Q-value for unvisited nodes
         
         Returns:
             (action, child_node)
@@ -108,7 +109,7 @@ class MCTSNode:
         
         for action, child in self.children.items():
             # Q value (from child's perspective, so negate for parent)
-            q_value = -child.mean_value if child.visit_count > 0 else 0
+            q_value = -child.mean_value if child.visit_count > 0 else fpu_value
             
             # U value (exploration bonus)
             u_value = c_puct * child.prior * sqrt_parent_visits / (1 + child.visit_count)
@@ -178,7 +179,7 @@ class MCTS:
     def __init__(self, network, num_simulations: int = 100, c_puct: float = 1.4, 
                  device: str = 'cpu', dirichlet_alpha: float = 0.3, 
                  dirichlet_epsilon: float = 0.25, add_dirichlet_noise: bool = False,
-                 move_encoder_class=None):
+                 move_encoder_class=None, fpu_value: float = -1.0):
         """
         Initialize MCTS.
         
@@ -192,6 +193,7 @@ class MCTS:
             add_dirichlet_noise: whether to add exploration noise
             move_encoder_class: MoveEncoder class for encoding/decoding moves
                                (if None, imports from network module for backward compatibility)
+            fpu_value: First Play Urgency - Q-value for unvisited nodes (default: -1.0)
         """
         self.network = network
         self.num_simulations = num_simulations
@@ -201,6 +203,7 @@ class MCTS:
         self.dirichlet_epsilon = dirichlet_epsilon
         self.add_dirichlet_noise = add_dirichlet_noise
         self.move_encoder_class = move_encoder_class
+        self.fpu_value = fpu_value
         
         # Performance tracking
         self.timing_stats = {
@@ -252,7 +255,7 @@ class MCTS:
             # Selection: traverse tree until leaf
             t0 = time.perf_counter()
             while not node.is_leaf() and not node.is_terminal():
-                action, node = node.select_child(self.c_puct)
+                action, node = node.select_child(self.c_puct, self.fpu_value)
                 search_path.append(node)
             self.timing_stats['selection'] += time.perf_counter() - t0
             
