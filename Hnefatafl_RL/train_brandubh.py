@@ -38,10 +38,10 @@ def temperature_threshold_type(value):
 
 DEFAULT_ITERATIONS = 1000
 DEFAULT_GAMES = 512
-DEFAULT_SIMS_ATTACKER_SELFPLAY = 800
-DEFAULT_SIMS_DEFENDER_SELFPLAY = 800
-DEFAULT_SIMS_ATTACKER_EVAL = 800
-DEFAULT_SIMS_DEFENDER_EVAL = 800
+DEFAULT_SIMS_ATTACKER_SELFPLAY = 600
+DEFAULT_SIMS_DEFENDER_SELFPLAY = 1600
+DEFAULT_SIMS_ATTACKER_EVAL = 600
+DEFAULT_SIMS_DEFENDER_EVAL = 1600
 DEFAULT_BATCH_SIZE = 512
 DEFAULT_LEARNING_RATE = 1e-3*sqrt(DEFAULT_BATCH_SIZE/256)
 DEFAULT_EPOCHS = 10
@@ -53,7 +53,7 @@ DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
 
 # Temperature parameters
 DEFAULT_TEMPERATURE = 1.0
-DEFAULT_TEMPERATURE_MODE = "king"  # "fixed", "king", or "decay"
+DEFAULT_TEMPERATURE_MODE = "decay"  # "fixed", "king", or "decay"
 DEFAULT_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
 DEFAULT_TEMPERATURE_DECAY_MOVES = 16  # For "decay" mode
 
@@ -65,12 +65,12 @@ DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 16  # For "decay" mode
 
 # Network architecture
 DEFAULT_RES_BLOCKS = 6
-DEFAULT_CHANNELS = 48
-DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 256
+DEFAULT_CHANNELS = 96
+DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 64
 
 # Replay buffer
-DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
-DEFAULT_MIN_BUFFER_SIZE = 200_000 # 10*DEFAULT_BATCH_SIZE
+DEFAULT_REPLAY_BUFFER_SIZE = 6_000_000
+DEFAULT_MIN_BUFFER_SIZE = 600_000 # 10*DEFAULT_BATCH_SIZE
 DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
 
 # Learning rate decay and regularization
@@ -255,6 +255,8 @@ if __name__ == "__main__":
                        help=f"Number of parallel workers (default: {DEFAULT_NUM_WORKERS} CPUs)")
     parser.add_argument("--device", type=str, default=DEFAULT_DEVICE,
                        help="Device (cuda/cpu, default: auto-detect)")
+    parser.add_argument("--temp-dir", type=str, default=None,
+                       help="Temporary directory for PyTorch cache files (default: system /tmp, or use /dev/shm for RAM disk)")
     
     # Checkpointing
     parser.add_argument("--save-frequency", type=int, default=DEFAULT_SAVE_FREQUENCY,
@@ -348,6 +350,7 @@ if __name__ == "__main__":
     config.num_workers = args.num_workers
     if args.device is not None:
         config.device = args.device
+    config.temp_dir = args.temp_dir
     
     # Checkpointing
     config.save_frequency = args.save_frequency

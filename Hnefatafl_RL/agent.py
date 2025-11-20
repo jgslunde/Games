@@ -257,18 +257,9 @@ def play_game(agent1, agent2, game_class, display: bool = True,
             # Drop temperature after king leaves throne
             if not king_left_throne:
                 # Check if king is still on throne
-                king_pos = None
-                for r in range(game.board_size):
-                    for c in range(game.board_size):
-                        if game.board[r, c] == 2:  # King
-                            king_pos = (r, c)
-                            break
-                    if king_pos:
-                        break
-                
-                # Check if king is on throne (center square)
-                throne_pos = (game.board_size // 2, game.board_size // 2)
-                if king_pos != throne_pos:
+                # KING = 3 in all Tafl variants (Brandubh, Tablut, Hnefatafl)
+                king_on_throne = (game.board[game.throne] == 3)
+                if not king_on_throne:
                     king_left_throne = True
             
             temp = 0.0 if king_left_throne else temperature

@@ -35,122 +35,142 @@ from agent import Agent
 
 def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1_plays_attacker, 
                               game_name, simulations, king_capture_pieces, king_can_capture,
-                              throne_is_hostile, throne_enabled, time_per_move):
+                              throne_is_hostile, throne_enabled, time_per_move, temperature):
     """
     Worker function for playing a single game in a separate process.
     Returns tuple: (agent1_won, winner_role, move_count)
     """
-    # Create game environment
-    if game_name == 'brandubh':
-        game_cls = Brandubh
-        network_cls = BrandubhNet
-    elif game_name == 'tablut':
-        game_cls = Tablut
-        network_cls = TablutNet
-    elif game_name == 'hnefatafl':
-        game_cls = Hnefatafl
-        network_cls = HnefataflNet
-    else:
-        raise ValueError(f"Unknown game: {game_name}")
-    
-    game_state = game_cls(
-        king_capture_pieces=king_capture_pieces,
-        king_can_capture=king_can_capture,
-        throne_is_hostile=throne_is_hostile,
-        throne_enabled=throne_enabled
-    )
-    
-    # Load models
-    device = torch.device('cpu')
-    
-    # Load checkpoints
-    checkpoint1 = torch.load(checkpoint1_path, map_location=device, weights_only=False)
-    checkpoint2 = torch.load(checkpoint2_path, map_location=device, weights_only=False)
-    
-    # Extract architecture config from checkpoints
-    if 'config' in checkpoint1:
-        config1 = checkpoint1['config']
-        num_res_blocks1 = config1.get('num_res_blocks', 4)
-        num_channels1 = config1.get('num_channels', 64)
-    else:
-        num_res_blocks1 = checkpoint1.get('num_res_blocks', 4)
-        num_channels1 = checkpoint1.get('num_channels', 64)
-    
-    if 'config' in checkpoint2:
-        config2 = checkpoint2['config']
-        num_res_blocks2 = config2.get('num_res_blocks', 4)
-        num_channels2 = config2.get('num_channels', 64)
-    else:
-        num_res_blocks2 = checkpoint2.get('num_res_blocks', 4)
-        num_channels2 = checkpoint2.get('num_channels', 64)
-    
-    # Create networks with correct architecture
-    network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1).to(device)
-    network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2).to(device)
-    
-    # Load state dicts - handle different checkpoint formats
-    if 'network_state_dict' in checkpoint1:
-        network1.load_state_dict(checkpoint1['network_state_dict'])
-    elif 'model_state_dict' in checkpoint1:
-        network1.load_state_dict(checkpoint1['model_state_dict'])
-    else:
-        network1.load_state_dict(checkpoint1)
-    
-    if 'network_state_dict' in checkpoint2:
-        network2.load_state_dict(checkpoint2['network_state_dict'])
-    elif 'model_state_dict' in checkpoint2:
-        network2.load_state_dict(checkpoint2['model_state_dict'])
-    else:
-        network2.load_state_dict(checkpoint2)
-    
-    network1.eval()
-    network2.eval()
-    
-    # Create agents
-    agent1 = Agent(network1, simulations=simulations, device=device)
-    agent2 = Agent(network2, simulations=simulations, device=device)
-    
-    # Play game
-    move_count = 0
-    max_moves = 200
-    
-    while not game_state.is_terminal() and move_count < max_moves:
-        current_player_is_attacker = (game_state.current_player == 1)
+    try:
+        # Set torch to use only 1 thread per worker to avoid conflicts
+        # This MUST be done before creating any torch objects
+        torch.set_num_threads(1)
         
-        # Determine which agent makes the move
-        if current_player_is_attacker == agent1_plays_attacker:
-            current_agent = agent1
+        # Create game environment
+        if game_name == 'brandubh':
+            game_cls = Brandubh
+            network_cls = BrandubhNet
+        elif game_name == 'tablut':
+            game_cls = Tablut
+            network_cls = TablutNet
+        elif game_name == 'hnefatafl':
+            game_cls = Hnefatafl
+            network_cls = HnefataflNet
         else:
-            current_agent = agent2
+            raise ValueError(f"Unknown game: {game_name}")
         
-        # Select move with time limit if specified
-        if time_per_move is not None:
-            move_info = current_agent.select_move_with_time_limit(game_state, time_per_move, temperature=0.0)
+        game_state = game_cls(
+            king_capture_pieces=king_capture_pieces,
+            king_can_capture=king_can_capture,
+            throne_is_hostile=throne_is_hostile,
+            throne_enabled=throne_enabled
+        )
+        
+        # Load models
+        device = torch.device('cpu')
+        
+        # Load checkpoints
+        checkpoint1 = torch.load(checkpoint1_path, map_location=device, weights_only=False)
+        checkpoint2 = torch.load(checkpoint2_path, map_location=device, weights_only=False)
+        
+        # Extract architecture config from checkpoints
+        if 'config' in checkpoint1:
+            config1 = checkpoint1['config']
+            num_res_blocks1 = config1.get('num_res_blocks', 4)
+            num_channels1 = config1.get('num_channels', 64)
         else:
-            move_info = current_agent.select_move_with_stats(game_state, temperature=0.0)
+            num_res_blocks1 = checkpoint1.get('num_res_blocks', 4)
+            num_channels1 = checkpoint1.get('num_channels', 64)
         
-        move = move_info['move']
-        game_state = game_state.make_move(move)
-        move_count += 1
-    
-    # Determine winner
-    if game_state.is_terminal():
-        reward = game_state.get_reward()
-        if reward == 1:  # Attacker won
-            winner_role = 'attacker'
-            agent1_won = agent1_plays_attacker
-        elif reward == -1:  # Defender won
-            winner_role = 'defender'
-            agent1_won = not agent1_plays_attacker
-        else:  # Draw
+        if 'config' in checkpoint2:
+            config2 = checkpoint2['config']
+            num_res_blocks2 = config2.get('num_res_blocks', 4)
+            num_channels2 = config2.get('num_channels', 64)
+        else:
+            num_res_blocks2 = checkpoint2.get('num_res_blocks', 4)
+            num_channels2 = checkpoint2.get('num_channels', 64)
+        
+        # Create networks with correct architecture
+        network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1).to(device)
+        network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2).to(device)
+        
+        # Load state dicts - handle different checkpoint formats
+        if 'network_state_dict' in checkpoint1:
+            network1.load_state_dict(checkpoint1['network_state_dict'])
+        elif 'model_state_dict' in checkpoint1:
+            network1.load_state_dict(checkpoint1['model_state_dict'])
+        else:
+            network1.load_state_dict(checkpoint1)
+        
+        if 'network_state_dict' in checkpoint2:
+            network2.load_state_dict(checkpoint2['network_state_dict'])
+        elif 'model_state_dict' in checkpoint2:
+            network2.load_state_dict(checkpoint2['model_state_dict'])
+        else:
+            network2.load_state_dict(checkpoint2)
+        
+        network1.eval()
+        network2.eval()
+        
+        # Create agents
+        agent1 = Agent(network1, num_simulations=simulations, device=device)
+        agent2 = Agent(network2, num_simulations=simulations, device=device)
+        
+        # Play game
+        move_count = 0
+        max_moves = 200
+        
+        # Debug: Check initial state
+        if game_state.game_over:
+            # Game is already over before we start - this shouldn't happen
+            return (None, 'error', 0)
+        
+        while not game_state.game_over and move_count < max_moves:
+            current_player_is_attacker = (game_state.current_player == 0)
+            
+            # Determine which agent makes the move
+            if current_player_is_attacker == agent1_plays_attacker:
+                current_agent = agent1
+            else:
+                current_agent = agent2
+            
+            # Select move with time limit if specified
+            if time_per_move is not None:
+                move, value, visit_prob = current_agent.select_move_with_time_limit(game_state, time_per_move, temperature=temperature)
+            else:
+                move, value, visit_prob = current_agent.select_move_with_stats(game_state, temperature=temperature)
+            
+            if move is None:
+                # No legal moves available - game should be over
+                break
+            
+            game_state.make_move(move)
+            move_count += 1
+        
+        # Determine winner
+        if game_state.game_over:
+            winner = game_state.winner
+            if winner == 0:  # Attacker won
+                winner_role = 'attacker'
+                agent1_won = agent1_plays_attacker
+            elif winner == 1:  # Defender won
+                winner_role = 'defender'
+                agent1_won = not agent1_plays_attacker
+            else:  # Draw (winner is None)
+                winner_role = 'draw'
+                agent1_won = None
+        else:
+            # Max moves reached - consider it a draw
             winner_role = 'draw'
             agent1_won = None
-    else:
-        # Max moves reached - consider it a draw
-        winner_role = 'draw'
-        agent1_won = None
-    
-    return (agent1_won, winner_role, move_count)
+        
+        return (agent1_won, winner_role, move_count)
+        
+    except Exception as e:
+        import traceback
+        print(f"Error in worker {game_idx}: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        # Return a recognizable error state
+        return (None, 'error', -1)
 
 
 def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, game_class=None):
@@ -356,6 +376,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
             raise ValueError("For multiprocessing, checkpoint paths, game_name, and simulations must be provided")
         
         print(f"Using {num_workers} parallel workers...")
+
         
         # Extract rule parameters (only the ones that exist in game classes)
         king_capture_pieces = rules.get('king_capture_pieces', 2)
@@ -374,12 +395,14 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
             game_configs.append((
                 i, checkpoint1_path, checkpoint2_path, agent1_plays_attacker,
                 game_name, simulations, king_capture_pieces, king_can_capture,
-                throne_is_hostile, throne_enabled, time_per_move
+                throne_is_hostile, throne_enabled, time_per_move, temperature
             ))
         
-        # Play games in parallel
+        # Play games in parallel using imap_unordered for better progress tracking
+        # and to avoid spawning all workers at once
         with mp.Pool(processes=num_workers) as pool:
-            results = pool.starmap(play_single_game_worker, game_configs)
+            # Use imap_unordered to process results as they complete
+            results = list(pool.starmap(play_single_game_worker, game_configs, chunksize=1))
         
         # Process results
         for i, (agent1_won, winner_role, moves) in enumerate(results):

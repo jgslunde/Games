@@ -371,8 +371,9 @@ class Brandubh:
             target_piece: The piece being captured (to determine throne hostility)
         
         Throne hostility rules (when enabled):
-        - Always hostile to attackers (helps capture attackers)
-        - Only hostile to defenders when unoccupied
+        - If throne_is_hostile=True: empty throne is hostile to both attackers and defenders
+        - If throne_is_hostile=False: empty throne is NOT hostile to anyone
+        - Occupied throne is never hostile
         """
         # Corners are always hostile
         if (r, c) in self.corner_set:
@@ -386,13 +387,9 @@ class Brandubh:
                 # Throne is occupied - not hostile
                 return False
             
-            # Throne is empty
-            if target_piece == ATTACKER:
-                # Always hostile to attackers
-                return True
-            else:
-                # For defenders/king, only hostile if throne_is_hostile flag is set
-                return self.throne_is_hostile
+            # Throne is empty - only hostile if throne_is_hostile flag is set
+            # (applies to both attackers and defenders)
+            return self.throne_is_hostile
         
         return False
     

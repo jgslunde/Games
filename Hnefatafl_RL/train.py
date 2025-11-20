@@ -146,6 +146,9 @@ class TrainingConfig:
     # Device
     device = "cpu"  # Force CPU for multiprocessing compatibility
     
+    # Temporary file directory (for PyTorch compilation cache and checkpoint transfers)
+    temp_dir = None                   # None = use system default (/tmp), or specify path (e.g., "/dev/shm" for RAM disk)
+    
     # Logging
     log_frequency = 1                 # Log every N iterations
     verbose = True                    # Print detailed logs
@@ -251,6 +254,48 @@ class ReplayBuffer:
             'defender_wins': defender_wins,
             'total_samples': len(self.buffer)
         }
+
+
+# =============================================================================
+# TEMP DIRECTORY MANAGEMENT
+# =============================================================================
+
+def setup_temp_directory(temp_dir: str = None) -> str:
+    """
+    Configure and create temporary directory for PyTorch operations.
+    
+    This sets up a temporary directory for:
+    - TorchInductor compilation cache (torch.compile)
+    - Temporary checkpoint files for multiprocessing
+    - Other PyTorch temporary files
+    
+    Args:
+        temp_dir: Path to temporary directory (e.g., "/dev/shm" for RAM disk)
+                 If None, uses system default (/tmp)
+    
+    Returns:
+        Path to the configured temp directory
+    """
+    import tempfile
+    
+    if temp_dir is not None:
+        # Create temp directory if it doesn't exist
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Set environment variables for Python tempfile module
+        os.environ['TMPDIR'] = temp_dir
+        os.environ['TEMP'] = temp_dir
+        os.environ['TMP'] = temp_dir
+        
+        # Verify tempfile will use our directory
+        actual_temp = tempfile.gettempdir()
+        if actual_temp != temp_dir:
+            print(f"Warning: tempfile.gettempdir() returns {actual_temp}, expected {temp_dir}")
+        
+        return temp_dir
+    else:
+        # Use system default
+        return tempfile.gettempdir()
 
 
 class WinRateTracker:
@@ -457,7 +502,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                                 temperature_threshold, temperature_decay_moves, game_idx,
                                 king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
                                 network_module, network_class_name, game_module, game_class_name,
-                                add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon):
+                                add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, temp_dir=None):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -502,10 +547,20 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         # Set torch to use only 1 thread per worker to avoid conflicts
         torch.set_num_threads(1)
         
-        # Set per-worker compilation cache to avoid lock contention
-        # Each worker gets its own cache directory, so no delays needed
+        # Set up temp directory for this worker
         import tempfile
-        worker_cache_dir = os.path.join(tempfile.gettempdir(), f'torchinductor_{os.getpid()}')
+        if temp_dir is not None:
+            # Use specified temp directory (e.g., RAM disk)
+            os.environ['TMPDIR'] = temp_dir
+            os.environ['TEMP'] = temp_dir
+            os.environ['TMP'] = temp_dir
+            base_temp_dir = temp_dir
+        else:
+            base_temp_dir = tempfile.gettempdir()
+        
+        # Set per-worker compilation cache to avoid lock contention
+        # Each worker gets its own cache directory
+        worker_cache_dir = os.path.join(base_temp_dir, f'torchinductor_{os.getpid()}')
         os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
         
         # Import dynamically based on config
@@ -798,8 +853,15 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
     
     # Save network to temporary file to avoid pickling issues with many workers
     import tempfile
+    
+    # Use configured temp directory if specified
+    if config.temp_dir is not None:
+        temp_base_dir = config.temp_dir
+    else:
+        temp_base_dir = tempfile.gettempdir()
+    
     if temp_network_path is None:
-        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pth', delete=False)
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.pth', delete=False, dir=temp_base_dir)
         temp_network_path = temp_file.name
         temp_file.close()
         # Save as checkpoint format (workers expect 'model_state_dict' key)
@@ -824,7 +886,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                        config.throne_is_hostile, config.throne_enabled, config.board_size,
                        config.network_class.__module__, config.network_class.__name__,
                        config.game_class.__module__, config.game_class.__name__,
-                       config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon)
+                       config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
+                       config.temp_dir)
                 game_idx += 1
         
         # Play games in parallel
@@ -855,20 +918,28 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                             print(f"  Reached {config.num_games_per_iteration} games, terminating remaining workers...")
                             pool.terminate()  # Forcefully kill all workers
                             pool.join()  # Wait for cleanup
-                            # Recreate the pool for the next iteration
-                            pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
+                            # Set pool to None - it will be recreated at the start of next iteration
+                            pool = None
+                            # Force garbage collection to clean up file descriptors
+                            import gc
+                            gc.collect()
+                            # Small delay to ensure cleanup completes
+                            time.sleep(0.5)
                             break
                 except Exception as e:
                     # Re-raise to ensure proper error propagation
                     print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
-                    # Clean up pool on error and recreate
+                    # Clean up pool on error
                     try:
                         pool.terminate()
                         pool.join()
                     except Exception:
                         pass
-                    # Recreate pool for next iteration
-                    pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
+                    # Set to None so it gets recreated
+                    pool = None
+                    import gc
+                    gc.collect()
+                    time.sleep(0.5)
                     raise
             else:
                 # Create temporary pool (for backward compatibility)
@@ -911,7 +982,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                         config.throne_is_hostile, config.throne_enabled, config.board_size,
                         config.network_class.__module__, config.network_class.__name__,
                         config.game_class.__module__, config.game_class.__name__,
-                        config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon)
+                        config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
+                        config.temp_dir)
                 game_results.append(_play_self_play_game_worker(*args))
     finally:
         # Clean up temporary file
@@ -1573,7 +1645,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                              num_res_blocks, num_channels, value_head_hidden_size, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker,
                              network_module, network_class_name, game_module, game_class_name,
-                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves):
+                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, temp_dir=None):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1610,10 +1682,20 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
     
-    # Set per-worker compilation cache to avoid lock contention
-    # Each worker gets its own cache directory, so no delays needed
+    # Set up temp directory for this worker
     import tempfile
-    worker_cache_dir = os.path.join(tempfile.gettempdir(), f'torchinductor_{os.getpid()}')
+    if temp_dir is not None:
+        # Use specified temp directory (e.g., RAM disk)
+        os.environ['TMPDIR'] = temp_dir
+        os.environ['TEMP'] = temp_dir
+        os.environ['TMP'] = temp_dir
+        base_temp_dir = temp_dir
+    else:
+        base_temp_dir = tempfile.gettempdir()
+    
+    # Set per-worker compilation cache to avoid lock contention
+    # Each worker gets its own cache directory
+    worker_cache_dir = os.path.join(base_temp_dir, f'torchinductor_{os.getpid()}')
     os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
     # Import dynamically based on config
@@ -1719,8 +1801,15 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
     
     # Save networks to temporary files to avoid pickling issues with many workers
     import tempfile
+    
+    # Use configured temp directory if specified
+    if config.temp_dir is not None:
+        temp_base_dir = config.temp_dir
+    else:
+        temp_base_dir = tempfile.gettempdir()
+    
     if temp_new_path is None:
-        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='_new.pth', delete=False)
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='_new.pth', delete=False, dir=temp_base_dir)
         temp_new_path = temp_file.name
         temp_file.close()
         # Save as checkpoint format (workers expect 'model_state_dict' key)
@@ -1732,7 +1821,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         cleanup_new = False
     
     if temp_old_path is None:
-        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='_old.pth', delete=False)
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix='_old.pth', delete=False, dir=temp_base_dir)
         temp_old_path = temp_file.name
         temp_file.close()
         # Save as checkpoint format (workers expect 'model_state_dict' key)
@@ -1773,7 +1862,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature=config.eval_temperature,
             temperature_mode=config.eval_temperature_mode,
             temperature_threshold=config.eval_temperature_threshold,
-            temperature_decay_moves=config.eval_temperature_decay_moves
+            temperature_decay_moves=config.eval_temperature_decay_moves,
+            temp_dir=config.temp_dir
         )
         
         worker_func_new_defender = partial(
@@ -1796,7 +1886,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature=config.eval_temperature,
             temperature_mode=config.eval_temperature_mode,
             temperature_threshold=config.eval_temperature_threshold,
-            temperature_decay_moves=config.eval_temperature_decay_moves
+            temperature_decay_moves=config.eval_temperature_decay_moves,
+            temp_dir=config.temp_dir
         )
         
         # Play games in parallel using pool.map for true parallelization
@@ -1948,6 +2039,11 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     # Suppress NumPy warnings about subnormals being zero (expected behavior)
     import warnings
     warnings.filterwarnings('ignore', category=UserWarning, module='numpy._core.getlimits')
+    
+    # Set up temporary directory for PyTorch operations
+    temp_dir_path = setup_temp_directory(config.temp_dir)
+    if config.temp_dir is not None:
+        print(f"Using custom temp directory: {temp_dir_path}")
     
     # Validate that required game configuration is set
     if config.game_class is None:
@@ -2327,6 +2423,11 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             print("\n" + "=" * 70)
             print(f"Iteration {iteration + 1}/{config.num_iterations} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print("=" * 70)
+            
+            # Recreate worker pool if it was terminated in the previous iteration
+            if config.num_workers > 1 and worker_pool is None:
+                print(f"Recreating worker pool with {config.num_workers} workers...")
+                worker_pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
             
             # 1. Self-play
             print("\n[1/4] Self-play game generation...")
