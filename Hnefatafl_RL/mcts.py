@@ -86,16 +86,20 @@ class MCTSNode:
         
         self._is_expanded = True
     
-    def select_child(self, c_puct: float = 1.4, fpu_value: float = 0.0) -> Tuple[Tuple, 'MCTSNode']:
+    def select_child(self, c_puct: float = 1.4, fpu_reduction: float = -0.5) -> Tuple[Tuple, 'MCTSNode']:
         """
         Select best child using PUCT algorithm.
         Lazily initializes child game state on first selection.
         
         PUCT = Q(s,a) + c_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a))
         
+        For unvisited nodes, uses First Play Urgency (FPU) relative to parent:
+        Q_unvisited = parent_Q + fpu_reduction
+        
         Args:
             c_puct: exploration constant
-            fpu_value: First Play Urgency - Q-value for unvisited nodes
+            fpu_reduction: First Play Urgency reduction relative to parent's Q-value (default: -0.5)
+                          Negative values make unvisited nodes look worse than parent (pessimistic/conservative)
         
         Returns:
             (action, child_node)
@@ -106,6 +110,13 @@ class MCTSNode:
         
         # Calculate sqrt(N(s)) once
         sqrt_parent_visits = math.sqrt(self.visit_count)
+        
+        # FPU value relative to parent's mean value
+        # From parent's perspective: use parent.mean_value
+        # From child's perspective (negated): use -parent.mean_value
+        # Apply reduction: fpu_from_child_perspective = -parent.mean_value + fpu_reduction
+        parent_q_from_child_perspective = -self.mean_value
+        fpu_value = parent_q_from_child_perspective + fpu_reduction
         
         for action, child in self.children.items():
             # Q value (from child's perspective, so negate for parent)
@@ -179,7 +190,7 @@ class MCTS:
     def __init__(self, network, num_simulations: int = 100, c_puct: float = 1.4, 
                  device: str = 'cpu', dirichlet_alpha: float = 0.3, 
                  dirichlet_epsilon: float = 0.25, add_dirichlet_noise: bool = False,
-                 move_encoder_class=None, fpu_value: float = -1.0):
+                 move_encoder_class=None, fpu_reduction: float = -0.5):
         """
         Initialize MCTS.
         
@@ -193,7 +204,9 @@ class MCTS:
             add_dirichlet_noise: whether to add exploration noise
             move_encoder_class: MoveEncoder class for encoding/decoding moves
                                (if None, imports from network module for backward compatibility)
-            fpu_value: First Play Urgency - Q-value for unvisited nodes (default: -1.0)
+            fpu_reduction: First Play Urgency reduction relative to parent's Q-value (default: -0.5)
+                          Negative = pessimistic (unvisited nodes look worse than parent)
+                          This follows Leela Chess Zero's implementation
         """
         self.network = network
         self.num_simulations = num_simulations
@@ -203,7 +216,7 @@ class MCTS:
         self.dirichlet_epsilon = dirichlet_epsilon
         self.add_dirichlet_noise = add_dirichlet_noise
         self.move_encoder_class = move_encoder_class
-        self.fpu_value = fpu_value
+        self.fpu_reduction = fpu_reduction
         
         # Performance tracking
         self.timing_stats = {
@@ -255,7 +268,7 @@ class MCTS:
             # Selection: traverse tree until leaf
             t0 = time.perf_counter()
             while not node.is_leaf() and not node.is_terminal():
-                action, node = node.select_child(self.c_puct, self.fpu_value)
+                action, node = node.select_child(self.c_puct, self.fpu_reduction)
                 search_path.append(node)
             self.timing_stats['selection'] += time.perf_counter() - t0
             

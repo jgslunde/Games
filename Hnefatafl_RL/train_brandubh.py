@@ -37,19 +37,20 @@ def temperature_threshold_type(value):
 # =============================================================================
 
 DEFAULT_ITERATIONS = 1000
-DEFAULT_GAMES = 512
-DEFAULT_SIMS_ATTACKER_SELFPLAY = 600
+DEFAULT_GAMES = 1024
+DEFAULT_SIMS_ATTACKER_SELFPLAY = 800
 DEFAULT_SIMS_DEFENDER_SELFPLAY = 1600
-DEFAULT_SIMS_ATTACKER_EVAL = 600
-DEFAULT_SIMS_DEFENDER_EVAL = 1600
-DEFAULT_BATCH_SIZE = 512
-DEFAULT_LEARNING_RATE = 1e-3*sqrt(DEFAULT_BATCH_SIZE/256)
+DEFAULT_SIMS_ATTACKER_EVAL = 800
+DEFAULT_SIMS_DEFENDER_EVAL = 800
+DEFAULT_BATCH_SIZE = 1024
+DEFAULT_LEARNING_RATE = 2e-4*sqrt(DEFAULT_BATCH_SIZE/256)
 DEFAULT_EPOCHS = 10
 DEFAULT_BATCHES_PER_EPOCH = 100
 DEFAULT_EVAL_VS_RANDOM = 64
 DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
 DEFAULT_DEVICE = None  # None = auto-detect (cuda if available, else cpu)
 DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
+DEFAULT_TEMP_DIR = "/dev/shm/" # Location for temp torch files (RAM-disk by default).
 
 # Temperature parameters
 DEFAULT_TEMPERATURE = 1.0
@@ -58,7 +59,7 @@ DEFAULT_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
 DEFAULT_TEMPERATURE_DECAY_MOVES = 16  # For "decay" mode
 
 # Evaluation temperature parameters
-DEFAULT_EVAL_TEMPERATURE = 0.65  # Deterministic play during evaluation
+DEFAULT_EVAL_TEMPERATURE = 0.65  # Starting temperature during evaluation play 
 DEFAULT_EVAL_TEMPERATURE_MODE = "fixed"  # "fixed", "king", or "decay"
 DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
 DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 16  # For "decay" mode
@@ -72,12 +73,14 @@ DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 256
 DEFAULT_REPLAY_BUFFER_SIZE = 6_000_000
 DEFAULT_MIN_BUFFER_SIZE = 200_000 # 10*DEFAULT_BATCH_SIZE
 DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
+DEFAULT_TRACK_UNIQUE_STATES = True
+DEFAULT_USE_RANDOM_OPENING_MOVES = True
 
 # Learning rate decay and regularization
 DEFAULT_LR_DECAY = 0.99
 DEFAULT_LR_FLOOR = 3e-5
 DEFAULT_WEIGHT_DECAY = 1e-2
-DEFAULT_VALUE_LOSS_WEIGHT = 0.25
+DEFAULT_VALUE_LOSS_WEIGHT = 0.5
 
 # Dynamic loss boosting
 DEFAULT_USE_DYNAMIC_BOOSTING = False
@@ -90,8 +93,10 @@ DEFAULT_DRAW_PENALTY_ATTACKER = 0.0  # Draw value for attackers (neutral)
 DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 
 # MCTS exploration
-DEFAULT_C_PUCT = 1.4
-DEFAULT_FPU_VALUE = -1.0  # First Play Urgency - Q-value for unvisited nodes
+DEFAULT_C_PUCT = 1.5
+DEFAULT_FPU_REDUCTION = -0.5  # First Play Urgency: reduction relative to parent Q-value (like Leela Chess Zero)
+DEFAULT_EVAL_C_PUCT = 1.0  # Evaluation c_puct
+DEFAULT_EVAL_FPU_REDUCTION = -1.0  # Evaluation FPU reduction
 
 # Dynamic simulation balancing
 DEFAULT_USE_DYNAMIC_SIM_BALANCING = True  # Dynamically adjust simulation counts to target 50% win rate
@@ -187,9 +192,13 @@ if __name__ == "__main__":
     
     # MCTS parameters
     parser.add_argument("--c-puct", type=float, default=DEFAULT_C_PUCT,
-                       help=f"MCTS exploration constant (default: {DEFAULT_C_PUCT})")
-    parser.add_argument("--fpu-value", type=float, default=DEFAULT_FPU_VALUE,
-                       help=f"First Play Urgency - Q-value for unvisited nodes (default: {DEFAULT_FPU_VALUE})")
+                       help=f"MCTS exploration constant for self-play (default: {DEFAULT_C_PUCT})")
+    parser.add_argument("--fpu-reduction", type=float, default=DEFAULT_FPU_REDUCTION,
+                       help=f"First Play Urgency reduction for self-play relative to parent Q-value (default: {DEFAULT_FPU_REDUCTION}, like Leela Chess Zero)")
+    parser.add_argument("--eval-c-puct", type=float, default=DEFAULT_EVAL_C_PUCT,
+                       help=f"MCTS exploration constant for evaluation (default: {DEFAULT_EVAL_C_PUCT})")
+    parser.add_argument("--eval-fpu-reduction", type=float, default=DEFAULT_EVAL_FPU_REDUCTION,
+                       help=f"First Play Urgency reduction for evaluation relative to parent Q-value (default: {DEFAULT_EVAL_FPU_REDUCTION})")
     
     # Dynamic simulation balancing
     parser.add_argument("--use-dynamic-sim-balancing", action="store_true", default=DEFAULT_USE_DYNAMIC_SIM_BALANCING,
@@ -253,6 +262,10 @@ if __name__ == "__main__":
                        help=f"Enable symmetry-based data augmentation (default: {DEFAULT_USE_DATA_AUGMENTATION})")
     parser.add_argument("--no-data-augmentation", action="store_false", dest="use_data_augmentation",
                        help="Disable data augmentation")
+    parser.add_argument("--track-unique-states", action="store_true", default=DEFAULT_TRACK_UNIQUE_STATES,
+                       help="Track and report unique board state diversity during self-play (adds overhead, default: False)")
+    parser.add_argument("--use-random-opening-moves", action="store_true", default=DEFAULT_USE_RANDOM_OPENING_MOVES,
+                       help="In 50%% of games, play 1-4 random moves (2-8 ply) before MCTS (default: False)")
     
     # Evaluation
     parser.add_argument("--eval-games", type=int, default=DEFAULT_EVAL_GAMES,
@@ -271,7 +284,7 @@ if __name__ == "__main__":
                        help=f"Number of parallel workers (default: {DEFAULT_NUM_WORKERS} CPUs)")
     parser.add_argument("--device", type=str, default=DEFAULT_DEVICE,
                        help="Device (cuda/cpu, default: auto-detect)")
-    parser.add_argument("--temp-dir", type=str, default=None,
+    parser.add_argument("--temp-dir", type=str, default=DEFAULT_TEMP_DIR,
                        help="Temporary directory for PyTorch cache files (default: system /tmp, or use /dev/shm for RAM disk)")
     
     # Checkpointing
@@ -330,7 +343,9 @@ if __name__ == "__main__":
     
     # MCTS parameters
     config.c_puct = args.c_puct
-    config.fpu_value = args.fpu_value
+    config.fpu_reduction = args.fpu_reduction
+    config.eval_c_puct = args.eval_c_puct
+    config.eval_fpu_reduction = args.eval_fpu_reduction
     config.use_dynamic_sim_balancing = args.use_dynamic_sim_balancing
     config.dynamic_sim_adjustment_rate = args.dynamic_sim_adjustment_rate
     config.temperature = args.temperature
@@ -357,6 +372,12 @@ if __name__ == "__main__":
     config.replay_buffer_size = args.replay_buffer_size
     config.min_buffer_size = args.min_buffer_size
     config.use_data_augmentation = args.use_data_augmentation
+    
+    # State diversity tracking
+    config.track_unique_states = args.track_unique_states
+    
+    # Random opening moves
+    config.use_random_opening_moves = args.use_random_opening_moves
     
     # Evaluation
     config.eval_games = args.eval_games

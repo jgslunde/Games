@@ -78,8 +78,8 @@ class TrainingConfig:
     num_mcts_simulations = 100        # MCTS simulations per move (deprecated, use attacker/defender specific)
     num_mcts_sims_attacker = 100      # MCTS simulations for attacker in self-play
     num_mcts_sims_defender = 100      # MCTS simulations for defender in self-play
-    c_puct = 1.4                      # MCTS exploration constant
-    fpu_value = -1.0                  # First Play Urgency: Q-value for unvisited nodes (default: -1.0, conservative)
+    c_puct = 1.4                      # MCTS exploration constant for self-play
+    fpu_reduction = -0.5              # First Play Urgency for self-play: reduction relative to parent Q-value (default: -0.5, like Leela Chess Zero)
     num_workers = mp.cpu_count()      # Number of parallel workers (default: all CPUs)
     
     # Dynamic simulation balancing (target 50% win rate)
@@ -139,6 +139,8 @@ class TrainingConfig:
     eval_frequency = 5                # Evaluate every N iterations
     eval_mcts_sims_attacker = 100     # MCTS simulations for attacker in evaluation
     eval_mcts_sims_defender = 100     # MCTS simulations for defender in evaluation
+    eval_c_puct = 1.4                 # MCTS exploration constant for evaluation
+    eval_fpu_reduction = -0.5         # First Play Urgency for evaluation: reduction relative to parent Q-value
     
     # Random baseline evaluation
     eval_vs_random_games = 10         # Games vs random (per color)
@@ -157,6 +159,12 @@ class TrainingConfig:
     # Logging
     log_frequency = 1                 # Log every N iterations
     verbose = True                    # Print detailed logs
+    
+    # Board state diversity analysis
+    track_unique_states = False       # Track unique board states encountered during self-play (adds overhead)
+    
+    # Random opening moves
+    use_random_opening_moves = False  # In 50% of games, play 1-4 random moves (2-8 ply) before MCTS
 
 
 # =============================================================================
@@ -603,7 +611,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                                 temperature_threshold, temperature_decay_moves, game_idx,
                                 king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
                                 network_module, network_class_name, game_module, game_class_name,
-                                add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, fpu_value, temp_dir=None):
+                                add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, fpu_reduction, temp_dir=None,
+                                track_unique_states=False, use_random_opening_moves=False):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -633,7 +642,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         add_dirichlet_noise: Whether to add Dirichlet noise for exploration
         dirichlet_alpha: Concentration parameter for Dirichlet noise
         dirichlet_epsilon: Weight of Dirichlet noise (0-1)
-        fpu_value: First Play Urgency - Q-value for unvisited nodes
+        fpu_reduction: First Play Urgency reduction relative to parent Q-value
+        track_unique_states: If True, collect state hashes for diversity analysis
+        use_random_opening_moves: If True, 50% of games start with 1-4 random moves (2-8 ply)
     
     Returns:
         dict with game data and MCTS timing information
@@ -703,11 +714,11 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu', 
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
                             dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
-                            fpu_value=fpu_value)
+                            fpu_reduction=fpu_reduction)
         mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu',
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
                             dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
-                            fpu_value=fpu_value)
+                            fpu_reduction=fpu_reduction)
         mcts_attacker.reset_timing_stats()
         mcts_defender.reset_timing_stats()
         
@@ -721,7 +732,41 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         states = []
         policies = []
         players = []
+        mate_in_1_flags = []  # Track which positions had mate-in-1
         move_count = 0
+        
+        # State hash tracking (only if enabled)
+        state_hashes = [] if track_unique_states else None
+        
+        # Random opening moves (if enabled)
+        # In 50% of games, play 1-4 random moves (2-8 ply) before starting MCTS
+        if use_random_opening_moves:
+            # Use 50% probability
+            if np.random.random() < 0.5:
+                # Randomly select 1-4 moves (each move is 2 ply - one for each player)
+                num_random_moves = np.random.randint(1, 5)  # 1, 2, 3, or 4
+                num_random_plies = num_random_moves * 2
+                
+                # Play random moves
+                for _ in range(num_random_plies):
+                    if game.game_over:
+                        break
+                    
+                    legal_moves = game.get_legal_moves()
+                    if not legal_moves:
+                        break
+                    
+                    # Select random move
+                    random_move = legal_moves[np.random.randint(len(legal_moves))]
+                    game.make_move(random_move)
+                    move_count += 1
+                
+                # Now store the state AFTER random opening (this is the only state we keep from opening)
+                # This becomes the "initial" state for training purposes
+                if not game.game_over:
+                    state = game.get_state()
+                    # We don't have a policy for this random position, so we'll skip storing it
+                    # The first MCTS move will generate the first training sample
         
         while not game.game_over:
             current_player = game.current_player
@@ -748,20 +793,51 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
             # Get state
             state = game.get_state()
             
-            # Run MCTS to get policy
-            visit_probs = mcts.search(game)
+            # Check for mate-in-1 (winning move in current position)
+            mate_in_1_move = None
+            legal_moves = game.get_legal_moves()
+            for test_move in legal_moves:
+                # Clone game and test the move
+                test_game = game.clone()
+                test_game.make_move(test_move)
+                # Check if this move wins the game for current player
+                if test_game.game_over and test_game.winner == current_player:
+                    mate_in_1_move = test_move
+                    break
             
-            # Convert to policy vector
-            policy_size = board_size * board_size * 4 * (board_size - 1)
-            policy = np.zeros(policy_size, dtype=np.float32)
-            for move, prob in visit_probs.items():
-                idx = MoveEncoderClass.encode_move(move)
-                policy[idx] = prob
+            # If mate-in-1 exists, create forced policy and skip MCTS
+            if mate_in_1_move is not None:
+                # Create policy with 100% on winning move
+                policy_size = board_size * board_size * 4 * (board_size - 1)
+                policy = np.zeros(policy_size, dtype=np.float32)
+                winning_move_idx = MoveEncoderClass.encode_move(mate_in_1_move)
+                policy[winning_move_idx] = 1.0
+                
+                # Create visit_probs for move selection (100% on winning move)
+                visit_probs = {mate_in_1_move: 1.0}
+            else:
+                # Run MCTS to get policy (normal case)
+                visit_probs = mcts.search(game)
+                
+                # Convert to policy vector
+                policy_size = board_size * board_size * 4 * (board_size - 1)
+                policy = np.zeros(policy_size, dtype=np.float32)
+                for move, prob in visit_probs.items():
+                    idx = MoveEncoderClass.encode_move(move)
+                    policy[idx] = prob
             
             # Store experience
             states.append(state)
             policies.append(policy)
             players.append(current_player)
+            mate_in_1_flags.append(mate_in_1_move is not None)  # Mark if this was a mate-in-1 position
+            
+            # Track state hash if enabled (for diversity analysis)
+            if track_unique_states:
+                # Create efficient hash of the board state (first 3 planes: pieces only)
+                # Exclude the current_player plane (plane 3) as it alternates
+                state_hash = hash(state[:3].tobytes())
+                state_hashes.append(state_hash)
             
             # Select and make move
             moves = list(visit_probs.keys())
@@ -809,6 +885,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         states_clean = [np.array(s, dtype=np.float32).copy() for s in states]
         policies_clean = [np.array(p, dtype=np.float32).copy() for p in policies]
         players_clean = [int(p) for p in players]
+        mate_in_1_flags_clean = [bool(f) for f in mate_in_1_flags]
         
         # Delete ALL objects that might hold references to compiled network
         del mcts_attacker
@@ -818,6 +895,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         del states
         del policies
         del players
+        del mate_in_1_flags
         del timing_attacker
         del timing_defender
         
@@ -825,15 +903,22 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         import gc
         gc.collect()
         
-        return {
+        result = {
             'states': states_clean,
             'policies': policies_clean,
             'winner': winner,
             'players': players_clean,
+            'mate_in_1_flags': mate_in_1_flags_clean,
             'num_moves': num_moves,
             'draw_reason': draw_reason_clean,
             'timing': combined_timing
         }
+        
+        # Add state hashes if tracking is enabled
+        if track_unique_states and state_hashes is not None:
+            result['state_hashes'] = state_hashes
+        
+        return result
     except Exception as e:
         # Catch any exception and re-raise as a simple picklable RuntimeError
         # This prevents "cannot pickle 'frame' object" errors in multiprocessing
@@ -1000,7 +1085,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                        config.network_class.__module__, config.network_class.__name__,
                        config.game_class.__module__, config.game_class.__name__,
                        config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
-                       config.fpu_value, config.temp_dir)
+                       config.fpu_reduction, config.temp_dir, config.track_unique_states,
+                       config.use_random_opening_moves)
                 game_idx += 1
         
         # Play games in parallel
@@ -1096,7 +1182,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                         config.network_class.__module__, config.network_class.__name__,
                         config.game_class.__module__, config.game_class.__name__,
                         config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
-                        config.fpu_value, config.temp_dir)
+                        config.fpu_reduction, config.temp_dir, config.track_unique_states,
+                        config.use_random_opening_moves)
                 game_results.append(_play_self_play_game_worker(*args))
     finally:
         # Clean up temporary file
@@ -1144,12 +1231,19 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                 if key in mcts_timing_totals:
                     mcts_timing_totals[key] += value
         
+        # Get mate-in-1 flags if present
+        mate_in_1_flags = game_data.get('mate_in_1_flags', [False] * len(game_data['states']))
+        
         # Add to buffer
-        for state, policy, player in zip(game_data['states'], 
-                                         game_data['policies'], 
-                                         game_data['players']):
+        for state, policy, player, is_mate_in_1 in zip(game_data['states'], 
+                                                         game_data['policies'], 
+                                                         game_data['players'],
+                                                         mate_in_1_flags):
             # Determine value from player's perspective
-            if winner is None or (not game_data.get('winner') and draw_reason == 'move_limit'):
+            if is_mate_in_1:
+                # Mate-in-1 position: always value +1.0 for the player to move
+                value = 1.0
+            elif winner is None or (not game_data.get('winner') and draw_reason == 'move_limit'):
                 # Draw (only by move limit - repetitions are illegal moves)
                 # Apply player-specific draw penalty
                 if player == 0:  # Attacker
@@ -1183,6 +1277,46 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
     if draws > 0:
         print(f"  All draws by move limit (500+ moves): {move_limit_draws}")
     print(f"Average game length: {total_moves/total_games:.1f} moves")
+    
+    # Analyze unique states if tracking is enabled
+    if config.track_unique_states:
+        # Collect all state hashes from all games
+        all_state_hashes = []
+        all_state_hashes_skip_initial = []
+        all_state_hashes_skip_6ply = []
+        
+        for game_data in game_results:
+            if 'state_hashes' in game_data:
+                hashes = game_data['state_hashes']
+                if len(hashes) > 0:
+                    all_state_hashes.extend(hashes)
+                    # Skip first state (initial position)
+                    if len(hashes) > 1:
+                        all_state_hashes_skip_initial.extend(hashes[1:])
+                    # Skip first 6 ply (3 moves per side)
+                    if len(hashes) > 6:
+                        all_state_hashes_skip_6ply.extend(hashes[6:])
+        
+        # Calculate unique state statistics efficiently using sets
+        total_states = len(all_state_hashes)
+        unique_all = len(set(all_state_hashes))
+        unique_skip_initial = len(set(all_state_hashes_skip_initial))
+        unique_skip_6ply = len(set(all_state_hashes_skip_6ply))
+        
+        print("\n--- Board State Diversity Analysis ---")
+        if total_states > 0:
+            print(f"Total states encountered: {total_states}")
+            print(f"Unique states (all): {unique_all} ({100*unique_all/total_states:.2f}%)")
+            
+            total_skip_initial = len(all_state_hashes_skip_initial)
+            if total_skip_initial > 0:
+                print(f"Unique states (skip initial): {unique_skip_initial} / {total_skip_initial} ({100*unique_skip_initial/total_skip_initial:.2f}%)")
+            
+            total_skip_6ply = len(all_state_hashes_skip_6ply)
+            if total_skip_6ply > 0:
+                print(f"Unique states (skip 6 ply): {unique_skip_6ply} / {total_skip_6ply} ({100*unique_skip_6ply/total_skip_6ply:.2f}%)")
+        else:
+            print("No state hashes collected")
     
     # Print MCTS timing breakdown
     total_mcts_time = sum(mcts_timing_totals.values())
@@ -1504,7 +1638,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 
 def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
                                 num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
-                                network_module, network_class_name, game_module, game_class_name):
+                                network_module, network_class_name, game_module, game_class_name, fpu_reduction=-0.5):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1523,6 +1657,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
         network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
         game_module: Module name for game (e.g., 'brandubh', 'tablut')
         game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
+        fpu_reduction: First Play Urgency reduction relative to parent Q-value (for evaluation)
     
     Returns:
         1.0 if NN wins, 0.5 if draw, 0.0 if NN loses
@@ -1581,7 +1716,8 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
     # Create agents on CPU
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     nn_agent = Agent(network, num_simulations=num_simulations,
-                     c_puct=c_puct, device='cpu', move_encoder_class=MoveEncoderClass)
+                     c_puct=c_puct, device='cpu', move_encoder_class=MoveEncoderClass,
+                     fpu_reduction=fpu_reduction)
     random_agent = RandomAgent()
     
     # Play game
@@ -1671,12 +1807,13 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             config.value_head_hidden_size,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
-            config.c_puct,
+            config.eval_c_puct,
             True,  # nn_plays_attacker
             network_module=config.network_class.__module__,
             network_class_name=config.network_class.__name__,
             game_module=config.game_class.__module__,
-            game_class_name=config.game_class.__name__
+            game_class_name=config.game_class.__name__,
+            fpu_reduction=config.eval_fpu_reduction
         )
         
         worker_func_defender = partial(
@@ -1687,12 +1824,13 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             config.value_head_hidden_size,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
-            config.c_puct,
+            config.eval_c_puct,
             False,  # nn_plays_attacker
             network_module=config.network_class.__module__,
             network_class_name=config.network_class.__name__,
             game_module=config.game_class.__module__,
-            game_class_name=config.game_class.__name__
+            game_class_name=config.game_class.__name__,
+            fpu_reduction=config.eval_fpu_reduction
         )
         
         # Play games in parallel
@@ -1758,7 +1896,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                              num_res_blocks, num_channels, value_head_hidden_size, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker,
                              network_module, network_class_name, game_module, game_class_name,
-                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_value, temp_dir=None):
+                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_reduction, temp_dir=None):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1782,7 +1920,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         temperature_mode: "fixed", "king", or "decay"
         temperature_threshold: Move number for temperature drop (for "fixed" mode)
         temperature_decay_moves: Number of moves for linear decay (for "decay" mode)
-        fpu_value: First Play Urgency - Q-value for unvisited nodes
+        fpu_reduction: First Play Urgency reduction relative to parent Q-value (for evaluation)
     
     Returns:
         1.0 if new network wins, 0.5 if draw, 0.0 if new network loses
@@ -1864,10 +2002,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     new_agent = Agent(new_network, num_simulations=new_sims,
                       c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
-                      move_encoder_class=MoveEncoderClass, fpu_value=fpu_value)
+                      move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction)
     old_agent = Agent(old_network, num_simulations=old_sims,
                       c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
-                      move_encoder_class=MoveEncoderClass, fpu_value=fpu_value)
+                      move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction)
     
     # Play game
     if new_plays_attacker:
@@ -1965,7 +2103,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             config.value_head_hidden_size,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
-            config.c_puct,
+            config.eval_c_puct,
             True,  # new_plays_attacker
             config.network_class.__module__,
             config.network_class.__name__,
@@ -1977,7 +2115,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_mode=config.eval_temperature_mode,
             temperature_threshold=config.eval_temperature_threshold,
             temperature_decay_moves=config.eval_temperature_decay_moves,
-            fpu_value=config.fpu_value,
+            fpu_reduction=config.eval_fpu_reduction,
             temp_dir=config.temp_dir
         )
         
@@ -1990,7 +2128,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             config.value_head_hidden_size,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
-            config.c_puct,
+            config.eval_c_puct,
             False,  # new_plays_attacker
             config.network_class.__module__,
             config.network_class.__name__,
@@ -2002,7 +2140,7 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_mode=config.eval_temperature_mode,
             temperature_threshold=config.eval_temperature_threshold,
             temperature_decay_moves=config.eval_temperature_decay_moves,
-            fpu_value=config.fpu_value,
+            fpu_reduction=config.eval_fpu_reduction,
             temp_dir=config.temp_dir
         )
         
@@ -2214,7 +2352,12 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     print("Evaluation simulations:")
     print(f"  Attacker: {config.eval_mcts_sims_attacker}")
     print(f"  Defender: {config.eval_mcts_sims_defender}")
-    print(f"Exploration constant (c_puct): {config.c_puct}")
+    print(f"Exploration constant (c_puct):")
+    print(f"  Self-play: {config.c_puct}")
+    print(f"  Evaluation: {config.eval_c_puct}")
+    print(f"First Play Urgency (FPU) reduction:")
+    print(f"  Self-play: {config.fpu_reduction}")
+    print(f"  Evaluation: {config.eval_fpu_reduction}")
     print(f"Temperature: {config.temperature}")
     print(f"Temperature mode: {config.temperature_mode}")
     if config.temperature_mode == "king":
