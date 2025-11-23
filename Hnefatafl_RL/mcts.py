@@ -72,10 +72,9 @@ class MCTSNode:
         
         legal_moves = self.get_legal_moves()
         
-        # Normalize policy over legal moves only
-        legal_probs = policy_probs[policy_probs > 0]
-        if len(legal_probs) > 0 and legal_probs.sum() > 0:
-            legal_probs = legal_probs / legal_probs.sum()
+        # Use the probs as-is. If sum is 0 (unlikely), handle gracefully.
+        if policy_probs.sum() > 0:
+            legal_probs = policy_probs / policy_probs.sum()
         else:
             # Uniform distribution if no valid probabilities
             legal_probs = np.ones(len(legal_moves)) / len(legal_moves)
