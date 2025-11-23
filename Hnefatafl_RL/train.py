@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import json
+import itertools
 from datetime import datetime
 from collections import deque
 from typing import List, Tuple, Dict, Any
@@ -1116,9 +1117,15 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                 try:
                     game_results = []
                     completed = 0
+                    
+                    # Create iterator with a reasonable limit to prevent infinite hangs
+                    # Generate up to 2x the needed games to handle potential worker failures
+                    max_tasks = config.num_games_per_iteration * 2
+                    task_generator = itertools.islice(generate_worker_args(), max_tasks)
+                    
                     # Use imap_unordered with chunksize=1 to get results as soon as they finish
                     for result in pool.imap_unordered(_play_self_play_game_worker_wrapper, 
-                                                      generate_worker_args(), 
+                                                      task_generator, 
                                                       chunksize=1):
                         game_results.append(result)
                         completed += 1
@@ -1136,13 +1143,13 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                             print(f"  Reached {config.num_games_per_iteration} games, terminating remaining workers...")
                             pool.terminate()  # Forcefully kill all workers
                             pool.join()  # Wait for cleanup
-                            # Set pool to None - it will be recreated at the start of next iteration
-                            pool = None
                             # Force garbage collection to clean up file descriptors
                             import gc
                             gc.collect()
                             # Small delay to ensure cleanup completes
                             time.sleep(0.5)
+                            # IMPORTANT: Set pool to None before breaking so it gets returned as None
+                            pool = None
                             break
                 except Exception as e:
                     # Re-raise to ensure proper error propagation
@@ -1153,11 +1160,11 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                         pool.join()
                     except Exception:
                         pass
-                    # Set to None so it gets recreated
-                    pool = None
                     import gc
                     gc.collect()
                     time.sleep(0.5)
+                    # Set to None so it gets returned and recreated on next iteration
+                    pool = None
                     raise
             else:
                 # Create temporary pool (for backward compatibility)
@@ -1165,8 +1172,14 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                     try:
                         game_results = []
                         completed = 0
+                        
+                        # Create iterator with a reasonable limit to prevent infinite hangs
+                        # Generate up to 2x the needed games to handle potential worker failures
+                        max_tasks = config.num_games_per_iteration * 2
+                        task_generator = itertools.islice(generate_worker_args(), max_tasks)
+                        
                         for result in temp_pool.imap_unordered(_play_self_play_game_worker_wrapper,
-                                                                generate_worker_args(),
+                                                                task_generator,
                                                                 chunksize=1):
                             game_results.append(result)
                             completed += 1
