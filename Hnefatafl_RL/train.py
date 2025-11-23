@@ -522,23 +522,40 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
     num_directions = 4
     policy_moves_per_square = num_directions * max_distance
     
+    # Explicit mapping for 90 degree clockwise rotation based on MoveEncoder definitions
+    # 0 (Up)    -> 3 (Right)
+    # 3 (Right) -> 1 (Down)
+    # 1 (Down)  -> 2 (Left)
+    # 2 (Left)  -> 0 (Up)
+    ROT_90_MAP = {0: 3, 3: 1, 1: 2, 2: 0}
+    
     # Helper to rotate a move in policy space
     def rotate_policy(policy_vec, k):
         """Rotate policy vector k times 90 degrees clockwise."""
-        policy_arr = policy_vec.reshape(num_squares, policy_moves_per_square)  # (squares, directions*distances)
+        policy_arr = policy_vec.reshape(num_squares, policy_moves_per_square)
         
-        # Rotate board positions
+        # Create mapping for k rotations
+        dir_map = {}
+        for d in range(4):
+            curr = d
+            for _ in range(k):
+                curr = ROT_90_MAP[curr]
+            dir_map[d] = curr
+
+        # Rotate board positions and directions
         rotated = np.zeros_like(policy_arr)
         for old_sq in range(num_squares):
             old_r, old_c = old_sq // board_size, old_sq % board_size
-            # Rotate position
-            for _ in range(k):
-                old_r, old_c = old_c, (board_size - 1) - old_r
-            new_sq = old_r * board_size + old_c
             
-            # Rotate directions (up->right->down->left)
+            # Rotate position k times
+            curr_r, curr_c = old_r, old_c
+            for _ in range(k):
+                curr_r, curr_c = curr_c, (board_size - 1) - curr_r
+            new_sq = curr_r * board_size + curr_c
+            
+            # Rotate directions
             for old_dir in range(num_directions):
-                new_dir = (old_dir + k) % num_directions
+                new_dir = dir_map[old_dir]
                 for dist in range(max_distance):
                     old_idx = old_dir * max_distance + dist
                     new_idx = new_dir * max_distance + dist
@@ -556,10 +573,12 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
             # Flip position
             if horizontal:
                 new_r, new_c = old_r, (board_size - 1) - old_c
-                dir_map = {0: 0, 1: 1, 2: 3, 3: 2}  # Swap left/right
+                # Up(0)->Up(0), Down(1)->Down(1), Left(2)->Right(3), Right(3)->Left(2)
+                dir_map = {0: 0, 1: 1, 2: 3, 3: 2}
             else:
                 new_r, new_c = (board_size - 1) - old_r, old_c
-                dir_map = {0: 1, 1: 0, 2: 2, 3: 3}  # Swap up/down
+                # Up(0)->Down(1), Down(1)->Up(0), Left(2)->Left(2), Right(3)->Right(3)
+                dir_map = {0: 1, 1: 0, 2: 2, 3: 3}
             
             new_sq = new_r * board_size + new_c
             
