@@ -166,6 +166,9 @@ class TrainingConfig:
     
     # Random opening moves
     use_random_opening_moves = False  # In 50% of games, play 1-4 random moves (2-8 ply) before MCTS
+    
+    # Game length limit
+    max_game_length = 500             # Maximum moves before declaring draw
 
 
 # =============================================================================
@@ -632,7 +635,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                                 king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
                                 network_module, network_class_name, game_module, game_class_name,
                                 add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, fpu_reduction, temp_dir=None,
-                                track_unique_states=False, use_random_opening_moves=False):
+                                track_unique_states=False, use_random_opening_moves=False, max_game_length=500):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -663,8 +666,10 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         dirichlet_alpha: Concentration parameter for Dirichlet noise
         dirichlet_epsilon: Weight of Dirichlet noise (0-1)
         fpu_reduction: First Play Urgency reduction relative to parent Q-value
+        temp_dir: Temporary directory for worker files
         track_unique_states: If True, collect state hashes for diversity analysis
         use_random_opening_moves: If True, 50% of games start with 1-4 random moves (2-8 ply)
+        max_game_length: Maximum number of moves before declaring draw
     
     Returns:
         dict with game data and MCTS timing information
@@ -876,12 +881,12 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
             move_count += 1
             
             # Safety check for move limit
-            if move_count > 500:
+            if move_count > max_game_length:
                 break
         
         # Determine draw reason (only move limit can cause draws - repetitions are illegal moves)
         draw_reason = None
-        if not game.game_over and move_count > 500:
+        if not game.game_over and move_count > max_game_length:
             # Hit move limit without natural game end
             draw_reason = 'move_limit'
         
@@ -1019,12 +1024,12 @@ def play_self_play_game(agent: Agent, config: TrainingConfig) -> Dict:
         move_count += 1
         
         # Safety check for move limit
-        if move_count > 500:
+        if move_count > config.max_game_length:
             break
     
     # Determine draw reason (only move limit can cause draws - repetitions are illegal moves)
     draw_reason = None
-    if not game.game_over and move_count > 500:
+    if not game.game_over and move_count > config.max_game_length:
         # Hit move limit without natural game end
         draw_reason = 'move_limit'
     
@@ -1106,7 +1111,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                        config.game_class.__module__, config.game_class.__name__,
                        config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
                        config.fpu_reduction, config.temp_dir, config.track_unique_states,
-                       config.use_random_opening_moves)
+                       config.use_random_opening_moves, config.max_game_length)
                 game_idx += 1
         
         # Play games in parallel
@@ -1215,7 +1220,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                         config.game_class.__module__, config.game_class.__name__,
                         config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
                         config.fpu_reduction, config.temp_dir, config.track_unique_states,
-                        config.use_random_opening_moves)
+                        config.use_random_opening_moves, config.max_game_length)
                 game_results.append(_play_self_play_game_worker(*args))
     finally:
         # Clean up temporary file
@@ -1307,7 +1312,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
           f"{defender_wins} defender wins ({100*defender_wins/total_games:.1f}%), "
           f"{draws} draws ({100*draws/total_games:.1f}%)")
     if draws > 0:
-        print(f"  All draws by move limit (500+ moves): {move_limit_draws}")
+        print(f"  All draws by move limit ({config.max_game_length}+ moves): {move_limit_draws}")
     print(f"Average game length: {total_moves/total_games:.1f} moves")
     
     # Analyze unique states if tracking is enabled

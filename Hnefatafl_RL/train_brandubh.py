@@ -76,6 +76,9 @@ DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
 DEFAULT_TRACK_UNIQUE_STATES = True
 DEFAULT_USE_RANDOM_OPENING_MOVES = True
 
+# Game length limit
+DEFAULT_MAX_GAME_LENGTH = 100  # Maximum moves before declaring draw
+
 # Learning rate decay and regularization
 DEFAULT_LR_DECAY = 0.99
 DEFAULT_LR_FLOOR = 3e-5
@@ -266,6 +269,8 @@ if __name__ == "__main__":
                        help="Track and report unique board state diversity during self-play (adds overhead, default: False)")
     parser.add_argument("--use-random-opening-moves", action="store_true", default=DEFAULT_USE_RANDOM_OPENING_MOVES,
                        help="In 50%% of games, play 1-4 random moves (2-8 ply) before MCTS (default: False)")
+    parser.add_argument("--max-game-length", type=int, default=DEFAULT_MAX_GAME_LENGTH,
+                       help=f"Maximum moves before declaring draw (default: {DEFAULT_MAX_GAME_LENGTH})")
     
     # Evaluation
     parser.add_argument("--eval-games", type=int, default=DEFAULT_EVAL_GAMES,
@@ -378,6 +383,9 @@ if __name__ == "__main__":
     
     # Random opening moves
     config.use_random_opening_moves = args.use_random_opening_moves
+    
+    # Game length limit
+    config.max_game_length = args.max_game_length
     
     # Evaluation
     config.eval_games = args.eval_games
