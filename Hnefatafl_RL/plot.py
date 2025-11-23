@@ -31,8 +31,12 @@ def parse_output_file(filepath):
     # Store data per iteration, then compile at the end
     iterations_data = {}
     
+    # Track initial cumulative ELO offset (for resumed training)
+    initial_cumulative_elo = 0.0
+    
     data = {
         'iterations': [],
+        'initial_cumulative_elo': 0.0,  # Will be set from "Resuming with cumulative ELO"
         
         # Self-play results
         'selfplay_attacker_wins': [],
@@ -88,6 +92,13 @@ def parse_output_file(filepath):
     global_epoch_step = 0  # Track epochs across all iterations
     
     for i, line in enumerate(lines):
+        # Extract initial cumulative ELO offset (for resumed training)
+        if initial_cumulative_elo == 0.0:  # Only capture first occurrence
+            match = re.search(r'Resuming with cumulative ELO: ([+-]?[\d.]+)', line)
+            if match:
+                initial_cumulative_elo = float(match.group(1))
+                data['initial_cumulative_elo'] = initial_cumulative_elo
+        
         # Extract iteration number
         match = re.match(r'^Iteration (\d+)/\d+', line)
         if match:
@@ -344,7 +355,14 @@ def merge_data_from_files(file_data_list):
     """
     Merge data from multiple output files.
     
-    For cumulative ELO, adds the final ELO from each file to the values in subsequent files.
+    For cumulative ELO, adjusts values to be relative to the true first iteration.
+    
+    Strategy:
+    1. If a file has "Resuming with cumulative ELO: X", use X as the offset
+    2. Otherwise, if files are sequential (iterations continue from previous file),
+       use the last cumulative ELO from the previous file as the offset
+    3. For the first file, no offset is applied (it starts from iteration 0)
+    
     For other metrics, simply concatenates the data.
     
     Args:
@@ -354,10 +372,19 @@ def merge_data_from_files(file_data_list):
         Merged data dictionary
     """
     if len(file_data_list) == 1:
-        return file_data_list[0]
+        # Single file - adjust ELO by initial offset if present
+        data = file_data_list[0]
+        initial_offset = data.get('initial_cumulative_elo', 0.0)
+        if initial_offset != 0.0 and data['cumulative_elo_vs_first']:
+            # Adjust all cumulative ELO values by the initial offset
+            data['cumulative_elo_vs_first'] = [
+                elo + initial_offset for elo in data['cumulative_elo_vs_first']
+            ]
+        return data
     
     merged = {
         'iterations': [],
+        'initial_cumulative_elo': 0.0,  # Not used for merged data
         'selfplay_attacker_wins': [],
         'selfplay_defender_wins': [],
         'selfplay_draws': [],
@@ -397,16 +424,32 @@ def merge_data_from_files(file_data_list):
     cumulative_elo_offset = 0.0
     
     for file_idx, data in enumerate(file_data_list):
-        # For cumulative ELO, we need to add the offset from previous files
+        # Determine the ELO offset for this file
+        explicit_offset = data.get('initial_cumulative_elo', 0.0)
+        
+        if explicit_offset != 0.0:
+            # File has explicit "Resuming with cumulative ELO" - use that
+            elo_offset = explicit_offset
+        elif file_idx > 0:
+            # Not the first file and no explicit offset - assume sequential continuation
+            # Use the cumulative offset from previous files
+            elo_offset = cumulative_elo_offset
+        else:
+            # First file with no explicit offset - starts from true iteration 0
+            elo_offset = 0.0
+        
+        # For cumulative ELO, adjust by the offset to get absolute values
         if data['cumulative_elo_vs_first']:
-            # Add offset to all cumulative ELO values
-            adjusted_elo = [elo + cumulative_elo_offset for elo in data['cumulative_elo_vs_first']]
+            # Adjust all cumulative ELO values by adding the offset
+            # This converts file-relative ELO to absolute ELO vs true iteration 0
+            adjusted_elo = [elo + elo_offset for elo in data['cumulative_elo_vs_first']]
             merged['cumulative_elo_vs_first'].extend(adjusted_elo)
             merged['selfeval_iterations'].extend(data['selfeval_iterations'])
             merged['elo_difference'].extend(data['elo_difference'])
             
-            # Update offset for next file (add the ORIGINAL last ELO, not the adjusted one)
-            cumulative_elo_offset += data['cumulative_elo_vs_first'][-1]
+            # Update cumulative offset for next file
+            # Use the ORIGINAL last ELO value from this file + current offset
+            cumulative_elo_offset = elo_offset + data['cumulative_elo_vs_first'][-1]
         
         # For other self-evaluation metrics
         merged['selfeval_attacker_wins'].extend(data['selfeval_attacker_wins'])

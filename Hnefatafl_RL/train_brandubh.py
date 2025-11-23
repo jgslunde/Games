@@ -80,7 +80,7 @@ DEFAULT_USE_RANDOM_OPENING_MOVES = True
 DEFAULT_LR_DECAY = 0.99
 DEFAULT_LR_FLOOR = 3e-5
 DEFAULT_WEIGHT_DECAY = 1e-2
-DEFAULT_VALUE_LOSS_WEIGHT = 0.5
+DEFAULT_VALUE_LOSS_WEIGHT = 1.5
 
 # Dynamic loss boosting
 DEFAULT_USE_DYNAMIC_BOOSTING = False
@@ -93,7 +93,7 @@ DEFAULT_DRAW_PENALTY_ATTACKER = 0.0  # Draw value for attackers (neutral)
 DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 
 # MCTS exploration
-DEFAULT_C_PUCT = 1.5
+DEFAULT_C_PUCT = 2.5
 DEFAULT_FPU_REDUCTION = -0.5  # First Play Urgency: reduction relative to parent Q-value (like Leela Chess Zero)
 DEFAULT_EVAL_C_PUCT = 1.0  # Evaluation c_puct
 DEFAULT_EVAL_FPU_REDUCTION = -1.0  # Evaluation FPU reduction
@@ -117,7 +117,7 @@ DEFAULT_THRONE_ENABLED = False  # Whether throne exists and blocks movement
 DEFAULT_EVAL_GAMES = 128
 DEFAULT_EVAL_WIN_RATE = 0.70
 DEFAULT_EVAL_FREQUENCY = 4
-DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1  # Evaluate every iteration until 100% win rate achieved
+DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 9999999  # Evaluate every iteration until 100% win rate achieved
 
 # Checkpointing
 DEFAULT_SAVE_FREQUENCY = 1
