@@ -10,23 +10,39 @@ import numpy as np
 from typing import Tuple
 
 
-class ResidualBlock(nn.Module):
-    """Residual block with batch normalization."""
+class SEResidualBlock(nn.Module):
+    """Residual block with batch normalization and squeeze-and-excitation."""
     
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, reduction: int = 8):
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(channels)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
+        
+        # Squeeze and Excitation
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
+        )
     
     def forward(self, x):
         residual = x
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = self.bn2(self.conv2(x))
-        x += residual
-        x = F.relu(x)
-        return x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        
+        # Apply SE scaling
+        b, c, _, _ = out.size()
+        y = self.se(out).view(b, c, 1, 1)
+        out = out * y
+        
+        out += residual
+        out = F.relu(out)
+        return out
 
 
 class BrandubhNet(nn.Module):
@@ -59,7 +75,7 @@ class BrandubhNet(nn.Module):
         
         # Residual tower
         self.res_blocks = nn.ModuleList([
-            ResidualBlock(num_channels) for _ in range(num_res_blocks)
+            SEResidualBlock(num_channels) for _ in range(num_res_blocks)
         ])
         
         # Policy head - compact AlphaZero design
