@@ -72,6 +72,12 @@ class MCTSNode:
         
         legal_moves = self.get_legal_moves()
         
+        # Handle case where there are no legal moves
+        # This can happen in rare game states (though the game should be over)
+        if len(legal_moves) == 0:
+            # Don't mark as expanded - this is effectively a terminal node
+            return
+        
         # Use the probs as-is. If sum is 0 (unlikely), handle gracefully.
         if policy_probs.sum() > 0:
             legal_probs = policy_probs / policy_probs.sum()
@@ -101,8 +107,13 @@ class MCTSNode:
                           Negative values make unvisited nodes look worse than parent (pessimistic/conservative)
         
         Returns:
-            (action, child_node)
+            (action, child_node) or (None, None) if no children available
         """
+        # Safety check: handle case where there are no children
+        # This can happen if expand() was called with no legal moves
+        if not self.children:
+            return None, None
+        
         best_score = -float('inf')
         best_action = None
         best_child = None
@@ -268,41 +279,57 @@ class MCTS:
             t0 = time.perf_counter()
             while not node.is_leaf() and not node.is_terminal():
                 action, node = node.select_child(self.c_puct, self.fpu_reduction)
-                search_path.append(node)
-            self.timing_stats['selection'] += time.perf_counter() - t0
-            
-            # Evaluate leaf with neural network
-            value = 0
-            if node.is_terminal():
-                # Terminal node: use game result
-                t0 = time.perf_counter()
-                if node.game.winner == node.game.current_player:
-                    value = 1.0
-                elif node.game.winner == 1 - node.game.current_player:
+                # Safety check: if select_child returns None (no legal moves), treat as terminal
+                if node is None:
+                    # This means the parent node has no children (no legal moves)
+                    # Treat the parent as terminal even though game.game_over might not be set
+                    node = search_path[-1]  # Go back to parent
+                    # Mark this as a loss for current player (no legal moves = loss)
                     value = -1.0
-                else:
-                    value = 0.0
-                self.timing_stats['terminal_eval'] += time.perf_counter() - t0
+                    # Skip expansion and backup immediately
+                    for n in reversed(search_path):
+                        n.update(value)
+                        value = -value
+                    break
+                search_path.append(node)
             else:
-                # Non-terminal leaf: evaluate with network and expand
-                t0 = time.perf_counter()
-                policy_probs, value = self._evaluate(node.game)
-                self.timing_stats['network_eval'] += time.perf_counter() - t0
+                # Normal path: evaluate leaf with neural network
+                self.timing_stats['selection'] += time.perf_counter() - t0
+                # Normal path: evaluate leaf with neural network
+                self.timing_stats['selection'] += time.perf_counter() - t0
                 
-                t0 = time.perf_counter()
-                node.expand(policy_probs)
-                self.timing_stats['expansion'] += time.perf_counter() - t0
+                # Evaluate leaf with neural network
+                value = 0
+                if node.is_terminal():
+                    # Terminal node: use game result
+                    t0 = time.perf_counter()
+                    if node.game.winner == node.game.current_player:
+                        value = 1.0
+                    elif node.game.winner == 1 - node.game.current_player:
+                        value = -1.0
+                    else:
+                        value = 0.0
+                    self.timing_stats['terminal_eval'] += time.perf_counter() - t0
+                else:
+                    # Non-terminal leaf: evaluate with network and expand
+                    t0 = time.perf_counter()
+                    policy_probs, value = self._evaluate(node.game)
+                    self.timing_stats['network_eval'] += time.perf_counter() - t0
+                    
+                    t0 = time.perf_counter()
+                    node.expand(policy_probs)
+                    self.timing_stats['expansion'] += time.perf_counter() - t0
+                    
+                    # Add Dirichlet noise to root node after first expansion
+                    if sim_idx == 0 and node is root and self.add_dirichlet_noise:
+                        self._add_dirichlet_noise_to_node(root)
                 
-                # Add Dirichlet noise to root node after first expansion
-                if sim_idx == 0 and node is root and self.add_dirichlet_noise:
-                    self._add_dirichlet_noise_to_node(root)
-            
-            # Backup: propagate value up the tree
-            t0 = time.perf_counter()
-            for node in reversed(search_path):
-                node.update(value)
-                value = -value  # Flip value for opponent
-            self.timing_stats['backup'] += time.perf_counter() - t0
+                # Backup: propagate value up the tree
+                t0 = time.perf_counter()
+                for n in reversed(search_path):
+                    n.update(value)
+                    value = -value  # Flip value for opponent
+                self.timing_stats['backup'] += time.perf_counter() - t0
         
         return root.get_visit_distribution()
     

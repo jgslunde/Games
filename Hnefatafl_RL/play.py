@@ -35,7 +35,8 @@ from agent import Agent
 
 def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1_plays_attacker, 
                               game_name, simulations, king_capture_pieces, king_can_capture,
-                              throne_is_hostile, throne_enabled, time_per_move, temperature):
+                              throne_is_hostile, throne_enabled, time_per_move, temperature,
+                              c_puct1, c_puct2, fpu_reduction1, fpu_reduction2, temperature_threshold):
     """
     Worker function for playing a single game in a separate process.
     Returns tuple: (agent1_won, winner_role, move_count)
@@ -111,9 +112,11 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
         network1.eval()
         network2.eval()
         
-        # Create agents
-        agent1 = Agent(network1, num_simulations=simulations, device=device)
-        agent2 = Agent(network2, num_simulations=simulations, device=device)
+        # Create agents with separate C_PUCT and FPU values
+        agent1 = Agent(network1, num_simulations=simulations, device=device, 
+                      c_puct=c_puct1, fpu_reduction=fpu_reduction1)
+        agent2 = Agent(network2, num_simulations=simulations, device=device,
+                      c_puct=c_puct2, fpu_reduction=fpu_reduction2)
         
         # Play game
         move_count = 0
@@ -133,11 +136,14 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
             else:
                 current_agent = agent2
             
+            # Apply temperature threshold (drop to 0 after threshold)
+            current_temp = temperature if move_count < temperature_threshold else 0.0
+            
             # Select move with time limit if specified
             if time_per_move is not None:
-                move, value, visit_prob = current_agent.select_move_with_time_limit(game_state, time_per_move, temperature=temperature)
+                move, value, visit_prob = current_agent.select_move_with_time_limit(game_state, time_per_move, temperature=current_temp)
             else:
-                move, value, visit_prob = current_agent.select_move_with_stats(game_state, temperature=temperature)
+                move, value, visit_prob = current_agent.select_move_with_stats(game_state, temperature=current_temp)
             
             if move is None:
                 # No legal moves available - game should be over
@@ -238,7 +244,7 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, g
         sys.exit(1)
 
 
-def play_game_between_agents(agent1, agent2, game_class, rules, display=True, temperature=0.0, time_per_move=None):
+def play_game_between_agents(agent1, agent2, game_class, rules, display=True, temperature=0.0, time_per_move=None, temperature_threshold=999):
     """
     Play a game between two AI agents.
     
@@ -250,6 +256,7 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
         display: Whether to print the board state
         temperature: Temperature for move selection (0=deterministic)
         time_per_move: Optional time limit per move in seconds (if None, uses simulations)
+        temperature_threshold: Move number after which temperature drops to 0 (default: 999)
     
     Returns:
         winner: 0 for Attackers, 1 for Defenders, None for draw
@@ -276,11 +283,14 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
         # Get current agent
         current_agent = agent1 if game.current_player == 0 else agent2
         
+        # Apply temperature threshold (drop to 0 after threshold)
+        current_temp = temperature if move_count < temperature_threshold else 0.0
+        
         # Get move from agent with statistics (using time limit if specified)
         if time_per_move is not None:
-            move, value, visit_prob = current_agent.select_move_with_time_limit(game, time_per_move, temperature=temperature)
+            move, value, visit_prob = current_agent.select_move_with_time_limit(game, time_per_move, temperature=current_temp)
         else:
-            move, value, visit_prob = current_agent.select_move_with_stats(game, temperature=temperature)
+            move, value, visit_prob = current_agent.select_move_with_stats(game, temperature=current_temp)
         
         if move is None:
             # No legal moves - opponent wins
@@ -328,7 +338,8 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
 
 def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True, 
                         display=False, temperature=0.0, time_per_move=None, num_workers=1,
-                        checkpoint1_path=None, checkpoint2_path=None, game_name=None, simulations=None):
+                        checkpoint1_path=None, checkpoint2_path=None, game_name=None, simulations=None,
+                        c_puct1=1.4, c_puct2=1.4, fpu_reduction1=-0.5, fpu_reduction2=-0.5, temperature_threshold=999):
     """
     Play multiple games and collect statistics.
     
@@ -395,7 +406,8 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
             game_configs.append((
                 i, checkpoint1_path, checkpoint2_path, agent1_plays_attacker,
                 game_name, simulations, king_capture_pieces, king_can_capture,
-                throne_is_hostile, throne_enabled, time_per_move, temperature
+                throne_is_hostile, throne_enabled, time_per_move, temperature,
+                c_puct1, c_puct2, fpu_reduction1, fpu_reduction2, temperature_threshold
             ))
         
         # Play games in parallel using imap_unordered for better progress tracking
@@ -435,7 +447,9 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
             
             total_moves += moves
             
-            if (i + 1) % 10 == 0 or games_to_play <= 10:
+            # Print progress every num_workers games (or at least every 10 games if num_workers is small)
+            print_interval = max(num_workers, 10) if games_to_play > 20 else 1
+            if (i + 1) % print_interval == 0 or (i + 1) == games_to_play:
                 print(f"Completed {i + 1}/{games_to_play} games...")
     else:
         # Sequential game playing (original implementation)
@@ -449,7 +463,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                     agent2_defender_games += 1
                     winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, 
                                                              display=display, temperature=temperature, 
-                                                             time_per_move=time_per_move)
+                                                             time_per_move=time_per_move, temperature_threshold=temperature_threshold)
                     if winner == 0:
                         agent1_attacker_wins += 1
                     elif winner == 1:
@@ -474,7 +488,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                     agent2_defender_games += 1
                     winner, moves = play_game_between_agents(agent1, agent2, game_class, rules, 
                                                              display=display, temperature=temperature,
-                                                             time_per_move=time_per_move)
+                                                             time_per_move=time_per_move, temperature_threshold=temperature_threshold)
                     if winner == 0:
                         agent1_attacker_wins += 1
                     elif winner == 1:
@@ -485,7 +499,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                     agent1_defender_games += 1
                     winner, moves = play_game_between_agents(agent2, agent1, game_class, rules, 
                                                              display=display, temperature=temperature,
-                                                             time_per_move=time_per_move)
+                                                             time_per_move=time_per_move, temperature_threshold=temperature_threshold)
                     if winner == 0:
                         agent2_attacker_wins += 1
                     elif winner == 1:
@@ -496,7 +510,15 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
             
             total_moves += moves
             
-            if (i + 1) % 10 == 0 or games_to_play <= 10:
+            # Adaptive progress printing
+            if games_to_play <= 10:
+                print_interval = 1
+            elif games_to_play <= 50:
+                print_interval = 10
+            else:
+                print_interval = max(10, games_to_play // 10)
+            
+            if (i + 1) % print_interval == 0 or (i + 1) == games_to_play:
                 print(f"Completed {i + 1}/{games_to_play} games...")
     
     # Calculate overall statistics
@@ -577,9 +599,21 @@ def main():
     parser.add_argument("--simulations", type=int, default=100,
                        help="Number of MCTS simulations per move (default: 100)")
     parser.add_argument("--c-puct", type=float, default=1.4,
-                       help="MCTS exploration constant (default: 1.4)")
+                       help="MCTS exploration constant for both agents (default: 1.4)")
+    parser.add_argument("--c-puct1", type=float, default=None,
+                       help="MCTS exploration constant for agent 1 (overrides --c-puct)")
+    parser.add_argument("--c-puct2", type=float, default=None,
+                       help="MCTS exploration constant for agent 2 (overrides --c-puct)")
+    parser.add_argument("--fpu-reduction", type=float, default=-0.5,
+                       help="First Play Urgency reduction for both agents (default: -0.5)")
+    parser.add_argument("--fpu-reduction1", type=float, default=None,
+                       help="First Play Urgency reduction for agent 1 (overrides --fpu-reduction)")
+    parser.add_argument("--fpu-reduction2", type=float, default=None,
+                       help="First Play Urgency reduction for agent 2 (overrides --fpu-reduction)")
     parser.add_argument("--temperature", type=float, default=0.0,
                        help="Temperature for move selection (0=deterministic, higher=more random) (default: 0.0)")
+    parser.add_argument("--temperature-threshold", type=int, default=999,
+                       help="Move number (ply) after which temperature drops to 0 (default: 999, effectively disabled)")
     parser.add_argument("--dirichlet-noise", action="store_true",
                        help="Add Dirichlet noise to root node for variety (used during training)")
     parser.add_argument("--dirichlet-alpha", type=float, default=0.3,
@@ -669,7 +703,7 @@ def main():
         print(f"Checkpoint 2 rules: {rules2}")
         print("Using rules from checkpoint 1. Use --force-rules to override.")
     
-    print(f"\nUsing rules: {rules}\n")
+    print(f"\nUsing rules: {rules}")
     
     # Determine move encoder class based on game type
     if game_class == Tablut:
@@ -682,20 +716,54 @@ def main():
         from network import MoveEncoder
         move_encoder_class = MoveEncoder
     
-    # Create agents with optional Dirichlet noise
-    agent1 = Agent(network1, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu',
+    # Determine C_PUCT and FPU values for each agent
+    c_puct1 = args.c_puct1 if args.c_puct1 is not None else args.c_puct
+    c_puct2 = args.c_puct2 if args.c_puct2 is not None else args.c_puct
+    fpu_reduction1 = args.fpu_reduction1 if args.fpu_reduction1 is not None else args.fpu_reduction
+    fpu_reduction2 = args.fpu_reduction2 if args.fpu_reduction2 is not None else args.fpu_reduction
+    
+    # Print comprehensive game parameters
+    print("\n" + "=" * 50)
+    print("Game Parameters:")
+    print("=" * 50)
+    print(f"Game variant: {args.game}")
+    print(f"Number of simulations: {args.simulations}")
+    if args.time_per_move is not None:
+        print(f"Time per move: {args.time_per_move}s (overrides simulations)")
+    print(f"Temperature: {args.temperature}")
+    if args.temperature > 0:
+        print(f"Temperature threshold: {args.temperature_threshold} moves")
+    if args.dirichlet_noise:
+        print(f"Dirichlet noise: enabled (alpha={args.dirichlet_alpha})")
+    
+    print(f"\nAgent 1 MCTS: C_PUCT={c_puct1}, FPU_reduction={fpu_reduction1}")
+    print(f"Agent 2 MCTS: C_PUCT={c_puct2}, FPU_reduction={fpu_reduction2}")
+    
+    if args.num_games > 1:
+        print(f"\nNumber of games: {args.num_games}")
+        if args.swap_colors:
+            print(f"Mode: Swap colors (total {args.num_games * 2} games)")
+        else:
+            print(f"Mode: Alternate colors")
+        if args.num_workers > 1:
+            print(f"Parallel workers: {args.num_workers}")
+    print("=" * 50 + "\n")
+    
+    # Create agents with optional Dirichlet noise and separate C_PUCT/FPU values
+    agent1 = Agent(network1, num_simulations=args.simulations, c_puct=c_puct1, device='cpu',
                    add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha,
-                   move_encoder_class=move_encoder_class)
-    agent2 = Agent(network2, num_simulations=args.simulations, c_puct=args.c_puct, device='cpu',
+                   move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction1)
+    agent2 = Agent(network2, num_simulations=args.simulations, c_puct=c_puct2, device='cpu',
                    add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha,
-                   move_encoder_class=move_encoder_class)
+                   move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction2)
     
     # Play games
     if args.num_games == 1 and not args.swap_colors:
         # Single game - display by default (unless --display explicitly set to override)
         display = args.display if args.display else True
         play_game_between_agents(agent1, agent2, game_class, rules, display=display, 
-                                temperature=args.temperature, time_per_move=args.time_per_move)
+                                temperature=args.temperature, time_per_move=args.time_per_move,
+                                temperature_threshold=args.temperature_threshold)
     else:
         # Multiple games - hide display by default (unless --display explicitly set)
         play_multiple_games(agent1, agent2, game_class, rules, 
@@ -708,7 +776,12 @@ def main():
                           checkpoint1_path=args.checkpoint1,
                           checkpoint2_path=args.checkpoint2,
                           game_name=args.game,
-                          simulations=args.simulations)
+                          simulations=args.simulations,
+                          c_puct1=c_puct1,
+                          c_puct2=c_puct2,
+                          fpu_reduction1=fpu_reduction1,
+                          fpu_reduction2=fpu_reduction2,
+                          temperature_threshold=args.temperature_threshold)
 
 
 if __name__ == "__main__":

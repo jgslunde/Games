@@ -83,6 +83,14 @@ def parse_output_file(filepath):
         # Buffer and time
         'buffer_size': [],
         'total_time': [],
+        
+        # Learning rate and game statistics
+        'learning_rate': [],
+        'avg_game_length': [],
+        
+        # Unique states tracking
+        'unique_states_skip_initial_fraction': [],
+        'unique_states_skip_6ply_fraction': [],
     }
     
     with open(filepath, 'r') as f:
@@ -241,6 +249,30 @@ def parse_output_file(filepath):
             iterations_data[current_iteration]['total_time'] = float(match.group(1))
             continue
         
+        # Learning rate
+        match = re.search(r'Learning rate: ([\d.]+)', line)
+        if match and current_iteration is not None:
+            iterations_data[current_iteration]['learning_rate'] = float(match.group(1))
+            continue
+        
+        # Average game length
+        match = re.search(r'Average game length: ([\d.]+) moves', line)
+        if match:
+            iterations_data[current_iteration]['avg_game_length'] = float(match.group(1))
+            continue
+        
+        # Unique states (skip initial)
+        match = re.search(r'Unique states \(skip initial\): \d+ / \d+ \(([\d.]+)%\)', line)
+        if match:
+            iterations_data[current_iteration]['unique_states_skip_initial_fraction'] = float(match.group(1))
+            continue
+        
+        # Unique states (skip 6 ply)
+        match = re.search(r'Unique states \(skip 6 ply\): \d+ / \d+ \(([\d.]+)%\)', line)
+        if match:
+            iterations_data[current_iteration]['unique_states_skip_6ply_fraction'] = float(match.group(1))
+            continue
+        
         # Epoch-level losses (e.g., "  Epoch 1/10: policy=2.3456, value=0.5678, total=2.9134")
         # Old format
         match = re.search(r'Epoch (\d+)/\d+: policy=([\d.]+), value=([\d.]+)', line)
@@ -318,6 +350,28 @@ def parse_output_file(filepath):
             else:
                 # Use previous value if available, otherwise 0
                 data['total_time'].append(data['total_time'][-1] if data['total_time'] else 0)
+            
+            if 'learning_rate' in iter_data:
+                data['learning_rate'].append(iter_data['learning_rate'])
+            else:
+                # Use previous value if available, otherwise 0
+                data['learning_rate'].append(data['learning_rate'][-1] if data['learning_rate'] else 0)
+            
+            if 'avg_game_length' in iter_data:
+                data['avg_game_length'].append(iter_data['avg_game_length'])
+            else:
+                # Use previous value if available, otherwise 0
+                data['avg_game_length'].append(data['avg_game_length'][-1] if data['avg_game_length'] else 0)
+            
+            if 'unique_states_skip_initial_fraction' in iter_data:
+                data['unique_states_skip_initial_fraction'].append(iter_data['unique_states_skip_initial_fraction'])
+            else:
+                data['unique_states_skip_initial_fraction'].append(data['unique_states_skip_initial_fraction'][-1] if data['unique_states_skip_initial_fraction'] else 0)
+            
+            if 'unique_states_skip_6ply_fraction' in iter_data:
+                data['unique_states_skip_6ply_fraction'].append(iter_data['unique_states_skip_6ply_fraction'])
+            else:
+                data['unique_states_skip_6ply_fraction'].append(data['unique_states_skip_6ply_fraction'][-1] if data['unique_states_skip_6ply_fraction'] else 0)
             
             # Random evaluation data (tracked separately)
             if 'random_elo' in iter_data:
@@ -419,6 +473,10 @@ def merge_data_from_files(file_data_list):
         'epoch_val_l2_loss': [],
         'buffer_size': [],
         'total_time': [],
+        'learning_rate': [],
+        'avg_game_length': [],
+        'unique_states_skip_initial_fraction': [],
+        'unique_states_skip_6ply_fraction': [],
     }
     
     cumulative_elo_offset = 0.0
@@ -495,6 +553,10 @@ def merge_data_from_files(file_data_list):
         
         merged['buffer_size'].extend(data['buffer_size'])
         merged['total_time'].extend(data['total_time'])
+        merged['learning_rate'].extend(data['learning_rate'])
+        merged['avg_game_length'].extend(data['avg_game_length'])
+        merged['unique_states_skip_initial_fraction'].extend(data['unique_states_skip_initial_fraction'])
+        merged['unique_states_skip_6ply_fraction'].extend(data['unique_states_skip_6ply_fraction'])
     
     return merged
 
@@ -698,23 +760,39 @@ def plot_epoch_losses(data, output_dir):
 
 
 def plot_gradients(data, output_dir):
-    """Plot 6: Per-iteration gradient norms for policy and value heads."""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    """Plot 6: Per-iteration gradient norms for policy and value heads, and average game length."""
+    fig, ax1 = plt.subplots(figsize=(10, 6))
     
     iterations = data['iterations']
     
+    # Plot gradient norms on left y-axis
+    color1_policy = 'tab:blue'
+    color1_value = 'tab:red'
+    ax1.set_xlabel('Iteration', fontsize=12)
+    ax1.set_ylabel('Gradient Norm', fontsize=12)
     if data['policy_grad']:
-        ax.plot(iterations, data['policy_grad'], 'o-', color='tab:blue', 
+        ax1.plot(iterations, data['policy_grad'], 'o-', color=color1_policy, 
                label='Policy Gradient Norm', linewidth=2, markersize=4)
     if data['value_grad']:
-        ax.plot(iterations, data['value_grad'], 's-', color='tab:red', 
+        ax1.plot(iterations, data['value_grad'], 's-', color=color1_value, 
                label='Value Gradient Norm', linewidth=2, markersize=4)
+    ax1.grid(True, alpha=0.3)
     
-    ax.set_xlabel('Iteration', fontsize=12)
-    ax.set_ylabel('Gradient Norm', fontsize=12)
-    ax.set_title('Gradient Norms (Per Iteration)', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='upper right', fontsize=11)
+    # Plot average game length on right y-axis
+    ax2 = ax1.twinx()
+    color2 = 'tab:green'
+    ax2.set_ylabel('Avg Game Length (moves)', fontsize=12, color=color2)
+    if data['avg_game_length']:
+        ax2.plot(iterations, data['avg_game_length'], '^-', color=color2, 
+               label='Avg Game Length', linewidth=2, markersize=4, alpha=0.7)
+    ax2.tick_params(axis='y', labelcolor=color2)
+    
+    ax1.set_title('Gradient Norms and Game Length (Per Iteration)', fontsize=14, fontweight='bold')
+    
+    # Add legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=11)
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'plot_gradients.png'), dpi=150)
@@ -745,8 +823,76 @@ def plot_epoch_gradients(data, output_dir):
     plt.close()
 
 
+def plot_diversity_metrics(data, output_dir):
+    """Plot 8: Unique states fractions, average game length, and draw rate."""
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    
+    iterations = data['iterations']
+    
+    # Plot unique states fractions on left y-axis
+    color1 = 'tab:blue'
+    color2 = 'tab:cyan'
+    ax1.set_xlabel('Iteration', fontsize=12)
+    ax1.set_ylabel('Unique States Fraction (%)', fontsize=12, color=color1)
+    if data['unique_states_skip_initial_fraction']:
+        # Filter out zeros (missing data)
+        skip_init_data = [(i, v) for i, v in zip(iterations, data['unique_states_skip_initial_fraction']) if v > 0]
+        if skip_init_data:
+            iters_skip_init, vals_skip_init = zip(*skip_init_data)
+            ax1.plot(iters_skip_init, vals_skip_init, 'o-', color=color1, 
+                   label='Unique States (skip initial)', linewidth=2, markersize=4)
+    
+    if data['unique_states_skip_6ply_fraction']:
+        # Filter out zeros (missing data)
+        skip_6ply_data = [(i, v) for i, v in zip(iterations, data['unique_states_skip_6ply_fraction']) if v > 0]
+        if skip_6ply_data:
+            iters_skip_6ply, vals_skip_6ply = zip(*skip_6ply_data)
+            ax1.plot(iters_skip_6ply, vals_skip_6ply, 's-', color=color2, 
+                   label='Unique States (skip 6 ply)', linewidth=2, markersize=4)
+    
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_ylim([0, 105])
+    
+    # Plot average game length on right y-axis
+    ax2 = ax1.twinx()
+    color3 = 'tab:green'
+    ax2.set_ylabel('Avg Game Length (moves)', fontsize=12, color=color3)
+    if data['avg_game_length']:
+        # Filter out zeros (missing data)
+        game_length_data = [(i, v) for i, v in zip(iterations, data['avg_game_length']) if v > 0]
+        if game_length_data:
+            iters_length, vals_length = zip(*game_length_data)
+            ax2.plot(iters_length, vals_length, '^-', color=color3, 
+                   label='Avg Game Length', linewidth=2, markersize=4, alpha=0.7)
+    ax2.tick_params(axis='y', labelcolor=color3)
+    
+    # Plot draw rate on far right y-axis
+    ax3 = ax1.twinx()
+    ax3.spines['right'].set_position(('outward', 60))
+    color4 = 'tab:orange'
+    ax3.set_ylabel('Draw Rate (%)', fontsize=12, color=color4)
+    if data['selfplay_draws']:
+        ax3.plot(iterations, data['selfplay_draws'], 'D-', color=color4, 
+               label='Draw Rate', linewidth=2, markersize=4, alpha=0.7)
+    ax3.tick_params(axis='y', labelcolor=color4)
+    ax3.set_ylim([0, 105])
+    
+    ax1.set_title('Game Diversity Metrics (Per Iteration)', fontsize=14, fontweight='bold')
+    
+    # Add legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    lines3, labels3 = ax3.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, loc='upper left', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'plot_diversity.png'), dpi=150)
+    plt.close()
+
+
 def plot_buffer_and_time(data, output_dir):
-    """Plot 4: Buffer size and total time with dual y-axes."""
+    """Plot 4: Buffer size, total time, and learning rate with triple y-axes."""
     fig, ax1 = plt.subplots(figsize=(10, 6))
     
     iterations = data['iterations']
@@ -770,13 +916,24 @@ def plot_buffer_and_time(data, output_dir):
     ax2.tick_params(axis='y', labelcolor=color2)
     ax2.set_ylim(bottom=0)
     
+    # Add learning rate on far right y-axis
+    ax3 = ax1.twinx()
+    ax3.spines['right'].set_position(('outward', 60))
+    color3 = 'tab:blue'
+    ax3.set_ylabel('Learning Rate', fontsize=12, color=color3)
+    if data['learning_rate']:
+        ax3.plot(iterations, data['learning_rate'], '^-', color=color3, label='Learning Rate', linewidth=2, markersize=4)
+    ax3.tick_params(axis='y', labelcolor=color3)
+    ax3.set_ylim(bottom=0)
+    
     # Add title
-    ax1.set_title('Buffer Size and Iteration Time', fontsize=14, fontweight='bold')
+    ax1.set_title('Buffer Size, Iteration Time, and Learning Rate', fontsize=14, fontweight='bold')
     
     # Add legends
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=11)
+    lines3, labels3 = ax3.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, loc='upper left', fontsize=10)
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'plot_buffer_time.png'), dpi=150)
@@ -826,6 +983,7 @@ def main():
     print(f"  - Gradients: {len(data['policy_grad'])} data points")
     print(f"  - Epoch-level losses: {len(data['epoch_policy_loss'])} epochs")
     print(f"  - Epoch-level gradients: {len(data['epoch_policy_grad'])} epochs")
+    print(f"  - Unique states tracking: {sum(1 for x in data['unique_states_skip_initial_fraction'] if x > 0)} data points")
     
     plot_elo(data, output_dir)
     print("  ✓ Saved plot_elo.png")
@@ -850,6 +1008,12 @@ def main():
     if data['epoch_policy_grad']:
         plot_epoch_gradients(data, output_dir)
         print("  ✓ Saved plot_epoch_gradients.png")
+    
+    # Plot diversity metrics if unique states data is available
+    has_unique_states = any(x > 0 for x in data['unique_states_skip_initial_fraction'])
+    if has_unique_states or data['avg_game_length']:
+        plot_diversity_metrics(data, output_dir)
+        print("  ✓ Saved plot_diversity.png")
     
     print(f"\nAll plots saved to {output_dir}/")
 

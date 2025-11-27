@@ -96,10 +96,10 @@ DEFAULT_DRAW_PENALTY_ATTACKER = 0.0  # Draw value for attackers (neutral)
 DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 
 # MCTS exploration
-DEFAULT_C_PUCT = 1.5
-DEFAULT_FPU_REDUCTION = -0.5  # First Play Urgency: reduction relative to parent Q-value (like Leela Chess Zero)
-DEFAULT_EVAL_C_PUCT = 1.0  # Evaluation c_puct
-DEFAULT_EVAL_FPU_REDUCTION = -0.5  # Evaluation FPU reduction
+DEFAULT_C_PUCT = 2.5
+DEFAULT_FPU_REDUCTION = 0.0  # First Play Urgency: reduction relative to parent Q-value (like Leela Chess Zero)
+DEFAULT_EVAL_C_PUCT = 1.5  # Evaluation c_puct
+DEFAULT_EVAL_FPU_REDUCTION = -0.25  # Evaluation FPU reduction
 
 # Dynamic simulation balancing
 DEFAULT_USE_DYNAMIC_SIM_BALANCING = True  # Dynamically adjust simulation counts to target 50% win rate
@@ -108,7 +108,7 @@ DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE = 0.2  # Fraction of win rate difference use
 # Dirichlet noise (exploration during self-play)
 DEFAULT_ADD_DIRICHLET_NOISE = True  # Enable Dirichlet noise in self-play for exploration
 DEFAULT_DIRICHLET_ALPHA = 0.3  # Concentration parameter (lower = more concentrated)
-DEFAULT_DIRICHLET_EPSILON = 0.25  # Weight of noise (0.25 = 25% noise, 75% network priors)
+DEFAULT_DIRICHLET_EPSILON = 0.35  # Weight of noise (0.25 = 25% noise, 75% network priors)
 
 # Game rules
 DEFAULT_KING_CAPTURE_PIECES = 2  # 2, 3, or 4 pieces needed to capture king
