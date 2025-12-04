@@ -81,6 +81,7 @@ class TrainingConfig:
     num_mcts_sims_defender = 100      # MCTS simulations for defender in self-play
     c_puct = 1.4                      # MCTS exploration constant for self-play
     fpu_reduction = -0.5              # First Play Urgency for self-play: reduction relative to parent Q-value (default: -0.5, like Leela Chess Zero)
+    search_discount = 1.0             # Search depth discount per move during MCTS backup (1.0 = no discount)
     num_workers = mp.cpu_count()      # Number of parallel workers (default: all CPUs)
     
     # Dynamic simulation balancing (target 50% win rate)
@@ -108,6 +109,7 @@ class TrainingConfig:
     num_res_blocks = 4                # Residual blocks in network
     num_channels = 64                 # Channels in convolutional layers
     value_head_hidden_size = 64       # Hidden layer size in value head
+    history_length = 1                # Number of timesteps to include in network input (1 = current only)
     
     # Training
     batch_size = 32                   # Training batch size
@@ -116,6 +118,13 @@ class TrainingConfig:
     learning_rate = 0.001             # Initial learning rate
     lr_decay = 0.95                   # Learning rate decay per iteration
     lr_floor = 1e-6                   # Minimum learning rate (floor below which LR won't decay)
+    
+    # Stepping learning rate schedule (alternative to exponential decay)
+    use_stepping_lr = False           # If True, use stepping LR instead of exponential decay
+    lr_step_iterations = []           # Iterations at which to step LR (e.g., [50, 100, 150])
+    lr_step_values = []               # LR values for each step (must be len(lr_step_iterations) + 1)
+                                      # e.g., [0.001, 0.0003, 0.0001, 0.00003] for 4 regions
+    
     weight_decay = 1e-4               # L2 regularization
     value_loss_weight = 10.0           # Weight for value loss (policy loss weight is always 1.0)
     
@@ -169,6 +178,9 @@ class TrainingConfig:
     
     # Game length limit
     max_game_length = 500             # Maximum moves before declaring draw
+    
+    # Time-weighted rewards (discounting future rewards)
+    reward_discount = 0.98            # Discount factor per move (1.0 = no discount)
 
 
 # =============================================================================
@@ -635,7 +647,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                                 king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
                                 network_module, network_class_name, game_module, game_class_name,
                                 add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, fpu_reduction, temp_dir=None,
-                                track_unique_states=False, use_random_opening_moves=False, max_game_length=500):
+                                track_unique_states=False, use_random_opening_moves=False, max_game_length=500,
+                                search_discount=1.0, history_length=1):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
@@ -670,6 +683,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         track_unique_states: If True, collect state hashes for diversity analysis
         use_random_opening_moves: If True, 50% of games start with 1-4 random moves (2-8 ply)
         max_game_length: Maximum number of moves before declaring draw
+        search_discount: Discount factor per move during MCTS value backup (1.0 = no discount)
+        history_length: Number of timesteps for history planes in network input (1 = current only)
     
     Returns:
         dict with game data and MCTS timing information
@@ -724,9 +739,10 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         
         # Reconstruct network on CPU and load from file
         network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels, 
-                             value_head_hidden_size=value_head_hidden_size)
+                             value_head_hidden_size=value_head_hidden_size,
+                             history_length=history_length)
         checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
-        network.load_state_dict(checkpoint['model_state_dict'])
+        network.load_state_dict_compatible(checkpoint['model_state_dict'])
         network.to('cpu')
         network.eval()
         
@@ -739,11 +755,13 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu', 
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
                             dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
-                            fpu_reduction=fpu_reduction)
+                            fpu_reduction=fpu_reduction, search_discount=search_discount,
+                            history_length=history_length)
         mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu',
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
                             dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
-                            fpu_reduction=fpu_reduction)
+                            fpu_reduction=fpu_reduction, search_discount=search_discount,
+                            history_length=history_length)
         mcts_attacker.reset_timing_stats()
         mcts_defender.reset_timing_stats()
         
@@ -762,6 +780,15 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         
         # State hash tracking (only if enabled)
         state_hashes = [] if track_unique_states else None
+        
+        # Initialize state history for history planes support
+        # Import StateHistory from network module
+        if history_length > 1:
+            from network import StateHistory
+            state_history = StateHistory(history_length=history_length, board_size=board_size)
+            state_history.push(game.get_piece_planes())
+        else:
+            state_history = None
         
         # Random opening moves (if enabled)
         # In 50% of games, play 1-4 random moves (2-8 ply) before starting MCTS
@@ -785,6 +812,10 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                     random_move = legal_moves[np.random.randint(len(legal_moves))]
                     game.make_move(random_move)
                     move_count += 1
+                    
+                    # Update state history after each random move
+                    if state_history is not None:
+                        state_history.push(game.get_piece_planes())
                 
                 # Now store the state AFTER random opening (this is the only state we keep from opening)
                 # This becomes the "initial" state for training purposes
@@ -815,8 +846,14 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                 # Drop temperature after a fixed number of moves
                 temp = temperature if move_count < temperature_threshold else 0.0
             
-            # Get state
-            state = game.get_state()
+            # Get state for training
+            # If using history planes, get full state with history; otherwise use simple state
+            if state_history is not None:
+                # Get state with history planes (history_length * 3 + 1 channels)
+                state = state_history.get_state_with_history(game.current_player)
+            else:
+                # Standard 4-channel state (backward compatible)
+                state = game.get_state()
             
             # Check for mate-in-1 (winning move in current position)
             mate_in_1_move = None
@@ -842,7 +879,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                 visit_probs = {mate_in_1_move: 1.0}
             else:
                 # Run MCTS to get policy (normal case)
-                visit_probs = mcts.search(game)
+                # Pass state_history for history planes support
+                visit_probs = mcts.search(game, state_history=state_history)
                 
                 # Convert to policy vector
                 policy_size = board_size * board_size * 4 * (board_size - 1)
@@ -879,6 +917,10 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
             
             game.make_move(move)
             move_count += 1
+            
+            # Update state history after the move
+            if state_history is not None:
+                state_history.push(game.get_piece_planes())
             
             # Safety check for move limit
             if move_count > max_game_length:
@@ -1111,7 +1153,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                        config.game_class.__module__, config.game_class.__name__,
                        config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
                        config.fpu_reduction, config.temp_dir, config.track_unique_states,
-                       config.use_random_opening_moves, config.max_game_length)
+                       config.use_random_opening_moves, config.max_game_length, config.search_discount,
+                       config.history_length)
                 game_idx += 1
         
         # Play games in parallel
@@ -1220,7 +1263,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                         config.game_class.__module__, config.game_class.__name__,
                         config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
                         config.fpu_reduction, config.temp_dir, config.track_unique_states,
-                        config.use_random_opening_moves, config.max_game_length)
+                        config.use_random_opening_moves, config.max_game_length, config.search_discount,
+                        config.history_length)
                 game_results.append(_play_self_play_game_worker(*args))
     finally:
         # Clean up temporary file
@@ -1271,26 +1315,37 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         # Get mate-in-1 flags if present
         mate_in_1_flags = game_data.get('mate_in_1_flags', [False] * len(game_data['states']))
         
+        # Compute time-weighted discount factors for each position
+        # discount[i] = reward_discount^(num_moves - 1 - i) where i is position index
+        # Last move gets discount=1.0, earlier moves get increasingly discounted
+        num_positions = len(game_data['states'])
+        gamma = config.reward_discount
+        discount_factors = [gamma ** (num_positions - 1 - i) for i in range(num_positions)]
+        
         # Add to buffer
-        for state, policy, player, is_mate_in_1 in zip(game_data['states'], 
+        for i, (state, policy, player, is_mate_in_1) in enumerate(zip(game_data['states'], 
                                                          game_data['policies'], 
                                                          game_data['players'],
-                                                         mate_in_1_flags):
-            # Determine value from player's perspective
+                                                         mate_in_1_flags)):
+            # Determine base value from player's perspective
             if is_mate_in_1:
-                # Mate-in-1 position: always value +1.0 for the player to move
+                # Mate-in-1 position: always value +1.0 for the player to move (no discount)
                 value = 1.0
             elif winner is None or (not game_data.get('winner') and draw_reason == 'move_limit'):
                 # Draw (only by move limit - repetitions are illegal moves)
                 # Apply player-specific draw penalty
                 if player == 0:  # Attacker
-                    value = config.draw_penalty_attacker
+                    base_value = config.draw_penalty_attacker
                 else:  # Defender (player == 1)
-                    value = config.draw_penalty_defender
+                    base_value = config.draw_penalty_defender
+                # Apply time-weighted discount
+                value = base_value * discount_factors[i]
             elif winner == player:
-                value = 1.0
+                # Apply time-weighted discount to winning value
+                value = 1.0 * discount_factors[i]
             elif winner == 1 - player:
-                value = -1.0
+                # Apply time-weighted discount to losing value
+                value = -1.0 * discount_factors[i]
             else:
                 value = 0.0  # Shouldn't happen
             
@@ -1399,7 +1454,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     """
     # Compile network for faster training (~18% speedup)
     # This creates a compiled wrapper that's only used during training
-    network_compiled = torch.compile(network, mode='default')
+    # Use dynamic=True to handle variable batch sizes properly
+    network_compiled = torch.compile(network, mode='default', dynamic=True)
     network_compiled.train()
     device = config.device
     
@@ -1408,13 +1464,29 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     buffer_list = list(buffer.buffer)
     total_samples = len(buffer_list)
     
+    # Determine state shape from first sample (handles variable history_length)
+    first_state = buffer_list[0][0]
+    state_shape = first_state.shape  # e.g., (4, 7, 7) or (13, 7, 7) for history_length=4
+    expected_channels = config.history_length * 3 + 1
+    
+    # Verify states match network's expected input channels
+    network_input_channels = network.input_channels
+    if state_shape[0] != network_input_channels:
+        raise ValueError(f"State channels ({state_shape[0]}) don't match network input channels ({network_input_channels}). "
+                        f"Expected {expected_channels} channels for history_length={config.history_length}. "
+                        f"This may indicate a mismatch in history_length configuration.")
+    
     # Pre-allocate arrays and copy data (much faster than repeated indexing)
-    all_states = np.zeros((total_samples, 4, 7, 7), dtype=np.float32)
+    all_states = np.zeros((total_samples,) + state_shape, dtype=np.float32)
     all_policies = np.zeros((total_samples, config.policy_size), dtype=np.float32)
     all_values = np.zeros(total_samples, dtype=np.float32)
     all_attacker_won = np.zeros(total_samples, dtype=bool)
     
     for i, (state, policy, value, attacker_won) in enumerate(buffer_list):
+        if state.shape != state_shape:
+            raise ValueError(f"State shape mismatch at index {i}: expected {state_shape}, got {state.shape}. "
+                           f"This may happen if history_length changed between self-play games. "
+                           f"Clear the replay buffer or restart training.")
         all_states[i] = state
         all_policies[i] = policy
         all_values[i] = value
@@ -1675,7 +1747,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 
 def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
                                 num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
-                                network_module, network_class_name, game_module, game_class_name, fpu_reduction=-0.5):
+                                network_module, network_class_name, game_module, game_class_name, fpu_reduction=-0.5,
+                                history_length=1):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1737,9 +1810,10 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
     
     # Reconstruct network on CPU and load from file
     network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
-                         value_head_hidden_size=value_head_hidden_size)
+                         value_head_hidden_size=value_head_hidden_size,
+                         history_length=history_length)
     checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
-    network.load_state_dict(checkpoint['model_state_dict'])
+    network.load_state_dict_compatible(checkpoint['model_state_dict'])
     network.to('cpu')
     network.eval()
     
@@ -1754,7 +1828,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     nn_agent = Agent(network, num_simulations=num_simulations,
                      c_puct=c_puct, device='cpu', move_encoder_class=MoveEncoderClass,
-                     fpu_reduction=fpu_reduction)
+                     fpu_reduction=fpu_reduction, history_length=history_length)
     random_agent = RandomAgent()
     
     # Play game
@@ -1850,7 +1924,8 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             network_class_name=config.network_class.__name__,
             game_module=config.game_class.__module__,
             game_class_name=config.game_class.__name__,
-            fpu_reduction=config.eval_fpu_reduction
+            fpu_reduction=config.eval_fpu_reduction,
+            history_length=config.history_length
         )
         
         worker_func_defender = partial(
@@ -1867,7 +1942,8 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             network_class_name=config.network_class.__name__,
             game_module=config.game_class.__module__,
             game_class_name=config.game_class.__name__,
-            fpu_reduction=config.eval_fpu_reduction
+            fpu_reduction=config.eval_fpu_reduction,
+            history_length=config.history_length
         )
         
         # Play games in parallel
@@ -1933,7 +2009,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                              num_res_blocks, num_channels, value_head_hidden_size, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker,
                              network_module, network_class_name, game_module, game_class_name,
-                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_reduction, temp_dir=None):
+                             game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_reduction, temp_dir=None,
+                             history_length=1):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -2010,9 +2087,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     
     # Reconstruct networks on CPU and load from files
     new_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
-                             value_head_hidden_size=value_head_hidden_size)
+                             value_head_hidden_size=value_head_hidden_size,
+                             history_length=history_length)
     checkpoint = torch.load(new_network_path, map_location='cpu', weights_only=False)
-    new_network.load_state_dict(checkpoint['model_state_dict'])
+    new_network.load_state_dict_compatible(checkpoint['model_state_dict'])
     new_network.to('cpu')
     new_network.eval()
     
@@ -2021,9 +2099,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     new_network = new_network.optimize_for_inference(use_compile=True, compile_mode='default')
     
     old_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
-                             value_head_hidden_size=value_head_hidden_size)
+                             value_head_hidden_size=value_head_hidden_size,
+                             history_length=history_length)
     checkpoint = torch.load(old_network_path, map_location='cpu', weights_only=False)
-    old_network.load_state_dict(checkpoint['model_state_dict'])
+    old_network.load_state_dict_compatible(checkpoint['model_state_dict'])
     old_network.to('cpu')
     old_network.eval()
     
@@ -2039,10 +2118,12 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     new_agent = Agent(new_network, num_simulations=new_sims,
                       c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
-                      move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction)
+                      move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction,
+                      history_length=history_length)
     old_agent = Agent(old_network, num_simulations=old_sims,
                       c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
-                      move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction)
+                      move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction,
+                      history_length=history_length)
     
     # Play game
     if new_plays_attacker:
@@ -2153,7 +2234,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_threshold=config.eval_temperature_threshold,
             temperature_decay_moves=config.eval_temperature_decay_moves,
             fpu_reduction=config.eval_fpu_reduction,
-            temp_dir=config.temp_dir
+            temp_dir=config.temp_dir,
+            history_length=config.history_length
         )
         
         worker_func_new_defender = partial(
@@ -2178,7 +2260,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_threshold=config.eval_temperature_threshold,
             temperature_decay_moves=config.eval_temperature_decay_moves,
             fpu_reduction=config.eval_fpu_reduction,
-            temp_dir=config.temp_dir
+            temp_dir=config.temp_dir,
+            history_length=config.history_length
         )
         
         # Play games in parallel using pool.map for true parallelization
@@ -2292,7 +2375,7 @@ def load_checkpoint(filepath: str, network: BrandubhNet,
     """Load model checkpoint. Returns iteration number."""
     checkpoint = torch.load(filepath, weights_only=False)
     
-    network.load_state_dict(checkpoint['model_state_dict'])
+    network.load_state_dict_compatible(checkpoint['model_state_dict'])
     
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -2424,7 +2507,12 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     print(f"Epochs per iteration: {config.num_epochs}")
     print(f"Batches per epoch: {config.batches_per_epoch}")
     print(f"Learning rate: {config.learning_rate}")
-    print(f"LR decay per iteration: {config.lr_decay}")
+    if config.use_stepping_lr:
+        print(f"Using stepping LR schedule:")
+        print(f"  Step iterations: {config.lr_step_iterations}")
+        print(f"  LR values: {config.lr_step_values}")
+    else:
+        print(f"LR decay per iteration: {config.lr_decay}")
     print(f"Weight decay (L2): {config.weight_decay}")
     print(f"Value loss weight: {config.value_loss_weight}")
     
@@ -2498,7 +2586,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     # Initialize network
     network = config.network_class(num_res_blocks=config.num_res_blocks,
                                    num_channels=config.num_channels,
-                                   value_head_hidden_size=config.value_head_hidden_size).to(config.device)
+                                   value_head_hidden_size=config.value_head_hidden_size,
+                                   history_length=config.history_length).to(config.device)
     
     # Calculate and display network size
     total_params = sum(p.numel() for p in network.parameters())
@@ -2521,7 +2610,25 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         print("Using standard AdamW optimizer (fused not available)")
     
     # Learning rate scheduler
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.lr_decay)
+    if config.use_stepping_lr:
+        # Validate stepping LR configuration
+        if len(config.lr_step_values) != len(config.lr_step_iterations) + 1:
+            raise ValueError(
+                f"lr_step_values must have exactly len(lr_step_iterations) + 1 elements. "
+                f"Got {len(config.lr_step_values)} values for {len(config.lr_step_iterations)} step points."
+            )
+        # Use MultiStepLR with custom milestones
+        # We'll handle this manually in the training loop instead of using a scheduler
+        scheduler = None
+        print(f"Using stepping LR schedule:")
+        print(f"  Step iterations: {config.lr_step_iterations}")
+        print(f"  LR values: {config.lr_step_values}")
+        # Set initial LR
+        current_lr = config.lr_step_values[0]
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+    else:
+        scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.lr_decay)
     
     # Resume from checkpoint if specified
     start_iteration = 0
@@ -2531,7 +2638,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         # Load only weights, not optimizer state or training history
         print(f"Loading weights from {load_weights_from}")
         checkpoint = torch.load(load_weights_from, weights_only=False)
-        network.load_state_dict(checkpoint['model_state_dict'])
+        network.load_state_dict_compatible(checkpoint['model_state_dict'])
         print(f"Loaded weights from checkpoint (starting training from iteration 0)")
     
     # Note: We do NOT compile the network here because:
@@ -2542,14 +2649,15 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     # Initialize best network (for evaluation)
     best_network = config.network_class(num_res_blocks=config.num_res_blocks,
                                         num_channels=config.num_channels,
-                                        value_head_hidden_size=config.value_head_hidden_size).to(config.device)
+                                        value_head_hidden_size=config.value_head_hidden_size,
+                                        history_length=config.history_length).to(config.device)
     
     # Load best network from best_model.pth if resuming and it exists, otherwise copy current network
     best_model_path = os.path.join(config.checkpoint_dir, 'best_model.pth')
     if resume_from is not None and os.path.exists(best_model_path):
         print(f"Loading best network from {best_model_path}")
         checkpoint = torch.load(best_model_path, map_location=config.device, weights_only=False)
-        best_network.load_state_dict(checkpoint['model_state_dict'])
+        best_network.load_state_dict_compatible(checkpoint['model_state_dict'])
     else:
         # Starting fresh, loading weights only, or no best model exists yet
         # Clean state dict to remove _orig_mod. prefix from compiled network
@@ -2851,15 +2959,28 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 training_history['timing']['selfplay_time'].append(selfplay_time)
                 training_history['timing']['training_time'].append(training_time)
                 
-                # Learning rate decay (only after training)
-                scheduler.step()
-                current_lr = optimizer.param_groups[0]['lr']
-                
-                # Apply learning rate floor
-                if current_lr < config.lr_floor:
+                # Learning rate update (only after training)
+                if config.use_stepping_lr:
+                    # Stepping LR: find the appropriate LR for current iteration
+                    # lr_step_iterations defines boundaries, lr_step_values defines LR for each region
+                    step_idx = 0
+                    for i, step_iter in enumerate(config.lr_step_iterations):
+                        if iteration >= step_iter:  # Step at the specified iteration
+                            step_idx = i + 1
+                    new_lr = config.lr_step_values[step_idx]
                     for param_group in optimizer.param_groups:
-                        param_group['lr'] = config.lr_floor
-                    current_lr = config.lr_floor
+                        param_group['lr'] = new_lr
+                    current_lr = new_lr
+                else:
+                    # Exponential decay
+                    scheduler.step()
+                    current_lr = optimizer.param_groups[0]['lr']
+                    
+                    # Apply learning rate floor
+                    if current_lr < config.lr_floor:
+                        for param_group in optimizer.param_groups:
+                            param_group['lr'] = config.lr_floor
+                        current_lr = config.lr_floor
                 
                 print(f"\nLearning rate: {current_lr:.6f}")
             else:

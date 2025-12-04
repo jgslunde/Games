@@ -121,6 +121,18 @@ class Brandubh:
         count = self.position_history.count(current_pos)
         return count >= 3
     
+    def get_piece_planes(self) -> np.ndarray:
+        """
+        Get piece planes only (without current player plane).
+        Returns 3 planes: [attackers, defenders, king]
+        Used for building history states.
+        """
+        planes = np.zeros((3, 7, 7), dtype=np.float32)
+        planes[0] = (self.board == ATTACKER).astype(np.float32)
+        planes[1] = (self.board == DEFENDER).astype(np.float32)
+        planes[2] = (self.board == KING).astype(np.float32)
+        return planes
+    
     def get_state(self) -> np.ndarray:
         """
         Get board state representation suitable for neural networks.

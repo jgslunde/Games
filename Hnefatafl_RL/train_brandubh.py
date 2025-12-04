@@ -65,9 +65,10 @@ DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
 DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 16  # For "decay" mode
 
 # Network architecture
-DEFAULT_RES_BLOCKS = 6
-DEFAULT_CHANNELS = 48
+DEFAULT_RES_BLOCKS = 4
+DEFAULT_CHANNELS = 64
 DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 256
+DEFAULT_HISTORY_LENGTH = 4  # Number of timesteps for history planes (1 = current only, for backward compatibility)
 
 # Replay buffer
 DEFAULT_REPLAY_BUFFER_SIZE = 6_000_000
@@ -79,11 +80,19 @@ DEFAULT_USE_RANDOM_OPENING_MOVES = True
 # Game length limit
 DEFAULT_MAX_GAME_LENGTH = 100  # Maximum moves before declaring draw
 
+# Time-weighted rewards (discounting future rewards)
+DEFAULT_REWARD_DISCOUNT = 0.98  # Discount factor per move (1.0 = no discount)
+
 # Learning rate decay and regularization
 DEFAULT_LR_DECAY = 0.99
 DEFAULT_LR_FLOOR = 3e-5
 DEFAULT_WEIGHT_DECAY = 1e-2
 DEFAULT_VALUE_LOSS_WEIGHT = 1.5
+
+# Stepping learning rate schedule (alternative to exponential decay)
+DEFAULT_USE_STEPPING_LR = True  # If True, use stepping LR instead of exponential decay
+DEFAULT_LR_STEP_ITERATIONS = [100, 200, 400]  # Iterations at which to step LR (e.g., [50, 100, 150])
+DEFAULT_LR_STEP_VALUES = [2e-3, 1e-3, 2e-4, 2e-5] # LR values for each step (must be len(lr_step_iterations) + 1)
 
 # Dynamic loss boosting
 DEFAULT_USE_DYNAMIC_BOOSTING = False
@@ -96,8 +105,9 @@ DEFAULT_DRAW_PENALTY_ATTACKER = 0.0  # Draw value for attackers (neutral)
 DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 
 # MCTS exploration
-DEFAULT_C_PUCT = 2.5
+DEFAULT_C_PUCT = 2.0
 DEFAULT_FPU_REDUCTION = 0.0  # First Play Urgency: reduction relative to parent Q-value (like Leela Chess Zero)
+DEFAULT_SEARCH_DISCOUNT = 0.98  # Search depth discount per move during MCTS backup (1.0 = no discount)
 DEFAULT_EVAL_C_PUCT = 1.5  # Evaluation c_puct
 DEFAULT_EVAL_FPU_REDUCTION = -0.25  # Evaluation FPU reduction
 
@@ -157,6 +167,15 @@ if __name__ == "__main__":
                        help=f"Learning rate decay per iteration (default: {DEFAULT_LR_DECAY})")
     parser.add_argument("--lr-floor", type=float, default=DEFAULT_LR_FLOOR,
                        help=f"Minimum learning rate floor (default: {DEFAULT_LR_FLOOR})")
+    
+    # Stepping learning rate schedule
+    parser.add_argument("--use-stepping-lr", action="store_true", default=DEFAULT_USE_STEPPING_LR,
+                       help=f"Use stepping LR schedule instead of exponential decay (default: {DEFAULT_USE_STEPPING_LR})")
+    parser.add_argument("--lr-step-iterations", type=int, nargs='+', default=DEFAULT_LR_STEP_ITERATIONS,
+                       help=f"Iterations at which to step LR (e.g., 50 100 150) (default: {DEFAULT_LR_STEP_ITERATIONS})")
+    parser.add_argument("--lr-step-values", type=float, nargs='+', default=DEFAULT_LR_STEP_VALUES,
+                       help=f"LR values for each step region (must be len(lr-step-iterations) + 1) (default: {DEFAULT_LR_STEP_VALUES})")
+    
     parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY,
                        help=f"L2 regularization weight decay (default: {DEFAULT_WEIGHT_DECAY})")
     parser.add_argument("--value-loss-weight", type=float, default=DEFAULT_VALUE_LOSS_WEIGHT,
@@ -192,12 +211,16 @@ if __name__ == "__main__":
                        help=f"Number of channels in conv layers (default: {DEFAULT_CHANNELS})")
     parser.add_argument("--value-head-size", type=int, default=DEFAULT_VALUE_HEAD_HIDDEN_SIZE,
                        help=f"Size of value head hidden layer (default: {DEFAULT_VALUE_HEAD_HIDDEN_SIZE})")
+    parser.add_argument("--history-length", type=int, default=DEFAULT_HISTORY_LENGTH,
+                       help=f"Number of timesteps for history planes input. 1=current only. Higher values let network see game history. (default: {DEFAULT_HISTORY_LENGTH})")
     
     # MCTS parameters
     parser.add_argument("--c-puct", type=float, default=DEFAULT_C_PUCT,
                        help=f"MCTS exploration constant for self-play (default: {DEFAULT_C_PUCT})")
     parser.add_argument("--fpu-reduction", type=float, default=DEFAULT_FPU_REDUCTION,
                        help=f"First Play Urgency reduction for self-play relative to parent Q-value (default: {DEFAULT_FPU_REDUCTION}, like Leela Chess Zero)")
+    parser.add_argument("--search-discount", type=float, default=DEFAULT_SEARCH_DISCOUNT,
+                       help=f"Search depth discount per move during MCTS backup. Prefer shorter winning paths. (default: {DEFAULT_SEARCH_DISCOUNT})")
     parser.add_argument("--eval-c-puct", type=float, default=DEFAULT_EVAL_C_PUCT,
                        help=f"MCTS exploration constant for evaluation (default: {DEFAULT_EVAL_C_PUCT})")
     parser.add_argument("--eval-fpu-reduction", type=float, default=DEFAULT_EVAL_FPU_REDUCTION,
@@ -271,6 +294,8 @@ if __name__ == "__main__":
                        help="In 50%% of games, play 1-4 random moves (2-8 ply) before MCTS (default: False)")
     parser.add_argument("--max-game-length", type=int, default=DEFAULT_MAX_GAME_LENGTH,
                        help=f"Maximum moves before declaring draw (default: {DEFAULT_MAX_GAME_LENGTH})")
+    parser.add_argument("--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT,
+                       help=f"Time-weighted reward discount factor per move. Values closer to game end get stronger rewards. (default: {DEFAULT_REWARD_DISCOUNT})")
     
     # Evaluation
     parser.add_argument("--eval-games", type=int, default=DEFAULT_EVAL_GAMES,
@@ -327,6 +352,12 @@ if __name__ == "__main__":
     config.learning_rate = args.lr
     config.lr_decay = args.lr_decay
     config.lr_floor = args.lr_floor
+    
+    # Stepping learning rate schedule
+    config.use_stepping_lr = args.use_stepping_lr
+    config.lr_step_iterations = args.lr_step_iterations if args.lr_step_iterations else []
+    config.lr_step_values = args.lr_step_values if args.lr_step_values else []
+    
     config.weight_decay = args.weight_decay
     config.value_loss_weight = args.value_loss_weight
     
@@ -345,10 +376,13 @@ if __name__ == "__main__":
     # Network architecture
     config.num_res_blocks = args.res_blocks
     config.num_channels = args.channels
+    config.value_head_hidden_size = args.value_head_size
+    config.history_length = args.history_length
     
     # MCTS parameters
     config.c_puct = args.c_puct
     config.fpu_reduction = args.fpu_reduction
+    config.search_discount = args.search_discount
     config.eval_c_puct = args.eval_c_puct
     config.eval_fpu_reduction = args.eval_fpu_reduction
     config.use_dynamic_sim_balancing = args.use_dynamic_sim_balancing
@@ -386,6 +420,9 @@ if __name__ == "__main__":
     
     # Game length limit
     config.max_game_length = args.max_game_length
+    
+    # Time-weighted rewards
+    config.reward_discount = args.reward_discount
     
     # Evaluation
     config.eval_games = args.eval_games

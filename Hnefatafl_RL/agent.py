@@ -26,7 +26,8 @@ class Agent:
                  num_simulations: int = 100, 
                  c_puct: float = 1.4, device: str = 'cpu', 
                  add_dirichlet_noise: bool = False, dirichlet_alpha: float = 0.3, 
-                 dirichlet_epsilon: float = 0.25, fpu_reduction: float = -0.5):
+                 dirichlet_epsilon: float = 0.25, fpu_reduction: float = -0.5,
+                 history_length: int = 1):
         """
         Initialize agent.
         
@@ -41,14 +42,17 @@ class Agent:
             dirichlet_alpha: concentration parameter for Dirichlet noise
             dirichlet_epsilon: weight of Dirichlet noise
             fpu_reduction: First Play Urgency reduction relative to parent Q-value (default: -0.5)
+            history_length: Number of game states to include in network input (default: 1)
         """
         if network is None and network_class is not None:
             network = network_class()
         
         self.network = network
+        self.history_length = history_length
         self.mcts = MCTS(network, num_simulations, c_puct, device, 
                         dirichlet_alpha, dirichlet_epsilon, add_dirichlet_noise,
-                        move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction)
+                        move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction,
+                        history_length=history_length)
         self.device = device
     
     def select_move(self, game, temperature: float = 0.0) -> Tuple[int, int, int, int]:

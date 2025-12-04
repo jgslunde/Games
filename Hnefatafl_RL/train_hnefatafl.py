@@ -78,6 +78,11 @@ DEFAULT_LR_FLOOR = 1e-6
 DEFAULT_WEIGHT_DECAY = 1e-4
 DEFAULT_VALUE_LOSS_WEIGHT = 40.0
 
+# Stepping learning rate schedule (alternative to exponential decay)
+DEFAULT_USE_STEPPING_LR = False  # If True, use stepping LR instead of exponential decay
+DEFAULT_LR_STEP_ITERATIONS = []  # Iterations at which to step LR (e.g., [50, 100, 150])
+DEFAULT_LR_STEP_VALUES = []      # LR values for each step (must be len(lr_step_iterations) + 1)
+
 # Dynamic loss boosting
 DEFAULT_USE_DYNAMIC_BOOSTING = False
 DEFAULT_DYNAMIC_BOOST_ALPHA = 0.1
@@ -143,6 +148,15 @@ if __name__ == "__main__":
                        help=f"Learning rate decay per iteration (default: {DEFAULT_LR_DECAY})")
     parser.add_argument("--lr-floor", type=float, default=DEFAULT_LR_FLOOR,
                        help=f"Minimum learning rate floor (default: {DEFAULT_LR_FLOOR})")
+    
+    # Stepping learning rate schedule
+    parser.add_argument("--use-stepping-lr", action="store_true", default=DEFAULT_USE_STEPPING_LR,
+                       help=f"Use stepping LR schedule instead of exponential decay (default: {DEFAULT_USE_STEPPING_LR})")
+    parser.add_argument("--lr-step-iterations", type=int, nargs='+', default=DEFAULT_LR_STEP_ITERATIONS,
+                       help=f"Iterations at which to step LR (e.g., 50 100 150) (default: {DEFAULT_LR_STEP_ITERATIONS})")
+    parser.add_argument("--lr-step-values", type=float, nargs='+', default=DEFAULT_LR_STEP_VALUES,
+                       help=f"LR values for each step region (must be len(lr-step-iterations) + 1) (default: {DEFAULT_LR_STEP_VALUES})")
+    
     parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY,
                        help=f"L2 regularization weight decay (default: {DEFAULT_WEIGHT_DECAY})")
     parser.add_argument("--value-loss-weight", type=float, default=DEFAULT_VALUE_LOSS_WEIGHT,
@@ -290,6 +304,12 @@ if __name__ == "__main__":
     config.learning_rate = args.lr
     config.lr_decay = args.lr_decay
     config.lr_floor = args.lr_floor
+    
+    # Stepping learning rate schedule
+    config.use_stepping_lr = args.use_stepping_lr
+    config.lr_step_iterations = args.lr_step_iterations if args.lr_step_iterations else []
+    config.lr_step_values = args.lr_step_values if args.lr_step_values else []
+    
     config.weight_decay = args.weight_decay
     config.value_loss_weight = args.value_loss_weight
     

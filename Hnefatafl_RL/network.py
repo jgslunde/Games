@@ -1,6 +1,11 @@
 """
 Compact AlphaZero-style neural network for Brandubh.
 Architecture optimized for training on personal computers.
+
+History planes support: The network can accept T timesteps of history,
+where each timestep has 3 piece planes (attackers, defenders, king) plus
+1 current player plane. Total input planes = T * 3 + 1.
+When T=1, this equals 4 planes (backward compatible with older checkpoints).
 """
 
 import torch
@@ -47,9 +52,13 @@ class SEResidualBlock(nn.Module):
 
 class BrandubhNet(nn.Module):
     """
-    Compact neural network for Brandubh.
+    Compact neural network for Brandubh with optional history planes.
     
-    Input: 4 planes (7x7) - [attackers, defenders, king, current_player]
+    Input: (T * 3 + 1) planes (7x7) where T is history length:
+        - T * 3 planes for piece positions (attackers, defenders, king) for each timestep
+        - 1 plane for current player
+        When T=1 (default), this is 4 planes: [attackers, defenders, king, current_player]
+    
     Output: 
         - Policy: probability distribution over all possible moves
         - Value: estimated win probability for current player
@@ -63,14 +72,30 @@ class BrandubhNet(nn.Module):
     - Compact channel count for faster training
     """
     
-    def __init__(self, num_res_blocks: int = 4, num_channels: int = 64, value_head_hidden_size: int = 64):
+    def __init__(self, num_res_blocks: int = 4, num_channels: int = 64, value_head_hidden_size: int = 64,
+                 history_length: int = 1):
+        """
+        Initialize the network.
+        
+        Args:
+            num_res_blocks: Number of residual blocks
+            num_channels: Number of channels in convolutional layers
+            value_head_hidden_size: Hidden size of value head FC layer
+            history_length: Number of timesteps of history (T). 
+                           Input planes = T * 3 + 1 (piece planes for each timestep + player plane)
+                           T=1 gives 4 planes (backward compatible)
+        """
         super().__init__()
         
         self.num_channels = num_channels
         self.value_head_hidden_size = value_head_hidden_size
+        self.history_length = history_length
         
-        # Initial convolution
-        self.conv_input = nn.Conv2d(4, num_channels, kernel_size=3, padding=1)
+        # Calculate input channels: T * 3 piece planes + 1 player plane
+        self.input_channels = history_length * 3 + 1
+        
+        # Initial convolution - input channels depends on history length
+        self.conv_input = nn.Conv2d(self.input_channels, num_channels, kernel_size=3, padding=1)
         self.bn_input = nn.BatchNorm2d(num_channels)
         
         # Residual tower
@@ -99,7 +124,8 @@ class BrandubhNet(nn.Module):
         Forward pass.
         
         Args:
-            x: batch of board states, shape (batch, 4, 7, 7)
+            x: batch of board states, shape (batch, input_channels, 7, 7)
+               where input_channels = history_length * 3 + 1
         
         Returns:
             policy_logits: shape (batch, 1176)
@@ -125,6 +151,58 @@ class BrandubhNet(nn.Module):
         
         return policy_logits, value
     
+    def load_state_dict_compatible(self, state_dict, strict=True):
+        """
+        Load state dict with backward compatibility for older checkpoints.
+        
+        Older checkpoints (history_length=1, input_channels=4) can be loaded into
+        networks with history_length>1 by expanding the input convolution weights.
+        
+        Args:
+            state_dict: State dictionary to load
+            strict: If True, raise error on missing/unexpected keys (default True)
+        """
+        # Check if we need to adapt input convolution weights
+        saved_input_weight = state_dict.get('conv_input.weight', None)
+        
+        if saved_input_weight is not None:
+            saved_channels = saved_input_weight.shape[1]
+            expected_channels = self.input_channels
+            
+            if saved_channels != expected_channels:
+                # Need to adapt weights
+                if saved_channels == 4 and expected_channels > 4:
+                    # Loading old checkpoint (4 channels) into new network (more channels)
+                    # Strategy: Copy the 4 learned weights to the first 4 channels,
+                    # initialize the remaining channels to zero
+                    print(f"Adapting checkpoint: {saved_channels} input channels -> {expected_channels} input channels")
+                    
+                    new_weight = torch.zeros(
+                        saved_input_weight.shape[0],  # out_channels (num_channels)
+                        expected_channels,             # in_channels
+                        saved_input_weight.shape[2],  # kernel_h
+                        saved_input_weight.shape[3],  # kernel_w
+                        dtype=saved_input_weight.dtype
+                    )
+                    
+                    # Copy existing weights to first 4 channels
+                    # Old format: [attackers, defenders, king, player]
+                    # New format: [attackers_t0, defenders_t0, king_t0, attackers_t1, defenders_t1, king_t1, ..., player]
+                    # Map old[0:3] -> new[0:3] (piece planes for t=0)
+                    # Map old[3] -> new[-1] (player plane)
+                    new_weight[:, 0:3, :, :] = saved_input_weight[:, 0:3, :, :]  # Piece planes
+                    new_weight[:, -1, :, :] = saved_input_weight[:, 3, :, :]     # Player plane
+                    
+                    state_dict['conv_input.weight'] = new_weight
+                    
+                elif saved_channels > expected_channels:
+                    # Loading newer checkpoint into older network - truncate
+                    print(f"Truncating checkpoint: {saved_channels} input channels -> {expected_channels} input channels")
+                    state_dict['conv_input.weight'] = saved_input_weight[:, :expected_channels, :, :]
+        
+        # Use standard load_state_dict
+        return super().load_state_dict(state_dict, strict=strict)
+    
     def optimize_for_inference(self, use_compile: bool = True, compile_mode: str = 'default'):
         """
         Optimize network for fast CPU inference using torch.compile.
@@ -143,6 +221,111 @@ class BrandubhNet(nn.Module):
             self = torch.compile(self, mode=compile_mode)
         
         return self
+
+
+class StateHistory:
+    """
+    Manages game state history for neural network input with history planes.
+    
+    This class maintains a rolling buffer of piece planes from recent game states,
+    which can be combined with the current player plane to create the full network input.
+    
+    For history_length=T, the output has T*3 + 1 planes:
+    - Planes 0-2: Current state piece planes (attackers, defenders, king)
+    - Planes 3-5: Previous state piece planes (t-1)
+    - ...
+    - Planes (T-1)*3 to T*3-1: Oldest state piece planes (t-T+1)
+    - Plane T*3: Current player plane
+    
+    When history_length=1, this produces 4 planes (backward compatible).
+    """
+    
+    def __init__(self, history_length: int = 1, board_size: int = 7):
+        """
+        Initialize state history tracker.
+        
+        Args:
+            history_length: Number of timesteps to track (T)
+            board_size: Size of the game board
+        """
+        self.history_length = history_length
+        self.board_size = board_size
+        self.piece_planes_per_state = 3  # attackers, defenders, king
+        
+        # Buffer to store piece planes (most recent first)
+        # Each entry is shape (3, board_size, board_size)
+        self.history = []
+    
+    def reset(self):
+        """Clear the history buffer."""
+        self.history = []
+    
+    def push(self, piece_planes: np.ndarray):
+        """
+        Add piece planes to history.
+        
+        Args:
+            piece_planes: Shape (3, board_size, board_size) - [attackers, defenders, king]
+        """
+        # Add to front of list (most recent first)
+        self.history.insert(0, piece_planes.copy())
+        
+        # Keep only the last history_length entries
+        if len(self.history) > self.history_length:
+            self.history = self.history[:self.history_length]
+    
+    def get_state_with_history(self, current_player: int) -> np.ndarray:
+        """
+        Get full state representation with history planes.
+        
+        Args:
+            current_player: Current player (0 for attacker, 1 for defender)
+        
+        Returns:
+            state: Shape (history_length * 3 + 1, board_size, board_size)
+                   Most recent state first, then progressively older states,
+                   finally current player plane.
+        """
+        num_planes = self.history_length * 3 + 1
+        state = np.zeros((num_planes, self.board_size, self.board_size), dtype=np.float32)
+        
+        # Fill in history planes
+        for t in range(min(len(self.history), self.history_length)):
+            start_idx = t * 3
+            state[start_idx:start_idx+3] = self.history[t]
+        
+        # For missing history (e.g., at start of game), planes remain zero
+        # This is the standard approach used in AlphaGo/AlphaZero
+        
+        # Add current player plane at the end
+        state[-1] = np.full((self.board_size, self.board_size), current_player, dtype=np.float32)
+        
+        return state
+    
+    def clone(self) -> 'StateHistory':
+        """Create a deep copy of the history tracker."""
+        new_history = StateHistory(self.history_length, self.board_size)
+        new_history.history = [h.copy() for h in self.history]
+        return new_history
+    
+    @staticmethod
+    def from_game(game, history_length: int = 1) -> 'StateHistory':
+        """
+        Create a StateHistory initialized with the current game state.
+        
+        Note: This only captures the current state. For full history,
+        you need to track states as moves are made.
+        
+        Args:
+            game: Game instance with get_piece_planes() method
+            history_length: Number of timesteps to track
+        
+        Returns:
+            StateHistory instance with current state pushed
+        """
+        history = StateHistory(history_length, board_size=game.board.shape[0])
+        history.push(game.get_piece_planes())
+        return history
 
 
 class MoveEncoder:

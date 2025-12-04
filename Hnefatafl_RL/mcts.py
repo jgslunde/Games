@@ -1,6 +1,10 @@
 """
 Monte Carlo Tree Search for Brandubh with neural network evaluation.
 Based on AlphaZero MCTS algorithm.
+
+Supports history planes: The network can receive T timesteps of history
+rather than just the current state. When history_length > 1, MCTS tracks
+the game state history and constructs the appropriate input for evaluation.
 """
 
 import numpy as np
@@ -10,6 +14,7 @@ from collections import defaultdict
 import math
 
 from brandubh import Brandubh
+from network import StateHistory
 
 
 class MCTSNode:
@@ -200,7 +205,8 @@ class MCTS:
     def __init__(self, network, num_simulations: int = 100, c_puct: float = 1.4, 
                  device: str = 'cpu', dirichlet_alpha: float = 0.3, 
                  dirichlet_epsilon: float = 0.25, add_dirichlet_noise: bool = False,
-                 move_encoder_class=None, fpu_reduction: float = -0.5):
+                 move_encoder_class=None, fpu_reduction: float = -0.5,
+                 search_discount: float = 1.0, history_length: int = 1):
         """
         Initialize MCTS.
         
@@ -217,6 +223,10 @@ class MCTS:
             fpu_reduction: First Play Urgency reduction relative to parent's Q-value (default: -0.5)
                           Negative = pessimistic (unvisited nodes look worse than parent)
                           This follows Leela Chess Zero's implementation
+            search_discount: Discount factor applied per move during value backup (default: 1.0 = no discount)
+                            Values < 1 make the network prefer shorter paths to victory
+            history_length: Number of timesteps of game history to include in network input (default: 1)
+                           When > 1, the network receives T*3 + 1 input planes instead of 4
         """
         self.network = network
         self.num_simulations = num_simulations
@@ -227,6 +237,8 @@ class MCTS:
         self.add_dirichlet_noise = add_dirichlet_noise
         self.move_encoder_class = move_encoder_class
         self.fpu_reduction = fpu_reduction
+        self.search_discount = search_discount
+        self.history_length = history_length
         
         # Performance tracking
         self.timing_stats = {
@@ -251,12 +263,15 @@ class MCTS:
         """Get timing statistics."""
         return self.timing_stats.copy()
     
-    def search(self, game: Brandubh) -> Dict[Tuple, float]:
+    def search(self, game: Brandubh, state_history: Optional[StateHistory] = None) -> Dict[Tuple, float]:
         """
         Run MCTS from the given game state.
         
         Args:
             game: current game state
+            state_history: Optional StateHistory tracking prior game states.
+                          If None and history_length > 1, creates one from current state.
+                          If history_length == 1, this parameter is ignored.
         
         Returns:
             dict mapping moves to visit probabilities
@@ -270,10 +285,28 @@ class MCTS:
         # Store root for later access to statistics
         self.root = root
         
+        # Set up root history for history planes support
+        # We only need to track history if history_length > 1
+        if self.history_length > 1:
+            if state_history is not None:
+                # Use provided history (should already contain prior states)
+                root_history = state_history.clone()
+            else:
+                # Create new history initialized with current state
+                root_history = StateHistory.from_game(game, self.history_length)
+        else:
+            root_history = None  # No history tracking needed
+        
         # Run simulations
         for sim_idx in range(self.num_simulations):
             node = root
             search_path = [node]
+            
+            # Track history for this simulation (if needed)
+            if root_history is not None:
+                sim_history = root_history.clone()
+            else:
+                sim_history = None
             
             # Selection: traverse tree until leaf
             t0 = time.perf_counter()
@@ -292,9 +325,11 @@ class MCTS:
                         value = -value
                     break
                 search_path.append(node)
+                
+                # Update history with the new state after the action
+                if sim_history is not None and node.game is not None:
+                    sim_history.push(node.game.get_piece_planes())
             else:
-                # Normal path: evaluate leaf with neural network
-                self.timing_stats['selection'] += time.perf_counter() - t0
                 # Normal path: evaluate leaf with neural network
                 self.timing_stats['selection'] += time.perf_counter() - t0
                 
@@ -313,7 +348,7 @@ class MCTS:
                 else:
                     # Non-terminal leaf: evaluate with network and expand
                     t0 = time.perf_counter()
-                    policy_probs, value = self._evaluate(node.game)
+                    policy_probs, value = self._evaluate(node.game, sim_history)
                     self.timing_stats['network_eval'] += time.perf_counter() - t0
                     
                     t0 = time.perf_counter()
@@ -324,21 +359,24 @@ class MCTS:
                     if sim_idx == 0 and node is root and self.add_dirichlet_noise:
                         self._add_dirichlet_noise_to_node(root)
                 
-                # Backup: propagate value up the tree
+                # Backup: propagate value up the tree with optional discounting
                 t0 = time.perf_counter()
                 for n in reversed(search_path):
                     n.update(value)
-                    value = -value  # Flip value for opponent
+                    value = -value * self.search_discount  # Flip value for opponent and apply discount
                 self.timing_stats['backup'] += time.perf_counter() - t0
         
         return root.get_visit_distribution()
     
-    def _evaluate(self, game: Brandubh) -> Tuple[np.ndarray, float]:
+    def _evaluate(self, game: Brandubh, state_history: Optional[StateHistory] = None) -> Tuple[np.ndarray, float]:
         """
         Evaluate a game state with the neural network.
         
         Args:
             game: game state to evaluate
+            state_history: Optional StateHistory for history planes support.
+                          If provided, uses history to construct input tensor.
+                          If None, uses game.get_state() (backward compatible).
         
         Returns:
             policy_probs: probability distribution over legal moves
@@ -360,7 +398,14 @@ class MCTS:
             move_encoder = self.move_encoder_class
         
         # Get state representation
-        state = game.get_state()
+        if state_history is not None and self.history_length > 1:
+            # Use history planes - must push current state first
+            state_history.push(game.get_piece_planes())
+            state = state_history.get_state_with_history(game.current_player)
+        else:
+            # Standard single-state input (backward compatible)
+            state = game.get_state()
+        
         state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)
         
         # Evaluate with network
