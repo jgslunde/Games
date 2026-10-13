@@ -47,7 +47,7 @@ DEFAULT_EPOCHS = 20
 DEFAULT_BATCHES_PER_EPOCH = 100
 DEFAULT_EVAL_VS_RANDOM = 64
 DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
-DEFAULT_DEVICE = None  # None = auto-detect (cuda if available, else cpu)
+DEFAULT_DEVICE = None  # Device for training in the main process; None = TrainingConfig.device ("cpu")
 DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
 
 # Temperature parameters
@@ -267,7 +267,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS,
                        help=f"Number of parallel workers (default: {DEFAULT_NUM_WORKERS} CPUs)")
     parser.add_argument("--device", type=str, default=DEFAULT_DEVICE,
-                       help="Device (cuda/cpu, default: auto-detect)")
+                       help="Device for training in the main process (cuda/cpu, default: cpu)")
     
     # Checkpointing
     parser.add_argument("--save-frequency", type=int, default=DEFAULT_SAVE_FREQUENCY,

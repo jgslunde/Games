@@ -220,12 +220,13 @@ class MCTSAgent:
         return self.mcts.select_move(game, temperature)
 
 
-def play_game(agent1, agent2, game_class, display: bool = True, 
+def play_game(agent1, agent2, game_class, display: bool = True,
               temperature: float = 0.0, temperature_mode: str = "fixed",
-              temperature_threshold: int = 0, temperature_decay_moves: int = 0) -> int:
+              temperature_threshold: int = 0, temperature_decay_moves: int = 0,
+              rules: dict = None, max_moves: int = 500) -> int:
     """
     Play a game between two agents.
-    
+
     Args:
         agent1: agent playing as attackers
         agent2: agent playing as defenders
@@ -235,11 +236,14 @@ def play_game(agent1, agent2, game_class, display: bool = True,
         temperature_mode: "fixed" (drop at threshold), "king" (drop when king leaves), or "decay" (linear)
         temperature_threshold: move number after which temperature drops to 0 (for "fixed" mode)
         temperature_decay_moves: number of moves for linear decay (for "decay" mode)
-    
+        rules: keyword arguments for game_class (king_capture_pieces, king_can_capture,
+               throne_is_hostile, throne_enabled); None uses the game class defaults
+        max_moves: the game is a draw once more than this many plies have been played
+
     Returns:
         winner: 0 for attackers, 1 for defenders, None for draw
     """
-    game = game_class()
+    game = game_class(**(rules or {}))
     agents = [agent1, agent2]
     move_count = 0
     
@@ -300,10 +304,10 @@ def play_game(agent1, agent2, game_class, display: bool = True,
             print(game)
             print("\n")
         
-        # Safety check
-        if move_count > 500:
+        # Move limit
+        if move_count > max_moves:
             if display:
-                print("Game exceeded 500 moves - draw")
+                print(f"Game exceeded {max_moves} moves - draw")
             game.game_over = True
             game.winner = None  # Draw
             break

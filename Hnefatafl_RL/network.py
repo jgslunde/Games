@@ -311,20 +311,25 @@ class StateHistory:
     @staticmethod
     def from_game(game, history_length: int = 1) -> 'StateHistory':
         """
-        Create a StateHistory initialized with the current game state.
-        
-        Note: This only captures the current state. For full history,
-        you need to track states as moves are made.
-        
+        Create a StateHistory holding the last `history_length` positions of a game.
+
+        Past boards are rebuilt from game.position_history, whose entries are
+        (board.tobytes(), current_player) and whose last entry is the current position.
+        This gives the same planes as tracking the history move by move during self-play.
+        Positions before the start of the game stay as zero planes.
+
         Args:
-            game: Game instance with get_piece_planes() method
+            game: Game instance with `board` and `position_history`
             history_length: Number of timesteps to track
-        
+
         Returns:
-            StateHistory instance with current state pushed
+            StateHistory instance, most recent position first
         """
         history = StateHistory(history_length, board_size=game.board.shape[0])
-        history.push(game.get_piece_planes())
+        for board_bytes, _ in game.position_history[-history_length:]:  # oldest first; push() prepends
+            board = np.frombuffer(board_bytes, dtype=game.board.dtype).reshape(game.board.shape)
+            # Piece codes are ATTACKER=1, DEFENDER=2, KING=3 in all game variants (same order as get_piece_planes)
+            history.push(np.stack([board == piece for piece in (1, 2, 3)]).astype(np.float32))
         return history
 
 

@@ -127,3 +127,14 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Training output (checkpoints, logs) and local environments
+Hnefatafl_RL/checkpoints*/
+RL_tictactoe/checkpoints*/
+RL_tictactoe/.RL_venv/
+
+# Compiled C++ binaries
+Hnefatafl/CppBitBoard/Hnefatafl7x7
+Hnefatafl/CppBitBoard/Hnefatafl7x7_2
+Hnefatafl/CppBitBoard/Play
+Hnefatafl/CppBitBoard/definitively_an_important_COMAP_program

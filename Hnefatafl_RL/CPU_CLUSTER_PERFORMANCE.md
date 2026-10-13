@@ -74,7 +74,8 @@ Sections 4 and 5 give the details.
 - **Training nodes: owl31-owl35**, one run per node. Runs that overlapped in time (up to 5)
   ran on different nodes, so they did not compete for CPU or RAM.
   Each node: 2x AMD EPYC 7551 (Zen 1 "Naples", 2017; 32 cores per socket, 2.0 GHz base, up to
-  3.0 GHz boost), 64 physical cores, SMT on = 128 hardware threads, 256 GB RAM (251 GB usable).
+  3.0 GHz boost), 2 sockets x 32 cores = 64 physical cores, SMT on = 128 hardware threads,
+  256 GB RAM (251 GB usable). Checked with `lscpu` on all five nodes.
   The CPU has AVX2 but no AVX-512, and it executes 256-bit AVX2 instructions as two 128-bit halves.
   The logs do not name the node. The node type is confirmed by the user and fits all evidence:
   - The worker count defaults to `mp.cpu_count()`, which is 128 on these nodes.
@@ -411,7 +412,8 @@ training nodes spent 145-330 s with a small buffer (includes compile and buffer 
 
 - **Gating match** (every 4 iterations; 128 games; 800 sims per side in the current runs; c_puct
   1.0-1.5 and FPU -0.5 or -0.25 depending on run; temperature 0.65 for the first 10 plies, then 0;
-  500-ply limit): median 760-3,300 s per run.
+  500-ply limit; **played with the throne enabled by mistake**, see Appendix B item 3): median
+  760-3,300 s per run.
   Evals where at least one game was a draw (500 plies) took about twice as long:
 
   | Run | Evals without draws | Evals with a draw |
@@ -608,8 +610,11 @@ symmetry augmentation that was broken before Nov 23, 2025. Treat their loss valu
 - 50 % of self-play games start with 1-4 random moves per side (these plies are not stored).
   Unique board states after the first 6 plies: > 99 % per iteration.
 - **Gating**: the threshold is a 70 % score. Each run accepted a new best network 6-8 times, all
-  before iteration ~130. After iteration 50 the median gate score was 51-58 %.
-- **Cross-run strength** (separate head-to-head matches, 256 games each, 100-800 sims):
+  before iteration ~130. After iteration 50 the median gate score was 51-58 %. These matches were
+  played with the throne enabled (training: disabled) and, for history models, without history
+  planes (Appendix B items 3-4), so gate scores and chained Elo measure play under other conditions.
+- **Cross-run strength** (separate head-to-head matches with `play.py`, which used the correct
+  rules, but gave history models empty history planes; 256 games each, 100-800 sims):
   `SE/jack_history_and_decay` iteration 108 beat `SE/grus_default` iteration 175 by 15-34 Elo,
   and `SE/jack_history_and_decay_smallbatch` iteration 64 by 53-83 Elo.
   `SE/jack_highexplore` iterations 150-200 beat `SE/grus_default` iteration 175 by 38-87 Elo.
@@ -694,17 +699,41 @@ BN, FC 49 -> hidden -> 1, tanh). Move encoding: from-square (49) x direction (4)
 
 ---
 
-## Appendix B: Code issues seen in the CPU-era code (short list; may already be fixed)
+## Appendix B: Code issues in the CPU-era code
+
+All runs in this document used the code before these fixes. Items 1-10 were fixed in the commit
+after `555c1b3` (Oct 2026); `test_training_fixes.py` covers items 1, 3, 4 and 5.
 
 1. Symmetry augmentation: `np.rot90` rotates the board counter-clockwise, while `rotate_policy`
-   rotates moves clockwise. So the 90° and 270° versions (and their mirrored versions), i.e. 4 of the 8
-   symmetries, have policy targets that do not match the board. The identity sample is also stored twice.
-2. The "Network eval" timer includes the "Get legal moves" timer; the printed MCTS total double-counts it.
-3. `np.random.choice(N, batch, replace=False)` per batch costs O(N) (97 ms at N = 6 M).
-4. The gating match runs two sequential `pool.map` halves (half the workers idle) and allows 500 plies.
-5. Legal moves are generated about 3 times per expanded MCTS node.
-6. `TrainingConfig.device` defaults to `"cpu"`; the replay buffer is not saved on resume; "validation"
-   uses samples from the training buffer.
+   rotates moves clockwise. So the 90° and 270° versions (and their mirrored versions), i.e. 4 of
+   the 8 symmetries, had policy targets that did not match the board. The identity sample was also
+   stored twice (9 copies per position). Now: 8 consistent copies.
+2. Workers forked after the main process ran `torch.compile` (training) could hang forever:
+   the forked copy of Inductor's compile thread pool has no live threads. Seen reliably in the
+   vs-random evaluation right after training; timing-dependent elsewhere. Now each worker compiles
+   in-process (`compile_threads = 1`).
+3. **Gating and vs-random games used the game class's default rules (throne enabled)**, while all
+   self-play used `throne_enabled=False`. They also used a 500-ply limit instead of
+   `max_game_length` (100). All gate scores, gating draws and chained Elo values in this document
+   were therefore measured under different rules from training.
+4. History models (13 input planes) got empty history planes in gating, `play.py` and the GUI:
+   `MCTS.search` without an explicit history filled only the current position.
+   `StateHistory.from_game` now rebuilds the real history from `game.position_history`.
+5. Legal moves were generated three times per expanded MCTS node (now once).
+6. The "Network eval" timer included the "Get legal moves" timer, so the printed MCTS total
+   double-counted it (now separate).
+7. `np.random.choice(N, batch, replace=False)` cost O(N) per batch (97 ms at N = 6 M); now
+   `np.random.default_rng().choice` (O(batch)). A per-batch L2 sum that was never used was removed,
+   and gradient norms now need 2 `.item()` calls per batch instead of one per parameter.
+8. Gating and vs-random evaluation ran their two colour halves one after the other; both are now
+   submitted at once.
+9. `training_history.json` stored 0 for `avg_game_length`; now the real value.
+10. The `--device` help claimed auto-detection; the default is `"cpu"`.
+
+Not changed (design decisions): the replay buffer is not saved on resume; "validation" samples come
+from the training buffer; the buffer is stored as float32 and fully copied for training; games in
+progress are discarded when 512 games have finished; `torch.compile` runs for every game and
+every training call.
 
 ---
 

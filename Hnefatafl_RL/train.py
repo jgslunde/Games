@@ -609,20 +609,21 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
     
     # Original
     augmented.append((state.copy(), policy.copy(), value))
-    
-    # 4 rotations
+
+    # 4 rotations. np.rot90 with positive k turns counter-clockwise, so k=-k is used to match the
+    # clockwise rotation (r, c) -> (c, n-1-r) in rotate_policy.
     for k in range(1, 4):
-        rotated_state = np.rot90(state, k=k, axes=(1, 2)).copy()
+        rotated_state = np.rot90(state, k=-k, axes=(1, 2)).copy()
         rotated_policy = rotate_policy(policy, k)
         augmented.append((rotated_state, rotated_policy, value))
-    
+
     # Horizontal flip + 4 rotations
     flipped_state = np.flip(state, axis=2).copy()
     flipped_policy = flip_policy(policy, horizontal=True)
     augmented.append((flipped_state, flipped_policy, value))
-    
+
     for k in range(1, 4):
-        rotated_state = np.rot90(flipped_state, k=k, axes=(1, 2)).copy()
+        rotated_state = np.rot90(flipped_state, k=-k, axes=(1, 2)).copy()
         rotated_policy = rotate_policy(flipped_policy, k)
         augmented.append((rotated_state, rotated_policy, value))
     
@@ -699,7 +700,12 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         
         # Set torch to use only 1 thread per worker to avoid conflicts
         torch.set_num_threads(1)
-        
+        # Compile in this process. The Inductor compile thread pool inherited from the parent does not
+        # survive the fork: if the parent already used it (torch.compile during training), jobs
+        # submitted to it never run and the worker hangs.
+        from torch._inductor import config as inductor_config
+        inductor_config.compile_threads = 1
+
         # Set up temp directory for this worker
         import tempfile
         if temp_dir is not None:
@@ -1086,7 +1092,7 @@ def play_self_play_game(agent: Agent, config: TrainingConfig) -> Dict:
 
 
 def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None,
-                           attacker_sims: int = None, defender_sims: int = None) -> Tuple[ReplayBuffer, int, int, Any]:
+                           attacker_sims: int = None, defender_sims: int = None) -> Tuple[ReplayBuffer, int, int, float, Any]:
     """
     Generate self-play games and store in replay buffer.
     Uses multiprocessing to parallelize game generation.
@@ -1100,10 +1106,11 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         defender_sims: Override for defender simulation count (uses config value if None)
     
     Returns:
-        Tuple of (buffer, attacker_wins, defender_wins, pool) where:
+        Tuple of (buffer, attacker_wins, defender_wins, avg_game_length, pool) where:
         - buffer: ReplayBuffer with collected experience
         - attacker_wins: Number of games won by attacker
         - defender_wins: Number of games won by defender
+        - avg_game_length: Mean number of plies per game (including random opening plies)
         - pool: The multiprocessing pool (may be recreated if terminated)
     """
     buffer = ReplayBuffer(config.replay_buffer_size)
@@ -1352,14 +1359,12 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
             # Mark if attacker won this game
             attacker_won = (winner == 0)
             
-            # Add original sample
-            buffer.add(state, policy, value, attacker_won)
-            
-            # Add augmented samples using board symmetries
+            # Add the sample, or all 8 board symmetries of it (augment_sample includes the original)
             if config.use_data_augmentation:
-                augmented = augment_sample(state, policy, value, config.board_size)
-                for aug_state, aug_policy, aug_value in augmented:
+                for aug_state, aug_policy, aug_value in augment_sample(state, policy, value, config.board_size):
                     buffer.add(aug_state, aug_policy, aug_value, attacker_won)
+            else:
+                buffer.add(state, policy, value, attacker_won)
     
     print(f"Generated {len(buffer)} training samples")
     total_games = config.num_games_per_iteration
@@ -1423,7 +1428,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         print(f"  Terminal eval:     {mcts_timing_totals['terminal_eval']:7.1f}s ({100*mcts_timing_totals['terminal_eval']/total_mcts_time:5.1f}%)")
         print(f"  Total MCTS time:   {total_mcts_time:7.1f}s")
     
-    return buffer, attacker_wins, defender_wins, pool
+    return buffer, attacker_wins, defender_wins, total_moves / total_games, pool
 
 
 # =============================================================================
@@ -1504,8 +1509,12 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     
     batches_per_epoch = train_samples_per_epoch // config.batch_size
     
+    # Generator.choice without replacement costs O(batch); the legacy np.random.choice shuffles all
+    # total_samples indices on every call (~100 ms per batch for a 6M-sample buffer).
+    rng = np.random.default_rng()
+
     # Pre-sample validation indices once (validation set is fixed for this training call)
-    val_indices = np.random.choice(total_samples, val_samples_per_epoch, replace=False)
+    val_indices = rng.choice(total_samples, val_samples_per_epoch, replace=False)
     
     total_policy_loss = 0.0
     total_value_loss = 0.0
@@ -1534,7 +1543,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         
         for batch_idx in range(batches_per_epoch):
             # Sample batch randomly from entire buffer (standard RL practice)
-            batch_train_indices = np.random.choice(total_samples, config.batch_size, replace=False)
+            batch_train_indices = rng.choice(total_samples, config.batch_size, replace=False)
             
             # Extract samples using fast numpy array indexing (O(1) per sample)
             states = all_states[batch_train_indices]
@@ -1575,42 +1584,33 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             policy_loss = torch.mean(policy_loss_per_sample)
             value_loss = torch.mean(value_loss_per_sample)
             
-            # Compute L2 regularization loss explicitly for reporting
-            # Note: optimizer's weight_decay already applies this, we're just computing it for logging
-            l2_loss = 0.0
-            for param in network.parameters():
-                if param.requires_grad:
-                    l2_loss += torch.sum(param ** 2).item()
-            l2_loss = 0.5 * config.weight_decay * l2_loss  # 0.5 factor is standard in L2 regularization
-            
             loss = policy_loss + config.value_loss_weight * value_loss
             
             # Backward pass (set_to_none=True is faster than default zero_grad)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             
-            # Compute gradient norms after backward pass
-            # We compute separate gradients for policy and value heads
-            policy_grad_norm = 0.0
-            value_grad_norm = 0.0
-            
+            # Compute gradient norms after backward pass, separately for policy and value heads.
+            # Squared norms are summed as tensors so that only two .item() syncs happen per batch.
+            policy_grad_sq = torch.zeros((), device=device)
+            value_grad_sq = torch.zeros((), device=device)
+
             for name, param in network.named_parameters():
                 if param.grad is not None:
-                    grad_norm = param.grad.norm().item()
-                    # Separate policy head from value head gradients
-                    # Policy head typically has 'policy' in the name, value head has 'value'
+                    grad_sq = param.grad.pow(2).sum()
+                    # Policy head has 'policy' in the name, value head has 'value'
                     if 'policy' in name.lower():
-                        policy_grad_norm += grad_norm ** 2
+                        policy_grad_sq += grad_sq
                     elif 'value' in name.lower():
-                        value_grad_norm += grad_norm ** 2
+                        value_grad_sq += grad_sq
                     else:
                         # Shared layers contribute to both
-                        policy_grad_norm += (grad_norm ** 2) / 2
-                        value_grad_norm += (grad_norm ** 2) / 2
-            
+                        policy_grad_sq += grad_sq / 2
+                        value_grad_sq += grad_sq / 2
+
             # Take square root to get L2 norm
-            policy_grad_norm = policy_grad_norm ** 0.5
-            value_grad_norm = value_grad_norm ** 0.5
+            policy_grad_norm = policy_grad_sq.item() ** 0.5
+            value_grad_norm = value_grad_sq.item() ** 0.5
             
             optimizer.step()
             
@@ -1748,7 +1748,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
                                 num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
                                 network_module, network_class_name, game_module, game_class_name, fpu_reduction=-0.5,
-                                history_length=1):
+                                history_length=1, rules=None, max_moves=500):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1768,7 +1768,10 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
         game_module: Module name for game (e.g., 'brandubh', 'tablut')
         game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
         fpu_reduction: First Play Urgency reduction relative to parent Q-value (for evaluation)
-    
+        history_length: Number of timesteps for history planes in network input
+        rules: Game-rule keyword arguments for the game class (same rules as self-play)
+        max_moves: Plies after which the game is a draw (same limit as self-play)
+
     Returns:
         1.0 if NN wins, 0.5 if draw, 0.0 if NN loses
     """
@@ -1780,7 +1783,11 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
     
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
-    
+    # Compile in this process; the inherited Inductor compile thread pool can hang after fork
+    # (see _play_self_play_game_worker)
+    from torch._inductor import config as inductor_config
+    inductor_config.compile_threads = 1
+
     # Set per-worker compilation cache to avoid lock contention
     # Each worker gets its own cache directory, so no delays needed
     import tempfile
@@ -1833,7 +1840,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
     
     # Play game
     if nn_plays_attacker:
-        winner = play_game(nn_agent, random_agent, GameClass, display=False)
+        winner = play_game(nn_agent, random_agent, GameClass, display=False, rules=rules, max_moves=max_moves)
         if winner == 0:
             return 1.0  # NN wins
         elif winner is None:
@@ -1841,7 +1848,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
         else:
             return 0.0  # NN loses
     else:
-        winner = play_game(random_agent, nn_agent, GameClass, display=False)
+        winner = play_game(random_agent, nn_agent, GameClass, display=False, rules=rules, max_moves=max_moves)
         if winner == 1:
             return 1.0  # NN wins
         elif winner is None:
@@ -1908,6 +1915,10 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
     else:
         cleanup_temp_file = False
     
+    # Evaluation games use the same rules and draw limit as self-play
+    game_rules = dict(king_capture_pieces=config.king_capture_pieces, king_can_capture=config.king_can_capture,
+                      throne_is_hostile=config.throne_is_hostile, throne_enabled=config.throne_enabled)
+
     try:
         # Create worker functions with partial for attacker and defender games
         worker_func_attacker = partial(
@@ -1925,9 +1936,11 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             game_module=config.game_class.__module__,
             game_class_name=config.game_class.__name__,
             fpu_reduction=config.eval_fpu_reduction,
-            history_length=config.history_length
+            history_length=config.history_length,
+            rules=game_rules,
+            max_moves=config.max_game_length
         )
-        
+
         worker_func_defender = partial(
             _evaluate_vs_random_worker,
             temp_network_path,
@@ -1943,20 +1956,26 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             game_module=config.game_class.__module__,
             game_class_name=config.game_class.__name__,
             fpu_reduction=config.eval_fpu_reduction,
-            history_length=config.history_length
+            history_length=config.history_length,
+            rules=game_rules,
+            max_moves=config.max_game_length
         )
         
         # Play games in parallel
+        # Both colours are submitted before waiting, so all workers stay busy instead of
+        # running the two halves one after the other.
         if config.num_workers > 1:
             if pool is not None:
                 # Use provided persistent pool
-                attacker_results = pool.map(worker_func_attacker, range(num_games), chunksize=1)
-                defender_results = pool.map(worker_func_defender, range(num_games), chunksize=1)
+                attacker_async = pool.map_async(worker_func_attacker, range(num_games), chunksize=1)
+                defender_async = pool.map_async(worker_func_defender, range(num_games), chunksize=1)
+                attacker_results, defender_results = attacker_async.get(), defender_async.get()
             else:
                 # Create temporary pool (for backward compatibility)
                 with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
-                    attacker_results = temp_pool.map(worker_func_attacker, range(num_games), chunksize=1)
-                    defender_results = temp_pool.map(worker_func_defender, range(num_games), chunksize=1)
+                    attacker_async = temp_pool.map_async(worker_func_attacker, range(num_games), chunksize=1)
+                    defender_async = temp_pool.map_async(worker_func_defender, range(num_games), chunksize=1)
+                    attacker_results, defender_results = attacker_async.get(), defender_async.get()
         else:
             # Single-threaded fallback
             attacker_results = [worker_func_attacker(i) for i in range(num_games)]
@@ -2010,7 +2029,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                              new_plays_attacker,
                              network_module, network_class_name, game_module, game_class_name,
                              game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_reduction, temp_dir=None,
-                             history_length=1):
+                             history_length=1, rules=None, max_moves=500):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -2035,7 +2054,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         temperature_threshold: Move number for temperature drop (for "fixed" mode)
         temperature_decay_moves: Number of moves for linear decay (for "decay" mode)
         fpu_reduction: First Play Urgency reduction relative to parent Q-value (for evaluation)
-    
+        history_length: Number of timesteps for history planes in network input
+        rules: Game-rule keyword arguments for the game class (same rules as self-play)
+        max_moves: Plies after which the game is a draw (same limit as self-play)
+
     Returns:
         1.0 if new network wins, 0.5 if draw, 0.0 if new network loses
     """
@@ -2047,7 +2069,11 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
-    
+    # Compile in this process; the inherited Inductor compile thread pool can hang after fork
+    # (see _play_self_play_game_worker)
+    from torch._inductor import config as inductor_config
+    inductor_config.compile_threads = 1
+
     # Set up temp directory for this worker
     import tempfile
     if temp_dir is not None:
@@ -2130,7 +2156,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         winner = play_game(new_agent, old_agent, GameClass, display=False,
                           temperature=temperature, temperature_mode=temperature_mode,
                           temperature_threshold=temperature_threshold,
-                          temperature_decay_moves=temperature_decay_moves)
+                          temperature_decay_moves=temperature_decay_moves,
+                          rules=rules, max_moves=max_moves)
         if winner == 0:
             return 1.0  # New network wins
         elif winner is None:
@@ -2141,7 +2168,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         winner = play_game(old_agent, new_agent, GameClass, display=False,
                           temperature=temperature, temperature_mode=temperature_mode,
                           temperature_threshold=temperature_threshold,
-                          temperature_decay_moves=temperature_decay_moves)
+                          temperature_decay_moves=temperature_decay_moves,
+                          rules=rules, max_moves=max_moves)
         if winner == 1:
             return 1.0  # New network wins
         elif winner is None:
@@ -2211,7 +2239,11 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         # Create two partial functions - one for new as attacker, one for new as defender
         half_games = config.eval_games // 2
         remainder = config.eval_games % 2
-        
+
+        # Evaluation games use the same rules and draw limit as self-play
+        game_rules = dict(king_capture_pieces=config.king_capture_pieces, king_can_capture=config.king_can_capture,
+                          throne_is_hostile=config.throne_is_hostile, throne_enabled=config.throne_enabled)
+
         worker_func_new_attacker = partial(
             _evaluate_networks_worker,
             temp_new_path,
@@ -2235,7 +2267,9 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_decay_moves=config.eval_temperature_decay_moves,
             fpu_reduction=config.eval_fpu_reduction,
             temp_dir=config.temp_dir,
-            history_length=config.history_length
+            history_length=config.history_length,
+            rules=game_rules,
+            max_moves=config.max_game_length
         )
         
         worker_func_new_defender = partial(
@@ -2261,22 +2295,25 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_decay_moves=config.eval_temperature_decay_moves,
             fpu_reduction=config.eval_fpu_reduction,
             temp_dir=config.temp_dir,
-            history_length=config.history_length
+            history_length=config.history_length,
+            rules=game_rules,
+            max_moves=config.max_game_length
         )
         
-        # Play games in parallel using pool.map for true parallelization
+        # Play games in parallel. Both colours are submitted before waiting, so all workers stay
+        # busy instead of running the two halves one after the other.
         if config.num_workers > 1:
             if pool is not None:
                 # Use provided persistent pool
-                attacker_results = pool.map(worker_func_new_attacker, range(half_games + remainder), chunksize=1)
-                defender_results = pool.map(worker_func_new_defender, range(half_games), chunksize=1)
-                results = attacker_results + defender_results
+                attacker_async = pool.map_async(worker_func_new_attacker, range(half_games + remainder), chunksize=1)
+                defender_async = pool.map_async(worker_func_new_defender, range(half_games), chunksize=1)
+                results = attacker_async.get() + defender_async.get()
             else:
                 # Create temporary pool (for backward compatibility)
                 with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
-                    attacker_results = temp_pool.map(worker_func_new_attacker, range(half_games + remainder), chunksize=1)
-                    defender_results = temp_pool.map(worker_func_new_defender, range(half_games), chunksize=1)
-                    results = attacker_results + defender_results
+                    attacker_async = temp_pool.map_async(worker_func_new_attacker, range(half_games + remainder), chunksize=1)
+                    defender_async = temp_pool.map_async(worker_func_new_defender, range(half_games), chunksize=1)
+                    results = attacker_async.get() + defender_async.get()
         else:
             # Single-threaded fallback
             results = [worker_func_new_attacker(i) for i in range(half_games + remainder)]
@@ -2460,7 +2497,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     print("\n--- Network Architecture ---")
     print(f"Residual blocks: {config.num_res_blocks}")
     print(f"Channels: {config.num_channels}")
-    print(f"Input: 4 planes ({config.board_size}×{config.board_size}) - [attackers, defenders, king, current_player]")
+    print(f"Input: {config.history_length * 3 + 1} planes ({config.board_size}×{config.board_size}) - "
+          f"[attackers, defenders, king] x {config.history_length} time step(s) + current_player")
     print(f"Policy output: {config.policy_size} moves ({config.num_squares} squares × 4 directions × {config.board_size - 1} distances)")
     print("Value output: single scalar (win probability)")
     
@@ -2858,10 +2896,10 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             # Get current simulation counts (dynamic or static)
             if sim_balancer is not None:
                 attacker_sims, defender_sims = sim_balancer.get_simulation_counts()
-                new_buffer, attacker_game_wins, defender_game_wins, worker_pool = generate_self_play_data(
+                new_buffer, attacker_game_wins, defender_game_wins, avg_game_length, worker_pool = generate_self_play_data(
                     agent, config, pool=worker_pool, attacker_sims=attacker_sims, defender_sims=defender_sims)
             else:
-                new_buffer, attacker_game_wins, defender_game_wins, worker_pool = generate_self_play_data(
+                new_buffer, attacker_game_wins, defender_game_wins, avg_game_length, worker_pool = generate_self_play_data(
                     agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
             
@@ -2944,8 +2982,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 training_history['selfplay_results']['attacker_wins'].append(attacker_game_wins)
                 training_history['selfplay_results']['defender_wins'].append(defender_game_wins)
                 training_history['selfplay_results']['draws'].append(draws)
-                # We don't have avg_game_length here, so we'll skip it or set to 0
-                training_history['selfplay_results']['avg_game_length'].append(0)  # TODO: track this
+                training_history['selfplay_results']['avg_game_length'].append(avg_game_length)
                 
                 # Record timing for this iteration
                 if 'timing' not in training_history:

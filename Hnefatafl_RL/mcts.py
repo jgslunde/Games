@@ -346,9 +346,14 @@ class MCTS:
                         value = 0.0
                     self.timing_stats['terminal_eval'] += time.perf_counter() - t0
                 else:
-                    # Non-terminal leaf: evaluate with network and expand
+                    # Non-terminal leaf: evaluate with network and expand.
+                    # Legal moves are generated once here and cached on the node, so expand() reuses them.
                     t0 = time.perf_counter()
-                    policy_probs, value = self._evaluate(node.game, sim_history)
+                    legal_moves = node.get_legal_moves()
+                    self.timing_stats['get_legal_moves'] += time.perf_counter() - t0
+
+                    t0 = time.perf_counter()
+                    policy_probs, value = self._evaluate(node.game, legal_moves, sim_history)
                     self.timing_stats['network_eval'] += time.perf_counter() - t0
                     
                     t0 = time.perf_counter()
@@ -368,22 +373,22 @@ class MCTS:
         
         return root.get_visit_distribution()
     
-    def _evaluate(self, game: Brandubh, state_history: Optional[StateHistory] = None) -> Tuple[np.ndarray, float]:
+    def _evaluate(self, game: Brandubh, legal_moves: List[Tuple],
+                  state_history: Optional[StateHistory] = None) -> Tuple[np.ndarray, float]:
         """
         Evaluate a game state with the neural network.
-        
+
         Args:
             game: game state to evaluate
+            legal_moves: legal moves of `game`, in the order used for the returned probabilities
             state_history: Optional StateHistory for history planes support.
                           If provided, uses history to construct input tensor.
                           If None, uses game.get_state() (backward compatible).
-        
+
         Returns:
-            policy_probs: probability distribution over legal moves
+            policy_probs: probability distribution over legal_moves (same order)
             value: estimated value for current player
         """
-        import time
-        
         # Get MoveEncoder class (backward compatible)
         if self.move_encoder_class is None:
             # Try to infer from network module name
@@ -415,21 +420,13 @@ class MCTS:
         
         policy_logits = policy_logits.cpu().numpy()[0]
         value = value.cpu().item()
-        
-        # Mask illegal moves
-        t0 = time.perf_counter()
-        legal_mask = move_encoder.get_legal_move_mask(game)
-        policy_logits = policy_logits * legal_mask + (1 - legal_mask) * (-1e8)
-        
-        # Convert to probabilities
-        policy_probs = self._softmax(policy_logits)
-        
-        # Extract probabilities for legal moves only
-        legal_moves = game.get_legal_moves()
+
+        # Softmax over the legal moves only. This equals a softmax over all moves with illegal moves
+        # masked out, followed by picking the legal entries.
         move_indices = [move_encoder.encode_move(move) for move in legal_moves]
-        legal_probs = policy_probs[move_indices]
-        self.timing_stats['get_legal_moves'] += time.perf_counter() - t0
-        
+        legal_logits = policy_logits[move_indices]
+        legal_probs = self._softmax(legal_logits) if len(legal_moves) > 0 else legal_logits
+
         return legal_probs, value
     
     @staticmethod

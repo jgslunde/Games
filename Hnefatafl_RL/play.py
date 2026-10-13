@@ -78,45 +78,58 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
             config1 = checkpoint1['config']
             num_res_blocks1 = config1.get('num_res_blocks', 4)
             num_channels1 = config1.get('num_channels', 64)
+            history_length1 = config1.get('history_length', 1)
+            value_head_hidden_size1 = config1.get('value_head_hidden_size', 64)
         else:
             num_res_blocks1 = checkpoint1.get('num_res_blocks', 4)
             num_channels1 = checkpoint1.get('num_channels', 64)
+            history_length1 = checkpoint1.get('history_length', 1)
+            value_head_hidden_size1 = checkpoint1.get('value_head_hidden_size', 64)
         
         if 'config' in checkpoint2:
             config2 = checkpoint2['config']
             num_res_blocks2 = config2.get('num_res_blocks', 4)
             num_channels2 = config2.get('num_channels', 64)
+            history_length2 = config2.get('history_length', 1)
+            value_head_hidden_size2 = config2.get('value_head_hidden_size', 64)
         else:
             num_res_blocks2 = checkpoint2.get('num_res_blocks', 4)
             num_channels2 = checkpoint2.get('num_channels', 64)
+            history_length2 = checkpoint2.get('history_length', 1)
+            value_head_hidden_size2 = checkpoint2.get('value_head_hidden_size', 64)
         
         # Create networks with correct architecture
-        network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1).to(device)
-        network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2).to(device)
+        if network_cls is BrandubhNet:
+            network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1, history_length=history_length1,
+                                   value_head_hidden_size=value_head_hidden_size1).to(device)
+            network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2, history_length=history_length2,
+                                   value_head_hidden_size=value_head_hidden_size2).to(device)
+        else:
+            network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1).to(device)
+            network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2).to(device)
         
         # Load state dicts - handle different checkpoint formats
-        if 'network_state_dict' in checkpoint1:
-            network1.load_state_dict(checkpoint1['network_state_dict'])
-        elif 'model_state_dict' in checkpoint1:
-            network1.load_state_dict(checkpoint1['model_state_dict'])
+        state_dict1 = checkpoint1.get('network_state_dict') or checkpoint1.get('model_state_dict') or checkpoint1
+        state_dict2 = checkpoint2.get('network_state_dict') or checkpoint2.get('model_state_dict') or checkpoint2
+        if isinstance(network1, BrandubhNet):
+            network1.load_state_dict_compatible(state_dict1)
         else:
-            network1.load_state_dict(checkpoint1)
-        
-        if 'network_state_dict' in checkpoint2:
-            network2.load_state_dict(checkpoint2['network_state_dict'])
-        elif 'model_state_dict' in checkpoint2:
-            network2.load_state_dict(checkpoint2['model_state_dict'])
+            network1.load_state_dict(state_dict1)
+        if isinstance(network2, BrandubhNet):
+            network2.load_state_dict_compatible(state_dict2)
         else:
-            network2.load_state_dict(checkpoint2)
+            network2.load_state_dict(state_dict2)
         
         network1.eval()
         network2.eval()
         
         # Create agents with separate C_PUCT and FPU values
         agent1 = Agent(network1, num_simulations=simulations, device=device, 
-                      c_puct=c_puct1, fpu_reduction=fpu_reduction1)
+                      c_puct=c_puct1, fpu_reduction=fpu_reduction1,
+                      history_length=getattr(network1, 'history_length', 1))
         agent2 = Agent(network2, num_simulations=simulations, device=device,
-                      c_puct=c_puct2, fpu_reduction=fpu_reduction2)
+                      c_puct=c_puct2, fpu_reduction=fpu_reduction2,
+                      history_length=getattr(network2, 'history_length', 1))
         
         # Play game
         move_count = 0
@@ -200,6 +213,8 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, g
             num_res_blocks = config.get('num_res_blocks', 4)
             num_channels = config.get('num_channels', 64)
             board_size = config.get('board_size', 7)  # Extract board size from config
+            history_length = config.get('history_length', 1)
+            value_head_hidden_size = config.get('value_head_hidden_size', 64)
             
             # Extract game rules from checkpoint (can be overridden)
             if force_rules is None:
@@ -216,6 +231,8 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, g
             num_res_blocks = 4
             num_channels = 64
             board_size = 7  # Default to Brandubh
+            history_length = 1
+            value_head_hidden_size = 64
             rules = force_rules if force_rules else {
                 'king_capture_pieces': 2,
                 'king_can_capture': True,
@@ -229,13 +246,21 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, g
         elif game_class == Hnefatafl or board_size == 11:
             network = HnefataflNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
         else:
-            network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+            network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels, history_length=history_length,
+                                  value_head_hidden_size=value_head_hidden_size)
         
-        network.load_state_dict(checkpoint['model_state_dict'])
+        state_dict = checkpoint.get('network_state_dict') or checkpoint.get('model_state_dict') or checkpoint
+        if isinstance(network, BrandubhNet):
+            network.load_state_dict_compatible(state_dict)
+        else:
+            network.load_state_dict(state_dict)
         network.eval()
         
         print(f"Loaded network from {checkpoint_path}")
-        print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels")
+        if isinstance(network, BrandubhNet):
+            print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels, history_length={history_length}")
+        else:
+            print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels")
         
         return network, rules
         
@@ -752,10 +777,12 @@ def main():
     # Create agents with optional Dirichlet noise and separate C_PUCT/FPU values
     agent1 = Agent(network1, num_simulations=args.simulations, c_puct=c_puct1, device='cpu',
                    add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha,
-                   move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction1)
+                   move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction1,
+                   history_length=getattr(network1, 'history_length', 1))
     agent2 = Agent(network2, num_simulations=args.simulations, c_puct=c_puct2, device='cpu',
                    add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha,
-                   move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction2)
+                   move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction2,
+                   history_length=getattr(network2, 'history_length', 1))
     
     # Play games
     if args.num_games == 1 and not args.swap_colors:

@@ -42,13 +42,13 @@ DEFAULT_SIMS_ATTACKER_SELFPLAY = 1000
 DEFAULT_SIMS_DEFENDER_SELFPLAY = 1000
 DEFAULT_SIMS_ATTACKER_EVAL = 800
 DEFAULT_SIMS_DEFENDER_EVAL = 800
-DEFAULT_BATCH_SIZE = 512
+DEFAULT_BATCH_SIZE = 256
 DEFAULT_LEARNING_RATE = 1e-3*sqrt(DEFAULT_BATCH_SIZE/256)
 DEFAULT_EPOCHS = 10
-DEFAULT_BATCHES_PER_EPOCH = 100
+DEFAULT_BATCHES_PER_EPOCH = 200
 DEFAULT_EVAL_VS_RANDOM = 64
 DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
-DEFAULT_DEVICE = None  # None = auto-detect (cuda if available, else cpu)
+DEFAULT_DEVICE = None  # Device for training in the main process; None = TrainingConfig.device ("cpu")
 DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
 DEFAULT_TEMP_DIR = "/dev/shm/" # Location for temp torch files (RAM-disk by default).
 
@@ -56,19 +56,19 @@ DEFAULT_TEMP_DIR = "/dev/shm/" # Location for temp torch files (RAM-disk by defa
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TEMPERATURE_MODE = "decay"  # "fixed", "king", or "decay"
 DEFAULT_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
-DEFAULT_TEMPERATURE_DECAY_MOVES = 16  # For "decay" mode
+DEFAULT_TEMPERATURE_DECAY_MOVES = 20  # For "decay" mode
 
 # Evaluation temperature parameters
 DEFAULT_EVAL_TEMPERATURE = 0.65  # Starting temperature during evaluation play 
 DEFAULT_EVAL_TEMPERATURE_MODE = "fixed"  # "fixed", "king", or "decay"
 DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
-DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 16  # For "decay" mode
+DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 20  # For "decay" mode
 
 # Network architecture
-DEFAULT_RES_BLOCKS = 4
-DEFAULT_CHANNELS = 64
+DEFAULT_RES_BLOCKS = 6
+DEFAULT_CHANNELS = 32
 DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 256
-DEFAULT_HISTORY_LENGTH = 4  # Number of timesteps for history planes (1 = current only, for backward compatibility)
+DEFAULT_HISTORY_LENGTH = 1  # Number of timesteps for history planes (1 = current only, for backward compatibility)
 
 # Replay buffer
 DEFAULT_REPLAY_BUFFER_SIZE = 6_000_000
@@ -91,8 +91,8 @@ DEFAULT_VALUE_LOSS_WEIGHT = 1.5
 
 # Stepping learning rate schedule (alternative to exponential decay)
 DEFAULT_USE_STEPPING_LR = True  # If True, use stepping LR instead of exponential decay
-DEFAULT_LR_STEP_ITERATIONS = [100, 200, 400]  # Iterations at which to step LR (e.g., [50, 100, 150])
-DEFAULT_LR_STEP_VALUES = [2e-3, 1e-3, 2e-4, 2e-5] # LR values for each step (must be len(lr_step_iterations) + 1)
+DEFAULT_LR_STEP_ITERATIONS = [100, 200, 300]  # Iterations at which to step LR (e.g., [50, 100, 150])
+DEFAULT_LR_STEP_VALUES = [1e-3, 5e-4, 1e-4, 1e-5] # LR values for each step (must be len(lr_step_iterations) + 1)
 
 # Dynamic loss boosting
 DEFAULT_USE_DYNAMIC_BOOSTING = False
@@ -313,7 +313,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS,
                        help=f"Number of parallel workers (default: {DEFAULT_NUM_WORKERS} CPUs)")
     parser.add_argument("--device", type=str, default=DEFAULT_DEVICE,
-                       help="Device (cuda/cpu, default: auto-detect)")
+                       help="Device for training in the main process (cuda/cpu, default: cpu)")
     parser.add_argument("--temp-dir", type=str, default=DEFAULT_TEMP_DIR,
                        help="Temporary directory for PyTorch cache files (default: system /tmp, or use /dev/shm for RAM disk)")
     
