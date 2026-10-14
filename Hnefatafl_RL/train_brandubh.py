@@ -112,8 +112,9 @@ DEFAULT_EVAL_C_PUCT = 1.5  # Evaluation c_puct
 DEFAULT_EVAL_FPU_REDUCTION = -0.25  # Evaluation FPU reduction
 
 # Dynamic simulation balancing
-DEFAULT_USE_DYNAMIC_SIM_BALANCING = True  # Dynamically adjust simulation counts to target 50% win rate
+DEFAULT_USE_DYNAMIC_SIM_BALANCING = True  # Dynamically adjust simulation counts to balance win rates
 DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE = 0.2  # Fraction of win rate difference used for adjustment
+DEFAULT_DYNAMIC_SIM_MIN_WIN_RATE = 0.5  # Keep each side's score (draws = half) >= this; 0.5 = push towards 50%
 
 # Dirichlet noise (exploration during self-play)
 DEFAULT_ADD_DIRICHLET_NOISE = True  # Enable Dirichlet noise in self-play for exploration
@@ -230,11 +231,16 @@ if __name__ == "__main__":
     
     # Dynamic simulation balancing
     parser.add_argument("--use-dynamic-sim-balancing", action="store_true", default=DEFAULT_USE_DYNAMIC_SIM_BALANCING,
-                       help=f"Dynamically adjust simulation counts to target 50%% win rate (default: {DEFAULT_USE_DYNAMIC_SIM_BALANCING})")
+                       help=f"Dynamically adjust simulation counts to balance win rates, see "
+                            f"--dynamic-sim-min-win-rate (default: {DEFAULT_USE_DYNAMIC_SIM_BALANCING})")
     parser.add_argument("--no-dynamic-sim-balancing", action="store_false", dest="use_dynamic_sim_balancing",
                        help="Disable dynamic simulation balancing (use fixed counts)")
     parser.add_argument("--dynamic-sim-adjustment-rate", type=float, default=DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE,
                        help=f"Fraction of win rate difference used for simulation adjustment (default: {DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE})")
+    parser.add_argument("--dynamic-sim-min-win-rate", type=float, default=DEFAULT_DYNAMIC_SIM_MIN_WIN_RATE,
+                       help="Keep each side's self-play score (wins + draws/2) at or above this, i.e. the attacker's "
+                            "score in [x, 1-x]. Inside that band the simulation split drifts back to equal. "
+                            f"0.5 pushes towards a 50%% score (default: {DEFAULT_DYNAMIC_SIM_MIN_WIN_RATE})")
     
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
                        help=f"Sampling temperature for move selection in self-play (default: {DEFAULT_TEMPERATURE})")
@@ -393,6 +399,7 @@ if __name__ == "__main__":
     config.eval_fpu_reduction = args.eval_fpu_reduction
     config.use_dynamic_sim_balancing = args.use_dynamic_sim_balancing
     config.dynamic_sim_adjustment_rate = args.dynamic_sim_adjustment_rate
+    config.dynamic_sim_min_win_rate = args.dynamic_sim_min_win_rate
     config.temperature = args.temperature
     config.temperature_mode = args.temperature_mode
     config.temperature_threshold = args.temperature_threshold

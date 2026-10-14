@@ -13,6 +13,8 @@ Tests for the training-pipeline fixes:
 11. A capturing move is never refused as a repetition.
 12. Random rollouts return the result for the player to move at the start of the rollout.
 13. load_state_dict_compatible keeps the player plane when the history length differs.
+14. SimulationBalancer: min_win_rate 0.5 reproduces the earlier rule; a band [m, 1-m] only pushes
+    outside it, drifts back to an equal split inside it, and counts draws as half a win.
 
 Run with: python test_training_fixes.py
 """
@@ -26,7 +28,7 @@ from network import BrandubhNet, MoveEncoder, StateHistory
 from network_tablut import TablutMoveEncoder
 from mcts import MCTS, MCTSNode, RandomRolloutMCTS
 from agent import Agent, RandomAgent, play_game
-from train import augment_sample
+from train import augment_sample, SimulationBalancer
 
 
 def random_position(game_class, rng, max_plies=14):
@@ -296,13 +298,63 @@ def test_load_compatible_keeps_player_plane():
     return True
 
 
+def test_sim_balancer_band():
+    """The simulation balancer with a win-rate band, and its special case 0.5 (the earlier rule)."""
+    # min_win_rate 0.5 and no draws: same counts as the earlier rule
+    def earlier_rule(attacker_sims, total, rate, attacker_wins, defender_wins):
+        attacker_rate = attacker_wins / (attacker_wins + defender_wins)
+        transfer = rate * abs((1 - attacker_rate) - attacker_rate) * total / 2
+        attacker_sims += transfer if attacker_rate < 0.5 else -transfer
+        return int(round(max(1, min(total - 1, attacker_sims))))
+
+    rng = np.random.default_rng(4)
+    balancer, expected = SimulationBalancer(1000, 1000, adjustment_rate=0.2), 1000
+    for _ in range(50):
+        attacker_wins = int(rng.integers(0, 513))
+        balancer.update(attacker_wins, 512 - attacker_wins)
+        expected = earlier_rule(expected, 2000, 0.2, attacker_wins, 512 - attacker_wins)
+        assert (balancer.attacker_sims, balancer.defender_sims) == (expected, 2000 - expected)
+
+    # Band [0.2, 0.8] with adjustment rate 0.1 and 2000 simulations in total
+    balancer = SimulationBalancer(1000, 1000, adjustment_rate=0.1, min_win_rate=0.2)
+    steps = [((90, 10, 0), 980),   # score 0.9: 0.1 * (0.9 - 0.8) * 2000 = 20 simulations to the defender
+             ((70, 0, 30), 970),   # draws count half: score 0.85, 10 more to the defender
+             ((50, 50, 0), 973),   # inside the band: 10 % of the way back to 1000
+             ((10, 90, 0), 993)]   # score 0.1: 20 simulations to the attacker
+    for (attacker_wins, defender_wins, draws), attacker_sims in steps:
+        balancer.update(attacker_wins, defender_wins, draws)
+        assert (balancer.attacker_sims, balancer.defender_sims) == (attacker_sims, 2000 - attacker_sims)
+
+    # Settling in a toy game whose attacker score rises with the attacker's share f of the simulations:
+    # score = 1 / (1 + exp(-(bias + log(f / (1 - f))))), so at an equal split the score is 1 / (1 + exp(-bias))
+    for bias, min_win_rate, start, target in [(np.log(9), 0.2, 1000, 'edge'),   # 90 % at equal split
+                                               (np.log(7 / 3), 0.2, 300, 'equal'),  # 70 %: no handicap needed
+                                               (np.log(9), 0.5, 1000, 'half')]:   # earlier rule: towards 50 %
+        balancer, scores = SimulationBalancer(start, 2000 - start, adjustment_rate=0.2, min_win_rate=min_win_rate), []
+        for _ in range(300):
+            f = balancer.attacker_sims / 2000
+            scores.append(1 / (1 + np.exp(-(bias + np.log(f / (1 - f))))))
+            attacker_wins = int(round(scores[-1] * 10000))
+            balancer.update(attacker_wins, 10000 - attacker_wins)
+        late_score = np.mean(scores[-50:])
+        if target == 'edge':
+            assert 0.8 <= late_score < 0.83, f"score {late_score:.3f} should stay just above the band edge 0.8"
+        elif target == 'equal':
+            assert abs(balancer.attacker_sims - 1000) <= 3, f"split {balancer.attacker_sims} should return to equal"
+        else:
+            assert abs(late_score - 0.5) < 0.01, f"score {late_score:.3f} should settle at 0.5"
+    print("  simulation balancer: earlier rule kept at 0.5; band, drift back and draws work")
+    return True
+
+
 if __name__ == "__main__":
     print("Testing training-pipeline fixes...")
     tests = [test_augmentation_consistent, test_from_game_matches_tracked_history,
              test_evaluate_matches_masked_softmax, test_play_game_uses_rules, test_fpu_uses_parent_value,
              test_search_input_matches_training_state, test_single_simulation_policy_is_finite,
              test_temperature_and_time_limit, test_play_game_counts_last_ply_win, test_king_cannot_capture,
-             test_capture_is_never_repetition, test_rollout_value_sign, test_load_compatible_keeps_player_plane]
+             test_capture_is_never_repetition, test_rollout_value_sign, test_load_compatible_keeps_player_plane,
+             test_sim_balancer_band]
     all_passed = True
     for test in tests:
         try:
