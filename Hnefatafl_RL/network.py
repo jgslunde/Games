@@ -153,53 +153,27 @@ class BrandubhNet(nn.Module):
     
     def load_state_dict_compatible(self, state_dict, strict=True):
         """
-        Load state dict with backward compatibility for older checkpoints.
-        
-        Older checkpoints (history_length=1, input_channels=4) can be loaded into
-        networks with history_length>1 by expanding the input convolution weights.
-        
+        Load state dict with backward compatibility for checkpoints with another history length.
+
+        Input planes are [attackers_t0, defenders_t0, king_t0, attackers_t1, ..., player]. The input
+        convolution weights of the piece planes that both networks have are copied, and so are the
+        weights of the player plane, which is always the last plane. Extra history planes start at zero;
+        missing ones are dropped.
+
         Args:
             state_dict: State dictionary to load
             strict: If True, raise error on missing/unexpected keys (default True)
         """
-        # Check if we need to adapt input convolution weights
         saved_input_weight = state_dict.get('conv_input.weight', None)
-        
-        if saved_input_weight is not None:
-            saved_channels = saved_input_weight.shape[1]
-            expected_channels = self.input_channels
-            
-            if saved_channels != expected_channels:
-                # Need to adapt weights
-                if saved_channels == 4 and expected_channels > 4:
-                    # Loading old checkpoint (4 channels) into new network (more channels)
-                    # Strategy: Copy the 4 learned weights to the first 4 channels,
-                    # initialize the remaining channels to zero
-                    print(f"Adapting checkpoint: {saved_channels} input channels -> {expected_channels} input channels")
-                    
-                    new_weight = torch.zeros(
-                        saved_input_weight.shape[0],  # out_channels (num_channels)
-                        expected_channels,             # in_channels
-                        saved_input_weight.shape[2],  # kernel_h
-                        saved_input_weight.shape[3],  # kernel_w
-                        dtype=saved_input_weight.dtype
-                    )
-                    
-                    # Copy existing weights to first 4 channels
-                    # Old format: [attackers, defenders, king, player]
-                    # New format: [attackers_t0, defenders_t0, king_t0, attackers_t1, defenders_t1, king_t1, ..., player]
-                    # Map old[0:3] -> new[0:3] (piece planes for t=0)
-                    # Map old[3] -> new[-1] (player plane)
-                    new_weight[:, 0:3, :, :] = saved_input_weight[:, 0:3, :, :]  # Piece planes
-                    new_weight[:, -1, :, :] = saved_input_weight[:, 3, :, :]     # Player plane
-                    
-                    state_dict['conv_input.weight'] = new_weight
-                    
-                elif saved_channels > expected_channels:
-                    # Loading newer checkpoint into older network - truncate
-                    print(f"Truncating checkpoint: {saved_channels} input channels -> {expected_channels} input channels")
-                    state_dict['conv_input.weight'] = saved_input_weight[:, :expected_channels, :, :]
-        
+        if saved_input_weight is not None and saved_input_weight.shape[1] != self.input_channels:
+            print(f"Adapting checkpoint: {saved_input_weight.shape[1]} input channels -> {self.input_channels} input channels")
+            n_piece_planes = min(saved_input_weight.shape[1], self.input_channels) - 1
+            new_weight = torch.zeros(saved_input_weight.shape[0], self.input_channels, *saved_input_weight.shape[2:],
+                                     dtype=saved_input_weight.dtype)
+            new_weight[:, :n_piece_planes] = saved_input_weight[:, :n_piece_planes]
+            new_weight[:, -1] = saved_input_weight[:, -1]
+            state_dict = {**state_dict, 'conv_input.weight': new_weight}  # do not modify the caller's dict
+
         # Use standard load_state_dict
         return super().load_state_dict(state_dict, strict=strict)
     

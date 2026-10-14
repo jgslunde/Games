@@ -7,6 +7,7 @@ rather than just the current state. When history_length > 1, MCTS tracks
 the game state history and constructs the appropriate input for evaluation.
 """
 
+import sys
 import numpy as np
 import torch
 from typing import Dict, List, Tuple, Optional
@@ -125,16 +126,13 @@ class MCTSNode:
         
         # Calculate sqrt(N(s)) once
         sqrt_parent_visits = math.sqrt(self.visit_count)
-        
-        # FPU value relative to parent's mean value
-        # From parent's perspective: use parent.mean_value
-        # From child's perspective (negated): use -parent.mean_value
-        # Apply reduction: fpu_from_child_perspective = -parent.mean_value + fpu_reduction
-        parent_q_from_child_perspective = -self.mean_value
-        fpu_value = parent_q_from_child_perspective + fpu_reduction
-        
+
+        # FPU value for unvisited children: the parent's own value plus the reduction. Both q_value below
+        # and self.mean_value are seen from the player to move at this node, so no sign flip is needed.
+        fpu_value = self.mean_value + fpu_reduction
+
         for action, child in self.children.items():
-            # Q value (from child's perspective, so negate for parent)
+            # Q value (child.mean_value is from the child's player, so negate for the player at this node)
             q_value = -child.mean_value if child.visit_count > 0 else fpu_value
             
             # U value (exploration bonus)
@@ -183,7 +181,10 @@ class MCTSNode:
         
         actions = list(self.children.keys())
         visits = np.array([self.children[a].visit_count for a in actions])
-        
+        if visits.sum() == 0:
+            # No child visited yet (only one simulation was run): fall back to the network priors
+            visits = np.array([self.children[a].prior for a in actions])
+
         if temperature == 0:
             # Deterministic: choose most visited
             probs = np.zeros(len(actions))
@@ -263,22 +264,25 @@ class MCTS:
         """Get timing statistics."""
         return self.timing_stats.copy()
     
-    def search(self, game: Brandubh, state_history: Optional[StateHistory] = None) -> Dict[Tuple, float]:
+    def search(self, game: Brandubh, state_history: Optional[StateHistory] = None,
+               time_limit: Optional[float] = None) -> Dict[Tuple, float]:
         """
         Run MCTS from the given game state.
-        
+
         Args:
             game: current game state
-            state_history: Optional StateHistory tracking prior game states.
-                          If None and history_length > 1, creates one from current state.
+            state_history: Optional StateHistory of the game so far. Its most recent entry must be the
+                          current position (as tracked during self-play).
+                          If None and history_length > 1, it is rebuilt from game.position_history.
                           If history_length == 1, this parameter is ignored.
-        
+            time_limit: If given, run simulations for this many seconds instead of num_simulations.
+
         Returns:
             dict mapping moves to visit probabilities
         """
         import time
-        
-        t0 = time.perf_counter()
+
+        t_start = t0 = time.perf_counter()
         root = MCTSNode(game.clone())
         self.timing_stats['game_clone'] += time.perf_counter() - t0
         
@@ -297,80 +301,70 @@ class MCTS:
         else:
             root_history = None  # No history tracking needed
         
-        # Run simulations
-        for sim_idx in range(self.num_simulations):
+        # Run simulations: num_simulations of them, or as many as fit in time_limit seconds
+        num_simulations = self.num_simulations if time_limit is None else sys.maxsize
+        for sim_idx in range(num_simulations):
+            if time_limit is not None and time.perf_counter() - t_start > time_limit:
+                break
             node = root
             search_path = [node]
-            
+
             # Track history for this simulation (if needed)
             if root_history is not None:
                 sim_history = root_history.clone()
             else:
                 sim_history = None
-            
-            # Selection: traverse tree until leaf
+
+            # Selection: traverse tree until leaf. An expanded node always has children, because
+            # expand() leaves a node without legal moves unexpanded (such a node is terminal).
             t0 = time.perf_counter()
             while not node.is_leaf() and not node.is_terminal():
                 action, node = node.select_child(self.c_puct, self.fpu_reduction)
-                # Safety check: if select_child returns None (no legal moves), treat as terminal
-                if node is None:
-                    # This means the parent node has no children (no legal moves)
-                    # Treat the parent as terminal even though game.game_over might not be set
-                    node = search_path[-1]  # Go back to parent
-                    # Mark this as a loss for current player (no legal moves = loss)
-                    value = -1.0
-                    # Skip expansion and backup immediately
-                    for n in reversed(search_path):
-                        n.update(value)
-                        value = -value
-                    break
                 search_path.append(node)
-                
-                # Update history with the new state after the action
-                if sim_history is not None and node.game is not None:
-                    sim_history.push(node.game.get_piece_planes())
-            else:
-                # Normal path: evaluate leaf with neural network
-                self.timing_stats['selection'] += time.perf_counter() - t0
-                
-                # Evaluate leaf with neural network
-                value = 0
-                if node.is_terminal():
-                    # Terminal node: use game result
-                    t0 = time.perf_counter()
-                    if node.game.winner == node.game.current_player:
-                        value = 1.0
-                    elif node.game.winner == 1 - node.game.current_player:
-                        value = -1.0
-                    else:
-                        value = 0.0
-                    self.timing_stats['terminal_eval'] += time.perf_counter() - t0
-                else:
-                    # Non-terminal leaf: evaluate with network and expand.
-                    # Legal moves are generated once here and cached on the node, so expand() reuses them.
-                    t0 = time.perf_counter()
-                    legal_moves = node.get_legal_moves()
-                    self.timing_stats['get_legal_moves'] += time.perf_counter() - t0
 
-                    t0 = time.perf_counter()
-                    policy_probs, value = self._evaluate(node.game, legal_moves, sim_history)
-                    self.timing_stats['network_eval'] += time.perf_counter() - t0
-                    
-                    t0 = time.perf_counter()
-                    node.expand(policy_probs)
-                    self.timing_stats['expansion'] += time.perf_counter() - t0
-                    
-                    # Add Dirichlet noise to root node after first expansion
-                    if sim_idx == 0 and node is root and self.add_dirichlet_noise:
-                        self._add_dirichlet_noise_to_node(root)
-                
-                # Backup: propagate value up the tree with optional discounting
+                # Update history with the new state after the action
+                if sim_history is not None:
+                    sim_history.push(node.game.get_piece_planes())
+            self.timing_stats['selection'] += time.perf_counter() - t0
+
+            # Evaluate leaf with neural network
+            value = 0
+            if node.is_terminal():
+                # Terminal node: use game result
                 t0 = time.perf_counter()
-                for n in reversed(search_path):
-                    n.update(value)
-                    value = -value * self.search_discount  # Flip value for opponent and apply discount
-                self.timing_stats['backup'] += time.perf_counter() - t0
-        
+                if node.game.winner == node.game.current_player:
+                    value = 1.0
+                elif node.game.winner == 1 - node.game.current_player:
+                    value = -1.0
+                else:
+                    value = 0.0
+                self.timing_stats['terminal_eval'] += time.perf_counter() - t0
+            else:
+                # Non-terminal leaf: evaluate with network and expand.
+                # Legal moves are generated once here and cached on the node, so expand() reuses them.
+                t0 = time.perf_counter()
+                legal_moves = node.get_legal_moves()
+                self.timing_stats['get_legal_moves'] += time.perf_counter() - t0
+
+                t0 = time.perf_counter()
+                policy_probs, value = self._evaluate(node.game, legal_moves, sim_history)
+                self.timing_stats['network_eval'] += time.perf_counter() - t0
+
+                t0 = time.perf_counter()
+                node.expand(policy_probs)
+                self.timing_stats['expansion'] += time.perf_counter() - t0
+
+                # Add Dirichlet noise to root node after first expansion
+                if sim_idx == 0 and node is root and self.add_dirichlet_noise:
+                    self._add_dirichlet_noise_to_node(root)
+
+            # Backup: propagate value up the tree with optional discounting
+            t0 = time.perf_counter()
+            for n in reversed(search_path):
+                n.update(value)
+                value = -value * self.search_discount  # Flip value for opponent and apply discount
+            self.timing_stats['backup'] += time.perf_counter() - t0
+
         return root.get_visit_distribution()
     
     def _evaluate(self, game: Brandubh, legal_moves: List[Tuple],
@@ -381,8 +375,8 @@ class MCTS:
         Args:
             game: game state to evaluate
             legal_moves: legal moves of `game`, in the order used for the returned probabilities
-            state_history: Optional StateHistory for history planes support.
-                          If provided, uses history to construct input tensor.
+            state_history: Optional StateHistory for history planes support, whose most recent entry
+                          is `game` itself. If provided, uses history to construct input tensor.
                           If None, uses game.get_state() (backward compatible).
 
         Returns:
@@ -396,6 +390,9 @@ class MCTS:
             if 'tablut' in network_module.lower():
                 from network_tablut import TablutMoveEncoder
                 move_encoder = TablutMoveEncoder
+            elif 'hnefatafl' in network_module.lower():
+                from network_hnefatafl import HnefataflMoveEncoder
+                move_encoder = HnefataflMoveEncoder
             else:
                 from network import MoveEncoder
                 move_encoder = MoveEncoder
@@ -404,8 +401,8 @@ class MCTS:
         
         # Get state representation
         if state_history is not None and self.history_length > 1:
-            # Use history planes - must push current state first
-            state_history.push(game.get_piece_planes())
+            # Use history planes. The history already ends with this position (search() pushed it), so it
+            # gives the same layout as the training states: [current, previous, ..., player plane].
             state = state_history.get_state_with_history(game.current_player)
         else:
             # Standard single-state input (backward compatible)
@@ -482,10 +479,10 @@ class MCTS:
             # Choose most visited
             move = moves[np.argmax(probs)]
         else:
-            # Sample proportionally to visit counts
-            move_idx = np.random.choice(len(moves), p=probs)
-            move = moves[move_idx]
-        
+            # Sample from the visit shares raised to 1/temperature (sharper for temperature < 1)
+            probs = probs ** (1.0 / temperature)
+            move = moves[np.random.choice(len(moves), p=probs / probs.sum())]
+
         return move
 
 
@@ -541,9 +538,10 @@ class RandomRolloutMCTS:
         return root.get_visit_distribution()
     
     def _rollout(self, game: Brandubh) -> float:
-        """Simulate random play until terminal state."""
+        """Simulate random play until terminal state. Returns the result for the player to move in `game`."""
+        player = game.current_player
         game = game.clone()
-        
+
         while not game.game_over:
             legal_moves = game.get_legal_moves()
             if not legal_moves:
@@ -551,10 +549,10 @@ class RandomRolloutMCTS:
             move_idx = np.random.randint(len(legal_moves))
             move = legal_moves[move_idx]
             game.make_move(move)
-        
-        if game.winner == game.current_player:
+
+        if game.winner == player:
             return 1.0
-        elif game.winner == 1 - game.current_player:
+        elif game.winner == 1 - player:
             return -1.0
         else:
             return 0.0
@@ -573,8 +571,10 @@ class RandomRolloutMCTS:
         if temperature == 0:
             move = moves[np.argmax(probs)]
         else:
-            move = np.random.choice(moves, p=probs)
-        
+            # Sample an index: np.random.choice cannot pick from a list of move tuples directly
+            probs = probs ** (1.0 / temperature)
+            move = moves[np.random.choice(len(moves), p=probs / probs.sum())]
+
         return move
 
 
