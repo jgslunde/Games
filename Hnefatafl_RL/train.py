@@ -84,9 +84,10 @@ class TrainingConfig:
     search_discount = 1.0             # Search depth discount per move during MCTS backup (1.0 = no discount)
     num_workers = mp.cpu_count()      # Number of parallel workers (default: all CPUs)
     
-    # Dynamic simulation balancing (target 50% win rate)
+    # Dynamic simulation balancing (keeps each side's score, draws counting half, at or above a minimum)
     use_dynamic_sim_balancing = False # Dynamically adjust attacker/defender simulation counts to balance win rates
     dynamic_sim_adjustment_rate = 0.1 # Fraction of win rate difference used for adjustment (default: 0.1 = 10%)
+    dynamic_sim_min_win_rate = 0.5    # Keep each side's score >= this (band [x, 1-x]); 0.5 = push towards 50%
     
     # Temperature (exploration during self-play)
     temperature = 1.0                 # Sampling temperature for moves
@@ -345,86 +346,83 @@ class WinRateTracker:
 
 class SimulationBalancer:
     """
-    Dynamically adjusts MCTS simulation counts for attacker and defender
-    to balance win rates towards 50%.
-    
-    The algorithm maintains the total simulation count constant while
-    redistributing simulations based on win rate imbalance.
+    Dynamically adjusts MCTS simulation counts for attacker and defender, so that neither side wins so
+    rarely that learning stalls, while keeping the handicap as small as possible.
+
+    The attacker's score s = (attacker wins + draws / 2) / games is kept in the band
+    [min_win_rate, 1 - min_win_rate]; the defender's score 1 - s is then in the same band. Above the
+    band, simulations move from the attacker to the defender; below it, the other way. Inside the band
+    the split drifts back towards equal, so the balancer settles at the smallest handicap that keeps
+    the score at the band edge, or at no handicap if the game is balanced enough without one.
+    The total simulation count stays constant. min_win_rate = 0.5 always pushes towards a 50 % score.
     """
-    
-    def __init__(self, initial_attacker_sims: int, initial_defender_sims: int, 
-                 adjustment_rate: float = 0.1):
+
+    def __init__(self, initial_attacker_sims: int, initial_defender_sims: int,
+                 adjustment_rate: float = 0.1, min_win_rate: float = 0.5):
         """
         Args:
             initial_attacker_sims: Starting simulation count for attacker
             initial_defender_sims: Starting simulation count for defender
-            adjustment_rate: Fraction of win rate difference to apply (e.g., 0.1 = 10%)
+            adjustment_rate: Fraction of the distance to the band (or, inside the band, of the distance to
+                             an equal split) that is corrected per update (e.g., 0.1 = 10%)
+            min_win_rate: Lowest score either side may have before simulations are moved to it (0 < x <= 0.5)
         """
+        if not 0 < min_win_rate <= 0.5:
+            raise ValueError(f"min_win_rate must be in (0, 0.5], got {min_win_rate}")
         self.total_sims = initial_attacker_sims + initial_defender_sims
         self.attacker_sims = initial_attacker_sims
         self.defender_sims = initial_defender_sims
         self.adjustment_rate = adjustment_rate
-        
+        self.min_win_rate = min_win_rate
+
         # Track history for debugging
         self.history = []
-    
-    def update(self, attacker_wins: int, defender_wins: int):
+
+    def update(self, attacker_wins: int, defender_wins: int, draws: int = 0):
         """
-        Update simulation counts based on win rates.
-        
-        Algorithm: For a win rate difference of X%, take adjustment_rate * X% 
-        of simulations from the winning side and give to the losing side.
-        
-        Example: If defenders won 75% and attackers 25%, with 500 sims each:
-        - Win rate difference: 75% - 25% = 50%
-        - Transfer: 0.1 * 50% * 500 = 25 simulations
-        - New counts: attacker = 525, defender = 475
-        
+        Update simulation counts based on the attacker's score in the last games.
+
+        Outside the band, adjustment_rate * (distance to the band) * total_sims simulations move to the
+        side that scores too little. Example: band [0.2, 0.8], adjustment_rate 0.1, 1000 + 1000 sims,
+        attacker score 0.9: 0.1 * 0.1 * 2000 = 20 simulations move, giving attacker 980, defender 1020.
+        With min_win_rate = 0.5 and no draws this is the earlier rule (transfer proportional to the
+        difference between the two win rates).
+        Inside the band, the attacker's count moves adjustment_rate of the way back to total_sims / 2.
+
         Args:
             attacker_wins: Number of attacker wins
             defender_wins: Number of defender wins
+            draws: Number of draws (each counts as half a win for both sides)
         """
-        total_games = attacker_wins + defender_wins
-        
+        total_games = attacker_wins + defender_wins + draws
+
         if total_games == 0:
             return  # No data to adjust with
-        
-        # Calculate win rates
-        attacker_rate = attacker_wins / total_games
-        defender_rate = defender_wins / total_games
-        
-        # Calculate win rate difference (as decimal, e.g., 0.50 for 50%)
-        win_rate_diff = abs(defender_rate - attacker_rate)
-        
-        # Calculate how many simulations to transfer
-        # Transfer = adjustment_rate * win_rate_diff * total_sims / 2
-        # (divide by 2 because we're taking from one side and giving to the other)
-        transfer_amount = self.adjustment_rate * win_rate_diff * self.total_sims / 2
-        
-        # Determine direction: if defenders are winning more, give sims to attackers
-        if defender_rate > attacker_rate:
-            # Transfer from defender to attacker
-            self.attacker_sims += transfer_amount
-            self.defender_sims -= transfer_amount
-        else:
-            # Transfer from attacker to defender
-            self.defender_sims += transfer_amount
-            self.attacker_sims -= transfer_amount
-        
-        # Ensure we maintain the total and don't go below minimum (at least 1 sim each)
-        self.attacker_sims = max(1, min(self.total_sims - 1, self.attacker_sims))
+
+        attacker_score = (attacker_wins + 0.5 * draws) / total_games
+        low, high = self.min_win_rate, 1 - self.min_win_rate
+
+        if attacker_score > high:
+            # Attacker scores too much: give simulations to the defender
+            self.attacker_sims -= self.adjustment_rate * (attacker_score - high) * self.total_sims
+        elif attacker_score < low:
+            # Defender scores too much: give simulations to the attacker
+            self.attacker_sims += self.adjustment_rate * (low - attacker_score) * self.total_sims
+        elif attacker_score != low and attacker_score != high:
+            # Strictly inside the band: drift back towards an equal split (no change exactly on an edge,
+            # so that a zero-width band at 0.5 behaves like the earlier rule)
+            self.attacker_sims += self.adjustment_rate * (self.total_sims / 2 - self.attacker_sims)
+
+        # Keep at least 1 simulation per side, round to integers, and keep the total constant
+        self.attacker_sims = int(round(max(1, min(self.total_sims - 1, self.attacker_sims))))
         self.defender_sims = self.total_sims - self.attacker_sims
-        
-        # Round to integers for practical use
-        self.attacker_sims = int(round(self.attacker_sims))
-        self.defender_sims = int(round(self.defender_sims))
-        
+
         # Record history
         self.history.append({
             'attacker_wins': attacker_wins,
             'defender_wins': defender_wins,
-            'attacker_rate': attacker_rate,
-            'defender_rate': defender_rate,
+            'draws': draws,
+            'attacker_score': attacker_score,
             'attacker_sims': self.attacker_sims,
             'defender_sims': self.defender_sims,
         })
@@ -2482,10 +2480,12 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         sim_balancer = SimulationBalancer(
             initial_attacker_sims=config.num_mcts_sims_attacker,
             initial_defender_sims=config.num_mcts_sims_defender,
-            adjustment_rate=config.dynamic_sim_adjustment_rate
+            adjustment_rate=config.dynamic_sim_adjustment_rate,
+            min_win_rate=config.dynamic_sim_min_win_rate
         )
         print(f"Using dynamic simulation balancing (adjustment_rate={config.dynamic_sim_adjustment_rate}, "
-              f"total_sims={config.num_mcts_sims_attacker + config.num_mcts_sims_defender})")
+              f"total_sims={config.num_mcts_sims_attacker + config.num_mcts_sims_defender}, "
+              f"attacker score kept in [{config.dynamic_sim_min_win_rate}, {1 - config.dynamic_sim_min_win_rate}])")
     else:
         sim_balancer = None
         print(f"Using fixed simulation counts (attacker={config.num_mcts_sims_attacker}, "
@@ -2687,7 +2687,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             
             # Update simulation balancer based on win rates
             if sim_balancer is not None:
-                sim_balancer.update(attacker_game_wins, defender_game_wins)
+                sim_balancer.update(attacker_game_wins, defender_game_wins, draws)
                 new_attacker_sims, new_defender_sims = sim_balancer.get_simulation_counts()
                 print(f"Simulation counts adjusted: Attacker {attacker_sims} -> {new_attacker_sims}, "
                       f"Defender {defender_sims} -> {new_defender_sims}")
