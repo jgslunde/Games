@@ -9,6 +9,8 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Tuple
 
+from network import BrandubhNet
+
 
 class ResidualBlock(nn.Module):
     """Residual block with batch normalization."""
@@ -33,8 +35,10 @@ class HnefataflNet(nn.Module):
     """
     Compact neural network for Hnefatafl (11x11).
     
-    Input: 4 planes (11x11) - [attackers, defenders, king, current_player]
-    Output: 
+    Input: T * 3 + 1 planes (11x11) - [attackers, defenders, king] for each of the last T positions
+           (newest first), then current_player. T = history_length; T = 1 gives the original
+           4 planes.
+    Output:
         - Policy: probability distribution over all possible moves
         - Value: estimated win probability for current player
     
@@ -47,13 +51,24 @@ class HnefataflNet(nn.Module):
     - Compact channel count for faster training
     """
     
-    def __init__(self, num_res_blocks: int = 4, num_channels: int = 64):
+    def __init__(self, num_res_blocks: int = 4, num_channels: int = 64,
+                 value_head_hidden_size: int = 64, history_length: int = 1):
+        """
+        Args:
+            num_res_blocks: Number of residual blocks
+            num_channels: Number of channels in convolutional layers
+            value_head_hidden_size: Hidden size of value head FC layer
+            history_length: Number of positions T in the input (input planes = T * 3 + 1)
+        """
         super().__init__()
-        
+
         self.num_channels = num_channels
-        
+        self.value_head_hidden_size = value_head_hidden_size
+        self.history_length = history_length
+        self.input_channels = history_length * 3 + 1
+
         # Initial convolution
-        self.conv_input = nn.Conv2d(4, num_channels, kernel_size=3, padding=1)
+        self.conv_input = nn.Conv2d(self.input_channels, num_channels, kernel_size=3, padding=1)
         self.bn_input = nn.BatchNorm2d(num_channels)
         
         # Residual tower
@@ -74,15 +89,15 @@ class HnefataflNet(nn.Module):
         self.conv_value = nn.Conv2d(num_channels, 1, kernel_size=1)
         self.bn_value = nn.BatchNorm2d(1)
         # FC layers: 1*11*11=121 inputs
-        self.fc_value1 = nn.Linear(1 * 11 * 11, 64)
-        self.fc_value2 = nn.Linear(64, 1)
+        self.fc_value1 = nn.Linear(1 * 11 * 11, value_head_hidden_size)
+        self.fc_value2 = nn.Linear(value_head_hidden_size, 1)
     
     def forward(self, x):
         """
         Forward pass.
         
         Args:
-            x: batch of board states, shape (batch, 4, 11, 11)
+            x: batch of board states, shape (batch, input_channels, 11, 11)
         
         Returns:
             policy_logits: shape (batch, 4840)
@@ -105,9 +120,13 @@ class HnefataflNet(nn.Module):
         v = v.reshape(v.size(0), -1)
         v = F.relu(self.fc_value1(v))
         value = torch.tanh(self.fc_value2(v))
-        
+
         return policy_logits, value
-    
+
+    # Same loader as BrandubhNet: copies the weights and adapts checkpoints with another history
+    # length
+    load_state_dict_compatible = BrandubhNet.load_state_dict_compatible
+
     def optimize_for_inference(self, use_compile: bool = True, compile_mode: str = 'default'):
         """
         Optimize network for fast CPU inference using torch.compile.

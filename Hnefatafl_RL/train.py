@@ -23,8 +23,8 @@ import time
 import json
 import glob
 import shutil
+import socket
 from datetime import datetime
-from collections import deque
 from typing import List, Tuple, Dict
 import numpy as np
 import multiprocessing as mp
@@ -190,25 +190,43 @@ class TrainingConfig:
 
 class ReplayBuffer:
     """
-    Stores experience from self-play games.
-    Each sample is (state, policy, value, attacker_won).
-    The attacker_won flag is used to boost losses from attacker-won games.
+    Ring buffer of self-play positions, each stored once in preallocated NumPy arrays.
+
+    With data augmentation, one stored position stands for its 8 board symmetries: sizes are counted
+    in samples (positions x num_symmetries), the unit of replay_buffer_size and min_buffer_size, and
+    train_network applies a random symmetry to every position it draws. States are stored as uint8,
+    since all input planes are 0 or 1. winners holds the game result: 0 attacker, 1 defender,
+    -1 draw.
     """
-    
-    def __init__(self, max_size: int):
-        self.max_size = max_size
-        self.buffer = deque(maxlen=max_size)
-    
-    def add(self, state: np.ndarray, policy: np.ndarray, value: float, attacker_won: bool = False):
-        """Add a sample to the buffer."""
-        self.buffer.append((state, policy, value, attacker_won))
+
+    def __init__(self, max_samples: int, state_shape: Tuple[int, ...], policy_size: int,
+                 num_symmetries: int = 8):
+        self.num_symmetries = num_symmetries
+        capacity = max_samples // num_symmetries
+        self.states = np.zeros((capacity,) + tuple(state_shape), dtype=np.uint8)
+        self.policies = np.zeros((capacity, policy_size), dtype=np.float32)
+        self.values = np.zeros(capacity, dtype=np.float32)
+        self.winners = np.zeros(capacity, dtype=np.int8)
+        self.num_positions = 0  # number of filled entries
+        self.next_index = 0     # entry written next; once the buffer is full, the oldest entry
+
+    def add(self, states: np.ndarray, policies: np.ndarray, values: np.ndarray,
+            winners: np.ndarray):
+        """Add positions (one row each), overwriting the oldest ones when the buffer is full."""
+        if not np.all((states == 0) | (states == 1)):
+            raise ValueError("ReplayBuffer stores states as uint8: planes must hold only 0 and 1")
+        capacity = len(self.values)
+        indices = (self.next_index + np.arange(len(values))) % capacity
+        self.states[indices] = states
+        self.policies[indices] = policies
+        self.values[indices] = values
+        self.winners[indices] = winners
+        self.next_index = (self.next_index + len(values)) % capacity
+        self.num_positions = min(self.num_positions + len(values), capacity)
 
     def __len__(self):
-        return len(self.buffer)
-
-    def clear(self):
-        """Clear the buffer."""
-        self.buffer.clear()
+        """Number of samples, i.e. positions times symmetries."""
+        return self.num_positions * self.num_symmetries
 
 
 # =============================================================================
@@ -549,8 +567,29 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
         rotated_state = np.rot90(flipped_state, k=-k, axes=(1, 2)).copy()
         rotated_policy = rotate_policy(flipped_policy, k)
         augmented.append((rotated_state, rotated_policy, value))
-    
+
     return augmented
+
+
+def symmetry_permutations(board_size: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Index tables of the 8 board symmetries, in the order of augment_sample (identity first).
+
+    They are made by applying augment_sample to a board whose cells hold their own index and a
+    policy whose entries hold their own index: each output entry then names the input entry it came
+    from.
+
+    Returns:
+        cell_perm: shape (8, board_size**2); symmetry k turns planes p (flattened over the board)
+                   into p[..., cell_perm[k]]
+        move_perm: shape (8, policy_size); symmetry k turns a policy q into q[move_perm[k]]
+    """
+    cell_index = np.arange(board_size**2, dtype=np.float32).reshape(1, board_size, board_size)
+    move_index = np.arange(board_size * board_size * 4 * (board_size - 1), dtype=np.float32)
+    augmented = augment_sample(cell_index, move_index, 0.0, board_size)
+    cell_perm = np.array([state.reshape(-1) for state, _, _ in augmented]).astype(np.int64)
+    move_perm = np.array([policy for _, policy, _ in augmented]).astype(np.int64)
+    return cell_perm, move_perm
 
 
 # =============================================================================
@@ -614,13 +653,12 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         dict with game data and MCTS timing information
     """
     try:
-        # Seed random number generators uniquely for each worker
-        # Use game_idx combined with process ID and time to ensure uniqueness
-        import time
-        seed = (game_idx + os.getpid() + int(time.time() * 1000)) % (2**32)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        
+        # Fresh seeds from the operating system for every game. Forked workers otherwise share one
+        # random state, and a seed computed from game index + PID + time gave ~2-4 % of an
+        # iteration's games the same seed as another game, i.e. exact copies.
+        np.random.seed()
+        torch.seed()
+
         # Set torch to use only 1 thread per worker to avoid conflicts
         torch.set_num_threads(1)
         # Compile in this process. The Inductor compile thread pool inherited from the parent does not
@@ -628,6 +666,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         # submitted to it never run and the worker hangs.
         from torch._inductor import config as inductor_config
         inductor_config.compile_threads = 1
+        # Call the compiled kernels from generated C++ instead of Python: 0.3-0.4 ms (13-24 %) less
+        # per batch-1 network call and about half the compile time, with identical results
+        inductor_config.cpp_wrapper = True
 
         # Set up temp directory for this worker
         import tempfile
@@ -642,7 +683,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         
         # Set per-worker compilation cache to avoid lock contention
         # Each worker gets its own cache directory
-        worker_cache_dir = os.path.join(base_temp_dir, f'torchinductor_{os.getpid()}')
+        worker_cache_dir = os.path.join(base_temp_dir,
+                                        f'torchinductor_{socket.gethostname()}_{os.getpid()}')
         os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
         
         # Import dynamically based on config
@@ -833,8 +875,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
             if temp == 0:
                 move = moves[np.argmax(probs)]
             else:
-                # Apply temperature
-                probs = probs ** (1.0 / temp)
+                # Apply temperature. Dividing by the largest share first keeps it at 1, so a small
+                # temperature cannot round every entry down to 0.
+                probs = (probs / probs.max()) ** (1.0 / temp)
                 probs = probs / probs.sum()
                 move_idx = np.random.choice(len(moves), p=probs)
                 move = moves[move_idx]
@@ -924,9 +967,10 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
 
 
 def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None,
-                           attacker_sims: int = None, defender_sims: int = None) -> Tuple[ReplayBuffer, int, int, float]:
+                           attacker_sims: int = None,
+                           defender_sims: int = None) -> Tuple[Tuple, int, int, float]:
     """
-    Generate self-play games and store in replay buffer.
+    Generate self-play games and their training positions.
     Uses multiprocessing to parallelize game generation.
 
     Args:
@@ -939,14 +983,13 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         defender_sims: Override for defender simulation count (uses config value if None)
 
     Returns:
-        Tuple of (buffer, attacker_wins, defender_wins, avg_game_length) where:
-        - buffer: ReplayBuffer with collected experience
+        Tuple of (positions, attacker_wins, defender_wins, avg_game_length) where:
+        - positions: (states, policies, values, winners) arrays with one row per position, for
+          ReplayBuffer.add (without symmetries; train_network applies those)
         - attacker_wins: Number of games won by attacker
         - defender_wins: Number of games won by defender
         - avg_game_length: Mean number of plies per game (including random opening plies)
     """
-    buffer = ReplayBuffer(config.replay_buffer_size)
-    
     # Use provided simulation counts or fall back to config
     num_sims_attacker = attacker_sims if attacker_sims is not None else config.num_mcts_sims_attacker
     num_sims_defender = defender_sims if defender_sims is not None else config.num_mcts_sims_defender
@@ -1048,7 +1091,9 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         'game_clone': 0.0,
         'get_legal_moves': 0.0
     }
-    
+
+    # Training positions of all games
+    position_states, position_policies, position_values, position_winners = [], [], [], []
     for game_data in game_results:
         total_moves += game_data['num_moves']
         winner = game_data['winner']
@@ -1105,18 +1150,17 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                 value = -1.0 * discount_factors[i]
             else:
                 value = 0.0  # Shouldn't happen
-            
-            # Mark if attacker won this game
-            attacker_won = (winner == 0)
-            
-            # Add the sample, or all 8 board symmetries of it (augment_sample includes the original)
-            if config.use_data_augmentation:
-                for aug_state, aug_policy, aug_value in augment_sample(state, policy, value, config.board_size):
-                    buffer.add(aug_state, aug_policy, aug_value, attacker_won)
-            else:
-                buffer.add(state, policy, value, attacker_won)
-    
-    print(f"Generated {len(buffer)} training samples")
+
+            position_states.append(state)
+            position_policies.append(policy)
+            position_values.append(value)
+            position_winners.append(-1 if winner is None else winner)  # -1 = draw
+    positions = (np.array(position_states, dtype=np.uint8),
+                 np.array(position_policies, dtype=np.float32),
+                 np.array(position_values, dtype=np.float32),
+                 np.array(position_winners, dtype=np.int8))
+
+    print(f"Generated {len(position_values)} training positions")
     total_games = config.num_games_per_iteration
     print(f"Results: {attacker_wins} attacker wins ({100*attacker_wins/total_games:.1f}%), "
           f"{defender_wins} defender wins ({100*defender_wins/total_games:.1f}%), "
@@ -1178,7 +1222,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         print(f"  Terminal eval:     {mcts_timing_totals['terminal_eval']:7.1f}s ({100*mcts_timing_totals['terminal_eval']/total_mcts_time:5.1f}%)")
         print(f"  Total MCTS time:   {total_mcts_time:7.1f}s")
     
-    return buffer, attacker_wins, defender_wins, total_moves / total_games
+    return positions, attacker_wins, defender_wins, total_moves / total_games
 
 
 # =============================================================================
@@ -1214,62 +1258,50 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     network_compiled.train()
     device = config.device
     
-    # Pre-convert buffer to numpy arrays for O(1) indexing instead of O(n) deque access
-    # This is a one-time cost that makes all subsequent batch sampling much faster
-    buffer_list = list(buffer.buffer)
-    total_samples = len(buffer_list)
-    
-    # Determine state shape from first sample (handles variable history_length)
-    first_state = buffer_list[0][0]
-    state_shape = first_state.shape  # e.g., (4, 7, 7) or (13, 7, 7) for history_length=4
-    expected_channels = config.history_length * 3 + 1
-    
-    # Verify states match network's expected input channels
-    network_input_channels = network.input_channels
-    if state_shape[0] != network_input_channels:
-        raise ValueError(f"State channels ({state_shape[0]}) don't match network input channels ({network_input_channels}). "
-                        f"Expected {expected_channels} channels for history_length={config.history_length}. "
-                        f"This may indicate a mismatch in history_length configuration.")
-    
-    # Pre-allocate arrays and copy data (much faster than repeated indexing)
-    all_states = np.zeros((total_samples,) + state_shape, dtype=np.float32)
-    all_policies = np.zeros((total_samples, config.policy_size), dtype=np.float32)
-    all_values = np.zeros(total_samples, dtype=np.float32)
-    all_attacker_won = np.zeros(total_samples, dtype=bool)
-    
-    for i, (state, policy, value, attacker_won) in enumerate(buffer_list):
-        if state.shape != state_shape:
-            raise ValueError(f"State shape mismatch at index {i}: expected {state_shape}, got {state.shape}. "
-                           f"This may happen if history_length changed between self-play games. "
-                           f"Clear the replay buffer or restart training.")
-        all_states[i] = state
-        all_policies[i] = policy
-        all_values[i] = value
-        all_attacker_won[i] = attacker_won
-    
-    # Now we can safely delete the buffer list to free memory
-    del buffer_list
-    
-    # Separate training and validation data volumes
-    # Training: Use exactly batch_size * batches_per_epoch samples
-    # Validation: Use 0.25x the training volume (adds ~5-8% overhead since validation is 3-5x cheaper)
-    # Total data used per iteration: 1.25x the specified training volume
-    train_samples_per_epoch = min(total_samples, config.batch_size * config.batches_per_epoch)
-    val_samples_per_epoch = train_samples_per_epoch // 4  # 0.25x training volume
-
-    batches_per_epoch = train_samples_per_epoch // config.batch_size
-
     # Generator.choice without replacement costs O(batch); the legacy np.random.choice shuffles all
-    # total_samples indices on every call (~100 ms per batch for a 6M-sample buffer).
+    # indices on every call (~100 ms per batch for a 6M-sample buffer).
     rng = np.random.default_rng()
+    num_symmetries = buffer.num_symmetries
+    cell_perm, move_perm = symmetry_permutations(config.board_size)
 
-    # Validation set: the newest samples in the buffer, which are left out of training in this call (they
-    # are trained on from the next iteration on). The 8 symmetric copies of a position, and the positions
-    # of a game, sit next to each other in the buffer, so this block holds out whole games; only the game
-    # at the start of the block is split.
-    num_train_candidates = total_samples - val_samples_per_epoch
-    val_indices = np.arange(num_train_candidates, total_samples)
-    
+    def get_batch(indices, symmetries):
+        """Tensors (states, policies, values, winners) of buffer entries `indices`, each entry
+        turned by its board symmetry (an index into cell_perm / move_perm)."""
+        # Flatten the board, so that a symmetry reorders the last axis
+        states = buffer.states[indices].reshape(len(indices), buffer.states.shape[1], -1)
+        policies = buffer.policies[indices]
+        # Turn the rows that drew symmetry k, for each k (faster than one gather per row)
+        for k in range(num_symmetries):
+            rows = symmetries == k
+            states[rows] = states[rows][:, :, cell_perm[k]]
+            policies[rows] = policies[rows][:, move_perm[k]]
+        states = states.reshape((len(indices),) + buffer.states.shape[1:]).astype(np.float32)
+        return (torch.from_numpy(states).to(device),
+                torch.from_numpy(policies).to(device),
+                torch.from_numpy(buffer.values[indices]).unsqueeze(1).to(device),
+                torch.from_numpy(buffer.winners[indices]).to(device))
+
+    # Training: batch_size * batches_per_epoch samples per epoch (fewer if the buffer is smaller).
+    # Validation: 0.25x that volume, from the newest positions in the buffer, each under all its
+    # symmetries. They are left out of training in this call (and trained on from the next iteration
+    # on). Positions are stored game by game, so only the first held-out game is split.
+    total_samples = len(buffer)
+    train_samples_per_epoch = min(total_samples, config.batch_size * config.batches_per_epoch)
+    num_val_positions = train_samples_per_epoch // 4 // num_symmetries
+    capacity = len(buffer.values)
+    oldest = buffer.next_index if buffer.num_positions == capacity else 0
+    positions_by_age = (oldest + np.arange(buffer.num_positions)) % capacity  # oldest first
+    train_positions = positions_by_age[:buffer.num_positions - num_val_positions]
+    val_positions = positions_by_age[buffer.num_positions - num_val_positions:]
+    val_indices = np.repeat(val_positions, num_symmetries)
+    val_symmetries = np.tile(np.arange(num_symmetries), num_val_positions)
+
+    batches_per_epoch = min(config.batches_per_epoch, total_samples // config.batch_size)
+    if len(train_positions) < config.batch_size or batches_per_epoch == 0:
+        raise ValueError(f"Replay buffer too small for training: {len(train_positions)} positions "
+                         f"outside the validation set, batch size {config.batch_size}. "
+                         "Increase min_buffer_size.")
+
     total_policy_loss = 0.0
     total_value_loss = 0.0
     total_loss = 0.0
@@ -1296,21 +1328,12 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         # L2 loss will be computed once at the end of the epoch (not accumulated per batch)
         
         for batch_idx in range(batches_per_epoch):
-            # Sample batch randomly from the buffer, without the validation samples
-            batch_train_indices = rng.choice(num_train_candidates, config.batch_size, replace=False)
-            
-            # Extract samples using fast numpy array indexing (O(1) per sample)
-            states = all_states[batch_train_indices]
-            policies = all_policies[batch_train_indices]
-            values = all_values[batch_train_indices]
-            attacker_won_flags = all_attacker_won[batch_train_indices]
-            
-            # Convert to tensors (already numpy arrays, so no need for np.array())
-            states = torch.from_numpy(states).to(device)
-            policies = torch.from_numpy(policies).to(device)
-            values = torch.from_numpy(values).unsqueeze(1).to(device)
-            attacker_won_flags = torch.from_numpy(attacker_won_flags).to(device)
-            
+            # Sample positions randomly from the buffer, without the validation positions, each
+            # under a random board symmetry
+            chosen = rng.choice(len(train_positions), config.batch_size, replace=False)
+            symmetries = rng.integers(0, num_symmetries, config.batch_size)
+            states, policies, values, winners = get_batch(train_positions[chosen], symmetries)
+
             # Forward pass (using compiled network for speed)
             pred_policies, pred_values = network_compiled(states)
             
@@ -1320,12 +1343,11 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             value_loss_per_sample = (pred_values.squeeze(1) - values.squeeze(1)) ** 2
             
             # Apply dynamic boost factors based on which side won
-            # Attacker-won games get attacker_boost, defender-won games get defender_boost
+            # Attacker-won games get attacker_boost, defender-won games get defender_boost, draws 1
             if attacker_boost != 1.0 or defender_boost != 1.0:
-                boost_weights = torch.where(attacker_won_flags, 
-                                           attacker_boost, 
-                                           defender_boost)
-                
+                boost_weights = torch.where(winners == 0, attacker_boost,
+                                            torch.where(winners == 1, defender_boost, 1.0))
+
                 # Normalize by mean weight to keep effective learning rate stable
                 # This prevents gradient explosion when boost factors are very different
                 mean_weight = torch.mean(boost_weights)
@@ -1365,7 +1387,14 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
             # Take square root to get L2 norm
             policy_grad_norm = policy_grad_sq.item() ** 0.5
             value_grad_norm = value_grad_sq.item() ** 0.5
-            
+
+            # Stop on NaN or infinity instead of writing it into the weights (and all later
+            # checkpoints)
+            if not np.isfinite(policy_grad_norm + value_grad_norm + loss.item()):
+                raise RuntimeError(f"Non-finite loss or gradient in epoch {epoch + 1}, batch "
+                                   f"{batch_idx + 1}: loss {loss.item()}, gradient norms "
+                                   f"{policy_grad_norm}, {value_grad_norm}")
+
             optimizer.step()
             
             # Accumulate losses and gradients
@@ -1401,29 +1430,14 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         network_compiled.eval()
         val_policy_loss = 0.0
         val_value_loss = 0.0
-        val_batches = 0
-        
+
         with torch.no_grad():
-            # Process validation data in batches (0.25x training volume)
-            val_batch_size = config.batch_size
-            for batch_idx in range(val_samples_per_epoch // val_batch_size):
-                # Sample validation batch
-                start_idx = batch_idx * val_batch_size
-                end_idx = start_idx + val_batch_size
-                batch_val_indices = val_indices[start_idx:end_idx]
-                
-                # Extract validation samples using fast numpy array indexing
-                states = all_states[batch_val_indices]
-                policies = all_policies[batch_val_indices]
-                values = all_values[batch_val_indices]
-                attacker_won_flags = all_attacker_won[batch_val_indices]
-                
-                # Convert to tensors
-                states = torch.from_numpy(states).to(device)
-                policies = torch.from_numpy(policies).to(device)
-                values = torch.from_numpy(values).unsqueeze(1).to(device)
-                attacker_won_flags = torch.from_numpy(attacker_won_flags).to(device)
-                
+            # Process the validation samples in batches (the last one may be smaller)
+            for start in range(0, len(val_indices), config.batch_size):
+                end = start + config.batch_size
+                states, policies, values, winners = get_batch(val_indices[start:end],
+                                                              val_symmetries[start:end])
+
                 # Forward pass
                 pred_policies, pred_values = network_compiled(states)
                 
@@ -1434,25 +1448,22 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
                 
                 # Apply boost factors (same as training)
                 if attacker_boost != 1.0 or defender_boost != 1.0:
-                    boost_weights = torch.where(attacker_won_flags, 
-                                               attacker_boost, 
-                                               defender_boost)
+                    boost_weights = torch.where(winners == 0, attacker_boost,
+                                                torch.where(winners == 1, defender_boost, 1.0))
                     mean_weight = torch.mean(boost_weights)
                     normalized_weights = boost_weights / mean_weight
                     policy_loss_per_sample = policy_loss_per_sample * normalized_weights
                     value_loss_per_sample = value_loss_per_sample * normalized_weights
-                
-                # Aggregate losses
-                batch_policy_loss = torch.mean(policy_loss_per_sample).item()
-                batch_value_loss = torch.mean(value_loss_per_sample).item()
-                
-                val_policy_loss += batch_policy_loss
-                val_value_loss += batch_value_loss
-                val_batches += 1
-        
-        # Average validation losses
-        val_policy_loss /= val_batches
-        val_value_loss /= val_batches
+
+                # Sum the batch means weighted by batch size, for the mean over all validation
+                # samples
+                val_policy_loss += torch.mean(policy_loss_per_sample).item() * len(states)
+                val_value_loss += torch.mean(value_loss_per_sample).item() * len(states)
+
+        # Average validation losses (NaN if the buffer is too small for a validation set)
+        num_val = len(val_indices)
+        val_policy_loss = val_policy_loss / num_val if num_val > 0 else float('nan')
+        val_value_loss = val_value_loss / num_val if num_val > 0 else float('nan')
         
         # Compute L2 loss for validation (same as training, just for reporting)
         l2_loss = 0.0
@@ -1530,23 +1541,23 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
     Returns:
         1.0 if NN wins, 0.5 if draw, 0.0 if NN loses
     """
-    # Seed random number generators uniquely for each worker
-    import time
-    seed = (game_idx + os.getpid() + int(time.time() * 1000)) % (2**32)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    
+    # Fresh seeds from the operating system for every game (see _play_self_play_game_worker)
+    np.random.seed()
+    torch.seed()
+
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
-    # Compile in this process; the inherited Inductor compile thread pool can hang after fork
-    # (see _play_self_play_game_worker)
+    # Compile in this process; the inherited Inductor compile thread pool can hang after fork. C++
+    # wrapper for faster calls (both as in _play_self_play_game_worker)
     from torch._inductor import config as inductor_config
     inductor_config.compile_threads = 1
+    inductor_config.cpp_wrapper = True
 
     # Set per-worker compilation cache to avoid lock contention
     # Each worker gets its own cache directory, so no delays needed
     import tempfile
-    worker_cache_dir = os.path.join(tempfile.gettempdir(), f'torchinductor_{os.getpid()}')
+    worker_cache_dir = os.path.join(tempfile.gettempdir(),
+                                    f'torchinductor_{socket.gethostname()}_{os.getpid()}')
     os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
     # Import dynamically based on config
@@ -1819,18 +1830,17 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     Returns:
         1.0 if new network wins, 0.5 if draw, 0.0 if new network loses
     """
-    # Seed random number generators uniquely for each worker
-    import time
-    seed = (game_idx + os.getpid() + int(time.time() * 1000)) % (2**32)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    
+    # Fresh seeds from the operating system for every game (see _play_self_play_game_worker)
+    np.random.seed()
+    torch.seed()
+
     # Set torch to use only 1 thread per worker to avoid conflicts
     torch.set_num_threads(1)
-    # Compile in this process; the inherited Inductor compile thread pool can hang after fork
-    # (see _play_self_play_game_worker)
+    # Compile in this process; the inherited Inductor compile thread pool can hang after fork. C++
+    # wrapper for faster calls (both as in _play_self_play_game_worker)
     from torch._inductor import config as inductor_config
     inductor_config.compile_threads = 1
+    inductor_config.cpp_wrapper = True
 
     # Set up temp directory for this worker
     import tempfile
@@ -1845,7 +1855,8 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     
     # Set per-worker compilation cache to avoid lock contention
     # Each worker gets its own cache directory
-    worker_cache_dir = os.path.join(base_temp_dir, f'torchinductor_{os.getpid()}')
+    worker_cache_dir = os.path.join(base_temp_dir,
+                                    f'torchinductor_{socket.gethostname()}_{os.getpid()}')
     os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
     # Import dynamically based on config
@@ -2146,42 +2157,47 @@ def clean_state_dict(state_dict):
 
 
 def save_checkpoint(network: BrandubhNet, optimizer: optim.Optimizer,
-                   iteration: int, config: TrainingConfig, 
+                   iteration: int, config: TrainingConfig,
                    metrics: Dict, filename: str = None):
-    """Save model checkpoint."""
+    """Save model checkpoint. `metrics` is the training history so far (used on resume)."""
     os.makedirs(config.checkpoint_dir, exist_ok=True)
-    
+
     if filename is None:
         filename = f"checkpoint_iter_{iteration}.pth"
-    
+
     filepath = os.path.join(config.checkpoint_dir, filename)
-    
+
     checkpoint = {
         'iteration': iteration,
         'model_state_dict': network.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'metrics': metrics,
-        'config': config.__dict__
+        # All settings, including class defaults that were not set on this instance (config.__dict__
+        # holds only the latter)
+        'config': {name: getattr(config, name) for name in dir(config) if not name.startswith('_')}
     }
-    
-    torch.save(checkpoint, filepath)
+
+    # Write to a temporary file and rename it, so a job killed while saving never leaves a broken
+    # file
+    torch.save(checkpoint, filepath + '.tmp')
+    os.replace(filepath + '.tmp', filepath)
     print(f"Saved checkpoint: {filepath}")
 
 
-def load_checkpoint(filepath: str, network: BrandubhNet, 
-                   optimizer: optim.Optimizer = None) -> int:
-    """Load model checkpoint. Returns iteration number."""
+def load_checkpoint(filepath: str, network: BrandubhNet,
+                   optimizer: optim.Optimizer = None) -> Tuple[int, Dict]:
+    """Load model checkpoint. Returns the iteration and the training history saved with it."""
     checkpoint = torch.load(filepath, weights_only=False)
-    
+
     network.load_state_dict_compatible(checkpoint['model_state_dict'])
-    
+
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    
+
     iteration = checkpoint.get('iteration', 0)
     print(f"Loaded checkpoint from iteration {iteration}")
-    
-    return iteration
+
+    return iteration, checkpoint.get('metrics')
 
 
 # =============================================================================
@@ -2426,8 +2442,11 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     
     # Resume from checkpoint if specified
     start_iteration = 0
+    saved_history = None
     if resume_from is not None:
-        start_iteration = load_checkpoint(resume_from, network, optimizer)
+        start_iteration, saved_history = load_checkpoint(resume_from, network, optimizer)
+        print("Note: the replay buffer is not saved; it starts empty and training waits until it "
+              f"holds {config.min_buffer_size:,} samples")
     elif load_weights_from is not None:
         # Load only weights, not optimizer state or training history
         print(f"Loading weights from {load_weights_from}")
@@ -2459,8 +2478,10 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         if load_weights_from is not None:
             print("Initialized best network with loaded weights")
     
-    # Initialize replay buffer
-    replay_buffer = ReplayBuffer(config.replay_buffer_size)
+    # Initialize replay buffer (each position is stored once and stands for its 8 symmetries)
+    state_shape = (config.history_length * 3 + 1, config.board_size, config.board_size)
+    replay_buffer = ReplayBuffer(config.replay_buffer_size, state_shape, config.policy_size,
+                                 8 if config.use_data_augmentation else 1)
     
     # Initialize win rate tracker for dynamic boosting
     if config.use_dynamic_boosting:
@@ -2497,13 +2518,20 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     # Track if 100% win rate vs random has been achieved
     achieved_100_percent_vs_random = False
     
-    # Load or initialize training history
+    # Load or initialize training history. On resume, the history saved in the checkpoint is used,
+    # so that resuming an older checkpoint does not pick up the balancer state etc. of later
+    # iterations from training_history.json (the JSON file is overwritten from the next iteration
+    # on).
     history_path = os.path.join(config.checkpoint_dir, "training_history.json")
-    if resume_from is not None and os.path.exists(history_path):
-        print(f"Loading training history from {history_path}")
-        with open(history_path, 'r') as f:
-            training_history = json.load(f)
-        
+    if resume_from is not None and (saved_history is not None or os.path.exists(history_path)):
+        if saved_history is not None:
+            print(f"Using the training history saved in {resume_from}")
+            training_history = saved_history
+        else:
+            print(f"Loading training history from {history_path}")
+            with open(history_path, 'r') as f:
+                training_history = json.load(f)
+
         # Resume cumulative ELO if available
         if training_history.get('cumulative_elo'):
             cumulative_elo = training_history['cumulative_elo'][-1]
@@ -2647,9 +2675,12 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             print(f"Iteration {iteration + 1}/{config.num_iterations} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print("=" * 70)
             
-            # Remove the Inductor cache folders of worker processes that have exited (each worker writes one
-            # folder named after its PID, see _play_self_play_game_worker); otherwise they pile up in temp_dir
-            for cache_dir in glob.glob(os.path.join(temp_dir_path, 'torchinductor_*')):
+            # Remove the Inductor cache folders of worker processes that have exited (each worker
+            # writes one folder named after its host and PID, see _play_self_play_game_worker);
+            # otherwise they pile up in temp_dir. Only this host's folders are checked: /proc says
+            # nothing about other hosts' PIDs.
+            own_cache_dirs = os.path.join(temp_dir_path, f'torchinductor_{socket.gethostname()}_*')
+            for cache_dir in glob.glob(own_cache_dirs):
                 pid = cache_dir.rsplit('_', 1)[-1]
                 if pid.isdigit() and not os.path.exists(f'/proc/{pid}'):
                     shutil.rmtree(cache_dir, ignore_errors=True)
@@ -2667,14 +2698,15 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                          c_puct=config.c_puct,
                          device=config.device)
 
-            # Get current simulation counts (dynamic or static)
+            # Get current simulation counts (dynamic, or None for the fixed counts in config)
             if sim_balancer is not None:
                 attacker_sims, defender_sims = sim_balancer.get_simulation_counts()
-                new_buffer, attacker_game_wins, defender_game_wins, avg_game_length = generate_self_play_data(
-                    agent, config, pool=worker_pool, attacker_sims=attacker_sims, defender_sims=defender_sims)
             else:
-                new_buffer, attacker_game_wins, defender_game_wins, avg_game_length = generate_self_play_data(
-                    agent, config, pool=worker_pool)
+                attacker_sims, defender_sims = None, None
+            selfplay = generate_self_play_data(agent, config, pool=worker_pool,
+                                               attacker_sims=attacker_sims,
+                                               defender_sims=defender_sims)
+            new_positions, attacker_game_wins, defender_game_wins, avg_game_length = selfplay
             selfplay_time = time.time() - selfplay_start
 
             # generate_self_play_data terminated the pool (so its workers hold no memory during training).
@@ -2711,8 +2743,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 defender_boost = 1.0
             
             # Add to main replay buffer
-            for state, policy, value, attacker_won in new_buffer.buffer:
-                replay_buffer.add(state, policy, value, attacker_won)
+            replay_buffer.add(*new_positions)
             
             print(f"Replay buffer size: {len(replay_buffer)}")
             print(f"Self-play time: {selfplay_time:.1f}s")
@@ -2864,14 +2895,9 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 print(f"\n[4/4] Skipping network evaluation (every {config.eval_frequency} iterations)")
                 eval_network_time = 0
             
-            # 5. Save checkpoint (only save the current network checkpoint, not best)
-            if (iteration + 1) % config.save_frequency == 0:
-                save_checkpoint(network, optimizer, iteration + 1, config, 
-                              training_history, f"checkpoint_iter_{iteration + 1}.pth")
-            
             # Calculate total iteration time
             iter_time = time.time() - iter_start_time
-            
+
             # Record timing data (append to timing arrays, padding with 0 if evaluation was skipped)
             if 'timing' in training_history:
                 # Update timing only if we trained (iteration was added to history)
@@ -2879,12 +2905,19 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                     training_history['timing']['random_eval_time'].append(eval_random_time)
                     training_history['timing']['network_eval_time'].append(eval_network_time)
                     training_history['timing']['total_time'].append(iter_time)
-            
-            # 6. Save training history
+
+            # 5. Save checkpoint (only the current network, not best), after all records of this
+            # iteration, since a resume continues from the training history stored in it
+            if (iteration + 1) % config.save_frequency == 0:
+                save_checkpoint(network, optimizer, iteration + 1, config,
+                              training_history, f"checkpoint_iter_{iteration + 1}.pth")
+
+            # 6. Save training history (via a temporary file, as in save_checkpoint)
             history_path = os.path.join(config.checkpoint_dir, "training_history.json")
             os.makedirs(config.checkpoint_dir, exist_ok=True)
-            with open(history_path, 'w') as f:
+            with open(history_path + '.tmp', 'w') as f:
                 json.dump(training_history, f, indent=2)
+            os.replace(history_path + '.tmp', history_path)
             
             # Print timing summary
             print("\n" + "-" * 70)
@@ -2920,11 +2953,10 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     print("Training complete!")
     print("=" * 70)
     
-    # Final save
+    # Final save. best_model.pth is not saved again here: it was saved when the best network last
+    # changed, together with the matching optimizer state and iteration.
     save_checkpoint(network, optimizer, config.num_iterations, config,
                    training_history, "final_model.pth")
-    save_checkpoint(best_network, optimizer, config.num_iterations, config,
-                   training_history, "best_model.pth")
     
     return network, best_network, training_history
 

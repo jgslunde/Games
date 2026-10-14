@@ -15,10 +15,18 @@ Tests for the training-pipeline fixes:
 13. load_state_dict_compatible keeps the player plane when the history length differs.
 14. SimulationBalancer: min_win_rate 0.5 reproduces the earlier rule; a band [m, 1-m] only pushes
     outside it, drifts back to an equal split inside it, and counts draws as half a win.
+15. The replay buffer's symmetry tables equal augment_sample; the ring buffer keeps the newest data.
+16. train_network: clear error for a too small buffer; small buffers, empty validation sets and
+    draws work.
+17. Temperature 0.001 gives finite probabilities, and a search puts the network into eval mode.
+18. Tablut and Hnefatafl networks take value head size and history length, and load old checkpoints.
+19. The cached legal moves equal freshly generated ones.
+20. Checkpoints are written atomically, hold all settings and return their training history.
 
-Run with: python test_training_fixes.py
+Run with: python test_training_fixes.py (exit code 1 if a test fails)
 """
 
+import sys
 import numpy as np
 import torch
 
@@ -28,7 +36,8 @@ from network import BrandubhNet, MoveEncoder, StateHistory
 from network_tablut import TablutMoveEncoder
 from mcts import MCTS, MCTSNode, RandomRolloutMCTS
 from agent import Agent, RandomAgent, play_game
-from train import augment_sample, SimulationBalancer
+from train import (augment_sample, symmetry_permutations, ReplayBuffer, SimulationBalancer,
+                   TrainingConfig, train_network, save_checkpoint, load_checkpoint)
 
 
 def random_position(game_class, rng, max_plies=14):
@@ -267,8 +276,10 @@ def test_king_cannot_capture():
 def test_capture_is_never_repetition():
     """A capturing move must stay legal even if its board before the capture occurred twice before."""
     pieces = {(0, 2): ATTACKER, (2, 3): DEFENDER, (2, 4): ATTACKER, (5, 5): KING, (6, 1): ATTACKER}
-    game = set_position(Brandubh(throne_enabled=False), pieces, 0)
     for move, captures in [((0, 2, 2, 2), True), ((2, 4, 1, 4), False)]:
+        # A new game for each case: the legal-move cache assumes the history only grows through
+        # make_move
+        game = set_position(Brandubh(throne_enabled=False), pieces, 0)
         board = game.board.copy()
         board[move[2], move[3]], board[move[0], move[1]] = board[move[0], move[1]], EMPTY
         game.position_history = [game._get_position_hash()] + 2 * [(board.tobytes(), 1)]
@@ -347,6 +358,160 @@ def test_sim_balancer_band():
     return True
 
 
+def test_replay_buffer_symmetries():
+    """The symmetry tables used when a batch is drawn must give the boards and policies of
+    augment_sample, and the ring buffer must keep the newest positions."""
+    rng = np.random.default_rng(5)
+    for game_class, size in [(Brandubh, 7), (Tablut, 9)]:
+        cell_perm, move_perm = symmetry_permutations(size)
+        for _ in range(5):
+            state = random_position(game_class, rng).get_state()
+            policy = rng.random(size * size * 4 * (size - 1)).astype(np.float32)
+            for k, (aug_state, aug_policy, _) in enumerate(augment_sample(state, policy, 0, size)):
+                turned = state.reshape(4, -1)[:, cell_perm[k]].reshape(state.shape)
+                assert np.array_equal(turned, aug_state)
+                assert np.array_equal(policy[move_perm[k]], aug_policy)
+    buffer = ReplayBuffer(5 * 8, (4, 7, 7), 1176, num_symmetries=8)  # room for 5 positions
+    for values in (np.arange(3), np.arange(3, 7)):
+        n = len(values)
+        buffer.add(np.zeros((n, 4, 7, 7)), np.zeros((n, 1176)), values, np.zeros(n))
+    assert len(buffer) == 40 and sorted(buffer.values) == [2, 3, 4, 5, 6] and buffer.next_index == 2
+    print("  replay buffer: symmetry tables equal augment_sample; ring buffer keeps the newest")
+    return True
+
+
+def test_train_network_small_buffers():
+    """A too small buffer must give a clear error; small ones must train, with an empty validation
+    set allowed (division by zero before). Draws and unequal loss boosts must work."""
+    config = TrainingConfig()
+    config.batch_size, config.batches_per_epoch, config.num_epochs = 4, 2, 1
+    game = Brandubh()
+    policy = np.zeros(1176, dtype=np.float32)
+    policy[MoveEncoder.encode_move(game.get_legal_moves()[0])] = 1.0
+    original_compile = torch.compile
+    torch.compile = lambda model, **kwargs: model  # no compilation in this test
+    try:
+        cases = [(4, 1, False, None), (8, 1, True, False), (6, 8, True, True)]
+        for num_positions, num_symmetries, trains, val_is_empty in cases:
+            buffer = ReplayBuffer(64, (4, 7, 7), 1176, num_symmetries)
+            buffer.add(np.repeat(game.get_state()[None], num_positions, axis=0),
+                       np.repeat(policy[None], num_positions, axis=0), np.ones(num_positions),
+                       np.arange(num_positions) % 3 - 1)  # draws, attacker wins and defender wins
+            network = BrandubhNet(1, 8)
+            optimizer = torch.optim.AdamW(network.parameters())
+            try:
+                losses = train_network(network, buffer, optimizer, config,
+                                       attacker_boost=2.0, defender_boost=0.5)
+            except ValueError:
+                assert not trains, f"{num_positions} positions: training should have run"
+                continue
+            assert trains, f"{num_positions} positions: a too small buffer must raise ValueError"
+            assert np.isfinite(losses['policy_loss'])
+            assert np.isnan(losses['val_policy_loss']) == val_is_empty
+    finally:
+        torch.compile = original_compile
+    print("  train_network: clear error for a too small buffer; small buffers and draws train")
+    return True
+
+
+def test_low_temperature_and_eval_mode():
+    """A very low temperature must not round all probabilities to zero (NaN before), and a search
+    must put the network into eval mode (a fresh network used batch statistics and changed its
+    BatchNorm)."""
+    game = Brandubh(throne_enabled=False)
+    moves = game.get_legal_moves()[:3]
+    agent = Agent(BrandubhNet(1, 8), num_simulations=2, move_encoder_class=MoveEncoder)
+    agent.mcts.search = lambda g, **kwargs: dict(zip(moves, [0.3, 0.3, 0.4]))
+    assert agent.select_move_with_stats(game, temperature=0.001)[0] == moves[2]
+    assert agent.mcts.select_move(game, temperature=0.001) == moves[2]
+    node = MCTSNode(game.clone())
+    node.expand(np.ones(len(game.get_legal_moves())))
+    for child, visits in zip(node.children.values(), [300, 300, 400]):
+        child.visit_count = visits
+    assert np.isclose(sum(node.get_visit_distribution(temperature=0.001).values()), 1.0)
+
+    network = BrandubhNet(1, 8)  # a new network is in training mode
+    batches_tracked = int(network.bn_input.num_batches_tracked)
+    Agent(network, num_simulations=3, move_encoder_class=MoveEncoder).select_move(game)
+    assert not network.training and int(network.bn_input.num_batches_tracked) == batches_tracked
+    print("  temperature 0.001 gives finite probabilities; search uses eval mode")
+    return True
+
+
+def test_larger_board_networks():
+    """Tablut and Hnefatafl networks must take the training script's arguments (value head size,
+    history length) and load old 4-plane checkpoints, and their games must give piece planes."""
+    from network_tablut import TablutNet
+    from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
+    from hnefatafl import Hnefatafl
+    cases = [(TablutNet, Tablut, TablutMoveEncoder, 9),
+             (HnefataflNet, Hnefatafl, HnefataflMoveEncoder, 11)]
+    for network_class, game_class, encoder, size in cases:
+        network = network_class(num_res_blocks=1, num_channels=8, value_head_hidden_size=16,
+                                history_length=2)
+        # A checkpoint with 4 input planes (as the existing ones), loaded into a 7-plane network
+        four_planes = network_class(1, 8, value_head_hidden_size=16)
+        network.load_state_dict_compatible(four_planes.state_dict())
+        game = game_class(throne_enabled=False)
+        assert np.array_equal(game.get_piece_planes(), game.get_state()[:3])
+        state = StateHistory.from_game(game, 2).get_state_with_history(game.current_player)
+        policy, value = network.eval()(torch.from_numpy(state)[None])
+        assert state.shape == (7, size, size) and policy.shape == (1, size * size * 4 * (size - 1))
+        mcts = MCTS(network, num_simulations=3, move_encoder_class=encoder, history_length=2)
+        visit_probs = mcts.search(game)
+        assert np.isclose(sum(visit_probs.values()), 1.0)
+    print("  Tablut/Hnefatafl networks: value head size, history length and old checkpoints work")
+    return True
+
+
+def test_legal_move_cache():
+    """Cached legal moves must equal freshly generated ones: after moves, in clones, after edits."""
+    rng = np.random.default_rng(6)
+    for game_class in (Brandubh, Tablut):
+        for _ in range(10):
+            game = game_class(throne_enabled=False)
+            for _ in range(40):
+                moves = game.get_legal_moves()
+                fresh = game.clone()
+                fresh._legal_moves_key = None  # forget the cache
+                assert moves == fresh.get_legal_moves() == game.get_legal_moves()
+                no_cache = game.clone()
+                no_cache._legal_moves_key = None
+                assert no_cache.get_legal_moves(stop_at_first=True) == moves[:1]
+                game.make_move(moves[rng.integers(len(moves))])
+                if game.game_over:
+                    break
+        # Editing the board directly (as set_position does) must not return the moves of the old
+        # board
+        game = game_class(throne_enabled=False)
+        game.get_legal_moves()
+        game.board[game.board == ATTACKER] = EMPTY
+        assert game.get_legal_moves() == []
+    print("  legal-move cache: equals fresh generation after moves, in clones and after edits")
+    return True
+
+
+def test_checkpoint_save_and_resume_history():
+    """Checkpoints must be written via a temporary file, hold all settings (also class defaults),
+    and give back the training history saved with them (used on resume)."""
+    import os
+    import tempfile
+    config = TrainingConfig()
+    config.checkpoint_dir = tempfile.mkdtemp()
+    network = BrandubhNet(1, 8)
+    history = {'iterations': [1, 2], 'sim_counts': [[900, 1100], [880, 1120]]}
+    optimizer = torch.optim.AdamW(network.parameters())
+    save_checkpoint(network, optimizer, 2, config, history, 'checkpoint_iter_2.pth')
+    path = os.path.join(config.checkpoint_dir, 'checkpoint_iter_2.pth')
+    assert os.listdir(config.checkpoint_dir) == ['checkpoint_iter_2.pth'], "temporary file left"
+    saved = torch.load(path, weights_only=False)
+    assert saved['config']['reward_discount'] == TrainingConfig.reward_discount, "default not saved"
+    network = BrandubhNet(1, 8)
+    assert load_checkpoint(path, network, torch.optim.AdamW(network.parameters())) == (2, history)
+    print("  checkpoints: atomic write, all settings saved, training history returned for resume")
+    return True
+
+
 if __name__ == "__main__":
     print("Testing training-pipeline fixes...")
     tests = [test_augmentation_consistent, test_from_game_matches_tracked_history,
@@ -354,12 +519,16 @@ if __name__ == "__main__":
              test_search_input_matches_training_state, test_single_simulation_policy_is_finite,
              test_temperature_and_time_limit, test_play_game_counts_last_ply_win, test_king_cannot_capture,
              test_capture_is_never_repetition, test_rollout_value_sign, test_load_compatible_keeps_player_plane,
-             test_sim_balancer_band]
+             test_sim_balancer_band, test_replay_buffer_symmetries,
+             test_train_network_small_buffers, test_low_temperature_and_eval_mode,
+             test_larger_board_networks, test_legal_move_cache,
+             test_checkpoint_save_and_resume_history]
     all_passed = True
     for test in tests:
         try:
             all_passed &= test()
-        except AssertionError as e:
-            print(f"  FAILED {test.__name__}: {e}")
+        except Exception as e:  # any error is a failure, not only a failed assert
+            print(f"  FAILED {test.__name__}: {type(e).__name__}: {e}")
             all_passed = False
     print("All tests PASSED!" if all_passed else "Some tests FAILED!")
+    sys.exit(0 if all_passed else 1)
