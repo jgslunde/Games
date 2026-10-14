@@ -27,7 +27,7 @@ class Agent:
                  c_puct: float = 1.4, device: str = 'cpu', 
                  add_dirichlet_noise: bool = False, dirichlet_alpha: float = 0.3, 
                  dirichlet_epsilon: float = 0.25, fpu_reduction: float = -0.5,
-                 history_length: int = 1):
+                 history_length: int = 1, search_discount: float = 1.0):
         """
         Initialize agent.
         
@@ -43,16 +43,18 @@ class Agent:
             dirichlet_epsilon: weight of Dirichlet noise
             fpu_reduction: First Play Urgency reduction relative to parent Q-value (default: -0.5)
             history_length: Number of game states to include in network input (default: 1)
+            search_discount: MCTS backup discount per move. Use the value the network was trained with,
+                             because its value targets were discounted the same way (default: 1.0)
         """
         if network is None and network_class is not None:
             network = network_class()
-        
+
         self.network = network
         self.history_length = history_length
-        self.mcts = MCTS(network, num_simulations, c_puct, device, 
+        self.mcts = MCTS(network, num_simulations, c_puct, device,
                         dirichlet_alpha, dirichlet_epsilon, add_dirichlet_noise,
                         move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction,
-                        history_length=history_length)
+                        search_discount=search_discount, history_length=history_length)
         self.device = device
     
     def select_move(self, game, temperature: float = 0.0) -> Tuple[int, int, int, int]:
@@ -68,122 +70,53 @@ class Agent:
         """
         return self.mcts.select_move(game, temperature)
     
-    def select_move_with_stats(self, game, temperature: float = 0.0):
+    def select_move_with_stats(self, game, temperature: float = 0.0, time_limit: Optional[float] = None):
         """
         Select a move and return statistics.
-        
+
         Args:
             game: current game state
             temperature: sampling temperature (0 = deterministic)
-        
+            time_limit: if given, search for this many seconds instead of num_simulations
+
         Returns:
             move: (from_row, from_col, to_row, to_col)
             value: network value estimate from current player's perspective
             visit_prob: proportion of MCTS visits to selected move
         """
         # Run MCTS search to get visit distribution
-        visit_probs = self.mcts.search(game)
-        
+        visit_probs = self.mcts.search(game, time_limit=time_limit)
+
         if not visit_probs:
             # No moves available
             legal_moves = game.get_legal_moves()
             move = legal_moves[0] if legal_moves else None
             return move, 0.0, 0.0
-        
+
         moves = list(visit_probs.keys())
         probs = np.array(list(visit_probs.values()))
-        
+
         if temperature == 0:
             # Choose most visited
             move_idx = np.argmax(probs)
-            move = moves[move_idx]
         else:
-            # Sample proportionally to visit counts
-            move_idx = np.random.choice(len(moves), p=probs)
-            move = moves[move_idx]
-        
+            # Sample from the visit shares raised to 1/temperature (sharper for temperature < 1)
+            sharpened = probs ** (1.0 / temperature)
+            move_idx = np.random.choice(len(moves), p=sharpened / sharpened.sum())
+        move = moves[move_idx]
+
         visit_prob = probs[move_idx]
-        
+
         # Get value estimate from root node
         # The MCTS root stores the value from current player's perspective
         value = self.mcts.root.mean_value if self.mcts.root else 0.0
-        
+
         return move, value, visit_prob
-    
-    def select_move_with_time_limit(self, game, time_limit: float, temperature: float = 0.0):
-        """
-        Select a move using a time limit instead of fixed simulation count.
-        
-        Args:
-            game: current game state
-            time_limit: time limit in seconds for MCTS search
-            temperature: sampling temperature (0 = deterministic)
-        
-        Returns:
-            move: (from_row, from_col, to_row, to_col)
-            value: network value estimate from current player's perspective
-            visit_prob: proportion of MCTS visits to selected move
-        """
-        import time
-        
-        # Get legal moves - if none, return immediately
-        legal_moves = game.get_legal_moves()
-        if not legal_moves:
-            return None, 0.0, 0.0
-        
-        # Run MCTS for the specified time limit
-        start_time = time.time()
-        simulations = 0
-        
-        # Initialize MCTS tree
-        self.mcts.root = self.mcts.select_root(game)
-        
-        # Run simulations until time limit
-        while time.time() - start_time < time_limit:
-            self.mcts._run_single_simulation(game)
-            simulations += 1
-            
-            # Check time every 10 simulations to reduce overhead
-            if simulations % 10 == 0:
-                if time.time() - start_time >= time_limit:
-                    break
-        
-        # Get visit counts and select move
-        visit_counts = {}
-        for move, edge in self.mcts.root.children.items():
-            visit_counts[move] = edge.visit_count
-        
-        if not visit_counts:
-            # Fallback to random legal move
-            move = legal_moves[0]
-            return move, 0.0, 0.0
-        
-        # Calculate probabilities
-        total_visits = sum(visit_counts.values())
-        visit_probs = {m: v / total_visits for m, v in visit_counts.items()}
-        
-        moves = list(visit_probs.keys())
-        probs = np.array(list(visit_probs.values()))
-        
-        if temperature == 0:
-            # Choose most visited
-            move_idx = np.argmax(probs)
-            move = moves[move_idx]
-        else:
-            # Sample proportionally to visit counts
-            move_idx = np.random.choice(len(moves), p=probs)
-            move = moves[move_idx]
-        
-        visit_prob = probs[move_idx]
-        
-        # Get value estimate from root node
-        value = self.mcts.root.mean_value if self.mcts.root else 0.0
-        
-        return move, value, visit_prob
-    
+
     def load_weights(self, path: str):
-        """Load network weights from file."""
-        self.network.load_state_dict(torch.load(path, map_location=self.device))
+        """Load network weights from a file written by save_weights or from a training checkpoint."""
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        self.network.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
         self.network.eval()
     
     def save_weights(self, path: str):
@@ -304,8 +237,8 @@ def play_game(agent1, agent2, game_class, display: bool = True,
             print(game)
             print("\n")
         
-        # Move limit
-        if move_count > max_moves:
+        # Move limit (a win on the last allowed ply still counts as a win)
+        if move_count > max_moves and not game.game_over:
             if display:
                 print(f"Game exceeded {max_moves} moves - draw")
             game.game_over = True

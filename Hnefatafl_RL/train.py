@@ -21,10 +21,11 @@ import os
 import sys
 import time
 import json
-import itertools
+import glob
+import shutil
 from datetime import datetime
 from collections import deque
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict
 import numpy as np
 import multiprocessing as mp
 from functools import partial
@@ -38,8 +39,7 @@ except ImportError:
     print("ERROR: PyTorch is required for training. Install with: pip install torch")
     exit(1)
 
-from brandubh import Brandubh
-from network import BrandubhNet, MoveEncoder
+from network import BrandubhNet
 from agent import Agent
 
 
@@ -201,88 +201,13 @@ class ReplayBuffer:
     def add(self, state: np.ndarray, policy: np.ndarray, value: float, attacker_won: bool = False):
         """Add a sample to the buffer."""
         self.buffer.append((state, policy, value, attacker_won))
-    
-    def add_game(self, states: List[np.ndarray], policies: List[np.ndarray], 
-                 winner: int, player_perspectives: List[int]):
-        """
-        Add a complete game to the buffer.
-        
-        Args:
-            states: list of game states
-            policies: list of policy distributions
-            winner: 0 for attackers, 1 for defenders, None for draw
-            player_perspectives: list of which player made each move
-        """
-        attacker_won = (winner == 0)
-        for state, policy, player in zip(states, policies, player_perspectives):
-            # Value from perspective of player who made the move
-            if winner is None:
-                value = 0.0  # Draw
-            elif winner == player:
-                value = 1.0
-            elif winner == 1 - player:
-                value = -1.0
-            else:
-                value = 0.0  # Shouldn't happen, but safe default
-            
-            self.add(state, policy, value, attacker_won)
-    
-    def sample(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Sample a random batch from the buffer."""
-        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
-        
-        # Convert deque to list once for O(1) random access instead of O(n) per access
-        # This is much faster than repeatedly indexing the deque
-        buffer_list = list(self.buffer)
-        
-        # Pre-allocate arrays for better performance
-        states = []
-        policies = []
-        values = []
-        attacker_won_flags = []
-        
-        for idx in indices:
-            state, policy, value, attacker_won = buffer_list[idx]
-            states.append(state)
-            policies.append(policy)
-            values.append(value)
-            attacker_won_flags.append(attacker_won)
-        
-        return (
-            np.array(states, dtype=np.float32),
-            np.array(policies, dtype=np.float32),
-            np.array(values, dtype=np.float32),
-            np.array(attacker_won_flags, dtype=bool)
-        )
-    
+
     def __len__(self):
         return len(self.buffer)
-    
+
     def clear(self):
         """Clear the buffer."""
         self.buffer.clear()
-    
-    def get_win_statistics(self) -> Dict[str, int]:
-        """
-        Get win statistics from samples in the buffer.
-        
-        Returns:
-            dict with 'attacker_wins', 'defender_wins', 'total_samples'
-        """
-        attacker_wins = 0
-        defender_wins = 0
-        
-        for _, _, _, attacker_won in self.buffer:
-            if attacker_won:
-                attacker_wins += 1
-            else:
-                defender_wins += 1
-        
-        return {
-            'attacker_wins': attacker_wins,
-            'defender_wins': defender_wins,
-            'total_samples': len(self.buffer)
-        }
 
 
 # =============================================================================
@@ -822,26 +747,21 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                     # Update state history after each random move
                     if state_history is not None:
                         state_history.push(game.get_piece_planes())
-                
-                # Now store the state AFTER random opening (this is the only state we keep from opening)
-                # This becomes the "initial" state for training purposes
-                if not game.game_over:
-                    state = game.get_state()
-                    # We don't have a policy for this random position, so we'll skip storing it
-                    # The first MCTS move will generate the first training sample
-        
+                # The random plies are not stored: the first MCTS move gives the first training sample
+
+        king_left_throne = False  # for temperature_mode "king"
         while not game.game_over:
             current_player = game.current_player
-            
+
             # Select MCTS based on current player
             mcts = mcts_attacker if current_player == 0 else mcts_defender
-            
+
             # Determine temperature based on mode
             if temperature_mode == "king":
-                # Drop temperature when king is off the throne
+                # Temperature drops to 0 once the king has left the throne, and stays 0 (as in play_game)
                 # KING piece value is 3 in all game variants
-                king_on_throne = (game.board[game.throne] == 3)
-                temp = temperature if king_on_throne else 0.0
+                king_left_throne = king_left_throne or game.board[game.throne] != 3
+                temp = 0.0 if king_left_throne else temperature
             elif temperature_mode == "decay":
                 # Linear decay over specified number of moves
                 if move_count < temperature_decay_moves:
@@ -1005,98 +925,12 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         raise RuntimeError(error_msg)
 
 
-def play_self_play_game(agent: Agent, config: TrainingConfig) -> Dict:
-    """
-    Play a single self-play game and collect training data.
-    
-    Returns:
-        dict with 'states', 'policies', 'winner', 'players', 'num_moves'
-    """
-    game = Brandubh(
-        king_capture_pieces=config.king_capture_pieces,
-        king_can_capture=config.king_can_capture,
-        throne_is_hostile=config.throne_is_hostile,
-        throne_enabled=config.throne_enabled
-    )
-    states = []
-    policies = []
-    players = []
-    
-    move_count = 0
-    
-    while not game.game_over:
-        current_player = game.current_player
-        
-        # Determine temperature based on move count or king position
-        if config.temperature_threshold == "king":
-            # Drop temperature when king is off the throne
-            # KING piece value is 3 in all game variants
-            king_on_throne = (game.board[game.throne] == 3)
-            temperature = config.temperature if king_on_throne else 0.0
-        elif move_count < config.temperature_threshold:
-            temperature = config.temperature
-        else:
-            temperature = 0.0  # Deterministic after threshold
-        
-        # Get state
-        state = game.get_state()
-        
-        # Run MCTS to get policy
-        visit_probs = agent.mcts.search(game)
-        
-        # Convert to policy vector
-        policy = np.zeros(config.policy_size, dtype=np.float32)
-        for move, prob in visit_probs.items():
-            idx = MoveEncoder.encode_move(move)
-            policy[idx] = prob
-        
-        # Store experience
-        states.append(state)
-        policies.append(policy)
-        players.append(current_player)
-        
-        # Select and make move
-        moves = list(visit_probs.keys())
-        probs = np.array(list(visit_probs.values()))
-        
-        if temperature == 0:
-            move = moves[np.argmax(probs)]
-        else:
-            # Apply temperature
-            probs = probs ** (1.0 / temperature)
-            probs = probs / probs.sum()
-            move_idx = np.random.choice(len(moves), p=probs)
-            move = moves[move_idx]
-        
-        game.make_move(move)
-        move_count += 1
-        
-        # Safety check for move limit
-        if move_count > config.max_game_length:
-            break
-    
-    # Determine draw reason (only move limit can cause draws - repetitions are illegal moves)
-    draw_reason = None
-    if not game.game_over and move_count > config.max_game_length:
-        # Hit move limit without natural game end
-        draw_reason = 'move_limit'
-    
-    return {
-        'states': states,
-        'policies': policies,
-        'winner': game.winner,  # Can be 0, 1, or None (only if move limit reached)
-        'players': players,
-        'num_moves': move_count,
-        'draw_reason': draw_reason  # 'move_limit' or None
-    }
-
-
 def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None,
-                           attacker_sims: int = None, defender_sims: int = None) -> Tuple[ReplayBuffer, int, int, float, Any]:
+                           attacker_sims: int = None, defender_sims: int = None) -> Tuple[ReplayBuffer, int, int, float]:
     """
     Generate self-play games and store in replay buffer.
     Uses multiprocessing to parallelize game generation.
-    
+
     Args:
         agent: Agent to use for self-play
         config: Training configuration
@@ -1104,14 +938,13 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         temp_network_path: Path to temporary network file (avoids pickling large tensors)
         attacker_sims: Override for attacker simulation count (uses config value if None)
         defender_sims: Override for defender simulation count (uses config value if None)
-    
+
     Returns:
-        Tuple of (buffer, attacker_wins, defender_wins, avg_game_length, pool) where:
+        Tuple of (buffer, attacker_wins, defender_wins, avg_game_length) where:
         - buffer: ReplayBuffer with collected experience
         - attacker_wins: Number of games won by attacker
         - defender_wins: Number of games won by defender
         - avg_game_length: Mean number of plies per game (including random opening plies)
-        - pool: The multiprocessing pool (may be recreated if terminated)
     """
     buffer = ReplayBuffer(config.replay_buffer_size)
     
@@ -1145,126 +978,12 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         cleanup_temp_file = False
     
     try:
-        # Create a generator that yields worker arguments indefinitely
-        # This ensures workers always have new games to play
-        def generate_worker_args():
-            game_idx = 0
-            while True:
-                yield (temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
-                       num_sims_attacker, num_sims_defender,
-                       config.c_puct, config.temperature, config.temperature_mode,
-                       config.temperature_threshold, config.temperature_decay_moves,
-                       game_idx, config.king_capture_pieces, config.king_can_capture,
-                       config.throne_is_hostile, config.throne_enabled, config.board_size,
-                       config.network_class.__module__, config.network_class.__name__,
-                       config.game_class.__module__, config.game_class.__name__,
-                       config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
-                       config.fpu_reduction, config.temp_dir, config.track_unique_states,
-                       config.use_random_opening_moves, config.max_game_length, config.search_discount,
-                       config.history_length)
-                game_idx += 1
-        
-        # Play games in parallel
-        if config.num_workers > 1:
-            if pool is not None:
-                # Use provided persistent pool with imap_unordered for dynamic load balancing
-                # Workers continuously play games until we have enough completed games
-                try:
-                    game_results = []
-                    completed = 0
-                    
-                    # Create iterator with a reasonable limit to prevent infinite hangs
-                    # Generate up to 2x the needed games to handle potential worker failures
-                    max_tasks = config.num_games_per_iteration * 2
-                    task_generator = itertools.islice(generate_worker_args(), max_tasks)
-                    
-                    # Use imap_unordered with chunksize=1 to get results as soon as they finish
-                    for result in pool.imap_unordered(_play_self_play_game_worker_wrapper, 
-                                                      task_generator, 
-                                                      chunksize=1):
-                        game_results.append(result)
-                        completed += 1
-                        
-                        # Progress indicator at 25%, 50%, and 75% completion
-                        if completed == config.num_games_per_iteration // 4:  # 25%
-                            print(f"  Progress: {completed}/{config.num_games_per_iteration} games (25%)")
-                        elif completed == config.num_games_per_iteration // 2:  # 50%
-                            print(f"  Progress: {completed}/{config.num_games_per_iteration} games (50%)")
-                        elif completed == 3 * config.num_games_per_iteration // 4:  # 75%
-                            print(f"  Progress: {completed}/{config.num_games_per_iteration} games (75%)")
-                        
-                        # Once we have enough games, terminate remaining workers
-                        if completed >= config.num_games_per_iteration:
-                            print(f"  Reached {config.num_games_per_iteration} games, terminating remaining workers...")
-                            pool.terminate()  # Forcefully kill all workers
-                            pool.join()  # Wait for cleanup
-                            # Force garbage collection to clean up file descriptors
-                            import gc
-                            gc.collect()
-                            # Small delay to ensure cleanup completes
-                            time.sleep(0.5)
-                            # IMPORTANT: Set pool to None before breaking so it gets returned as None
-                            pool = None
-                            break
-                except Exception as e:
-                    # Re-raise to ensure proper error propagation
-                    print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
-                    # Clean up pool on error
-                    try:
-                        pool.terminate()
-                        pool.join()
-                    except Exception:
-                        pass
-                    import gc
-                    gc.collect()
-                    time.sleep(0.5)
-                    # Set to None so it gets returned and recreated on next iteration
-                    pool = None
-                    raise
-            else:
-                # Create temporary pool (for backward compatibility)
-                with mp.Pool(processes=config.num_workers, maxtasksperchild=10) as temp_pool:
-                    try:
-                        game_results = []
-                        completed = 0
-                        
-                        # Create iterator with a reasonable limit to prevent infinite hangs
-                        # Generate up to 2x the needed games to handle potential worker failures
-                        max_tasks = config.num_games_per_iteration * 2
-                        task_generator = itertools.islice(generate_worker_args(), max_tasks)
-                        
-                        for result in temp_pool.imap_unordered(_play_self_play_game_worker_wrapper,
-                                                                task_generator,
-                                                                chunksize=1):
-                            game_results.append(result)
-                            completed += 1
-                            
-                            # Progress indicator at 25%, 50%, and 75% completion
-                            if completed == config.num_games_per_iteration // 4:  # 25%
-                                print(f"  Progress: {completed}/{config.num_games_per_iteration} games (25%)")
-                            elif completed == config.num_games_per_iteration // 2:  # 50%
-                                print(f"  Progress: {completed}/{config.num_games_per_iteration} games (50%)")
-                            elif completed == 3 * config.num_games_per_iteration // 4:  # 75%
-                                print(f"  Progress: {completed}/{config.num_games_per_iteration} games (75%)")
-                            
-                            # Once we have enough games, terminate remaining workers
-                            if completed >= config.num_games_per_iteration:
-                                print(f"  Reached {config.num_games_per_iteration} games, terminating remaining workers...")
-                                temp_pool.terminate()
-                                temp_pool.join()
-                                break
-                    except Exception as e:
-                        print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
-                        raise
-        else:
-            # Single-threaded fallback - play exactly the requested number of games
-            game_results = []
-            for i in range(config.num_games_per_iteration):
-                args = (temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
+        # Worker arguments for each of the num_games_per_iteration games
+        worker_args = [(temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
                         num_sims_attacker, num_sims_defender,
                         config.c_puct, config.temperature, config.temperature_mode,
                         config.temperature_threshold, config.temperature_decay_moves,
-                        i, config.king_capture_pieces, config.king_can_capture,
+                        game_idx, config.king_capture_pieces, config.king_can_capture,
                         config.throne_is_hostile, config.throne_enabled, config.board_size,
                         config.network_class.__module__, config.network_class.__name__,
                         config.game_class.__module__, config.game_class.__name__,
@@ -1272,7 +991,31 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                         config.fpu_reduction, config.temp_dir, config.track_unique_states,
                         config.use_random_opening_moves, config.max_game_length, config.search_discount,
                         config.history_length)
-                game_results.append(_play_self_play_game_worker(*args))
+                       for game_idx in range(config.num_games_per_iteration)]
+
+        # Play games in parallel. Exactly num_games_per_iteration games are played and all are kept:
+        # keeping only the first N finished games out of more would drop the longest games and bias the
+        # data towards short games. imap_unordered with chunksize=1 hands out one game at a time.
+        if config.num_workers > 1:
+            run_pool = pool if pool is not None else mp.Pool(processes=config.num_workers, maxtasksperchild=10)
+            game_results = []
+            try:
+                for result in run_pool.imap_unordered(_play_self_play_game_worker_wrapper, worker_args, chunksize=1):
+                    game_results.append(result)
+                    # Progress indicator at 25%, 50%, and 75% completion
+                    if len(game_results) in (config.num_games_per_iteration // 4, config.num_games_per_iteration // 2,
+                                             3 * config.num_games_per_iteration // 4):
+                        print(f"  Progress: {len(game_results)}/{config.num_games_per_iteration} games")
+            except Exception as e:
+                print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
+                run_pool.terminate()  # stop the remaining games
+                raise
+            finally:
+                if pool is None:  # temporary pool
+                    run_pool.close()
+                    run_pool.join()
+        else:
+            game_results = [_play_self_play_game_worker(*args) for args in worker_args]
     finally:
         # Clean up temporary file
         if cleanup_temp_file:
@@ -1338,7 +1081,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
             if is_mate_in_1:
                 # Mate-in-1 position: always value +1.0 for the player to move (no discount)
                 value = 1.0
-            elif winner is None or (not game_data.get('winner') and draw_reason == 'move_limit'):
+            elif winner is None:
                 # Draw (only by move limit - repetitions are illegal moves)
                 # Apply player-specific draw penalty
                 if player == 0:  # Attacker
@@ -1428,7 +1171,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         print(f"  Terminal eval:     {mcts_timing_totals['terminal_eval']:7.1f}s ({100*mcts_timing_totals['terminal_eval']/total_mcts_time:5.1f}%)")
         print(f"  Total MCTS time:   {total_mcts_time:7.1f}s")
     
-    return buffer, attacker_wins, defender_wins, total_moves / total_games, pool
+    return buffer, attacker_wins, defender_wins, total_moves / total_games
 
 
 # =============================================================================
@@ -1506,15 +1249,19 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
     # Total data used per iteration: 1.25x the specified training volume
     train_samples_per_epoch = min(total_samples, config.batch_size * config.batches_per_epoch)
     val_samples_per_epoch = train_samples_per_epoch // 4  # 0.25x training volume
-    
+
     batches_per_epoch = train_samples_per_epoch // config.batch_size
-    
+
     # Generator.choice without replacement costs O(batch); the legacy np.random.choice shuffles all
     # total_samples indices on every call (~100 ms per batch for a 6M-sample buffer).
     rng = np.random.default_rng()
 
-    # Pre-sample validation indices once (validation set is fixed for this training call)
-    val_indices = rng.choice(total_samples, val_samples_per_epoch, replace=False)
+    # Validation set: the newest samples in the buffer, which are left out of training in this call (they
+    # are trained on from the next iteration on). The 8 symmetric copies of a position, and the positions
+    # of a game, sit next to each other in the buffer, so this block holds out whole games; only the game
+    # at the start of the block is split.
+    num_train_candidates = total_samples - val_samples_per_epoch
+    val_indices = np.arange(num_train_candidates, total_samples)
     
     total_policy_loss = 0.0
     total_value_loss = 0.0
@@ -1542,8 +1289,8 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         # L2 loss will be computed once at the end of the epoch (not accumulated per batch)
         
         for batch_idx in range(batches_per_epoch):
-            # Sample batch randomly from entire buffer (standard RL practice)
-            batch_train_indices = rng.choice(total_samples, config.batch_size, replace=False)
+            # Sample batch randomly from the buffer, without the validation samples
+            batch_train_indices = rng.choice(num_train_candidates, config.batch_size, replace=False)
             
             # Extract samples using fast numpy array indexing (O(1) per sample)
             states = all_states[batch_train_indices]
@@ -1650,7 +1397,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
         val_batches = 0
         
         with torch.no_grad():
-            # Process validation data in batches (0.5x training volume)
+            # Process validation data in batches (0.25x training volume)
             val_batch_size = config.batch_size
             for batch_idx in range(val_samples_per_epoch // val_batch_size):
                 # Sample validation batch
@@ -1748,7 +1495,7 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
                                 num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
                                 network_module, network_class_name, game_module, game_class_name, fpu_reduction=-0.5,
-                                history_length=1, rules=None, max_moves=500):
+                                history_length=1, rules=None, max_moves=500, search_discount=1.0):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1771,6 +1518,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
         history_length: Number of timesteps for history planes in network input
         rules: Game-rule keyword arguments for the game class (same rules as self-play)
         max_moves: Plies after which the game is a draw (same limit as self-play)
+        search_discount: MCTS backup discount per move (same as self-play)
 
     Returns:
         1.0 if NN wins, 0.5 if draw, 0.0 if NN loses
@@ -1835,7 +1583,7 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     nn_agent = Agent(network, num_simulations=num_simulations,
                      c_puct=c_puct, device='cpu', move_encoder_class=MoveEncoderClass,
-                     fpu_reduction=fpu_reduction, history_length=history_length)
+                     fpu_reduction=fpu_reduction, history_length=history_length, search_discount=search_discount)
     random_agent = RandomAgent()
     
     # Play game
@@ -1938,7 +1686,8 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             fpu_reduction=config.eval_fpu_reduction,
             history_length=config.history_length,
             rules=game_rules,
-            max_moves=config.max_game_length
+            max_moves=config.max_game_length,
+            search_discount=config.search_discount
         )
 
         worker_func_defender = partial(
@@ -1958,7 +1707,8 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
             fpu_reduction=config.eval_fpu_reduction,
             history_length=config.history_length,
             rules=game_rules,
-            max_moves=config.max_game_length
+            max_moves=config.max_game_length,
+            search_discount=config.search_discount
         )
         
         # Play games in parallel
@@ -2029,7 +1779,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                              new_plays_attacker,
                              network_module, network_class_name, game_module, game_class_name,
                              game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_reduction, temp_dir=None,
-                             history_length=1, rules=None, max_moves=500):
+                             history_length=1, rules=None, max_moves=500, search_discount=1.0):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -2057,6 +1807,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         history_length: Number of timesteps for history planes in network input
         rules: Game-rule keyword arguments for the game class (same rules as self-play)
         max_moves: Plies after which the game is a draw (same limit as self-play)
+        search_discount: MCTS backup discount per move (same as self-play)
 
     Returns:
         1.0 if new network wins, 0.5 if draw, 0.0 if new network loses
@@ -2140,16 +1891,17 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     new_sims = num_sims_attacker if new_plays_attacker else num_sims_defender
     old_sims = num_sims_defender if new_plays_attacker else num_sims_attacker
     
-    # Create agents on CPU
+    # Create agents on CPU, without Dirichlet noise: the match measures the real players, and the
+    # evaluation temperature already varies the openings.
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     new_agent = Agent(new_network, num_simulations=new_sims,
-                      c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
+                      c_puct=c_puct, device='cpu',
                       move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction,
-                      history_length=history_length)
+                      history_length=history_length, search_discount=search_discount)
     old_agent = Agent(old_network, num_simulations=old_sims,
-                      c_puct=c_puct, device='cpu', add_dirichlet_noise=True,
+                      c_puct=c_puct, device='cpu',
                       move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction,
-                      history_length=history_length)
+                      history_length=history_length, search_discount=search_discount)
     
     # Play game
     if new_plays_attacker:
@@ -2269,7 +2021,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temp_dir=config.temp_dir,
             history_length=config.history_length,
             rules=game_rules,
-            max_moves=config.max_game_length
+            max_moves=config.max_game_length,
+            search_discount=config.search_discount
         )
         
         worker_func_new_defender = partial(
@@ -2297,7 +2050,8 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temp_dir=config.temp_dir,
             history_length=config.history_length,
             rules=game_rules,
-            max_moves=config.max_game_length
+            max_moves=config.max_game_length,
+            search_discount=config.search_discount
         )
         
         # Play games in parallel. Both colours are submitted before waiting, so all workers stay
@@ -2655,16 +2409,11 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 f"lr_step_values must have exactly len(lr_step_iterations) + 1 elements. "
                 f"Got {len(config.lr_step_values)} values for {len(config.lr_step_iterations)} step points."
             )
-        # Use MultiStepLR with custom milestones
-        # We'll handle this manually in the training loop instead of using a scheduler
+        # The LR is set at the start of each training step in the loop below (no scheduler)
         scheduler = None
         print(f"Using stepping LR schedule:")
         print(f"  Step iterations: {config.lr_step_iterations}")
         print(f"  LR values: {config.lr_step_values}")
-        # Set initial LR
-        current_lr = config.lr_step_values[0]
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = current_lr
     else:
         scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.lr_decay)
     
@@ -2757,6 +2506,15 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             if last_win_rate >= 1.0:
                 achieved_100_percent_vs_random = True
                 print("Note: 100% win rate vs random already achieved")
+
+        # Resume the simulation balancer and the win-rate tracker where they were
+        if sim_balancer is not None and training_history.get('sim_counts'):
+            sim_balancer.attacker_sims, sim_balancer.defender_sims = training_history['sim_counts'][-1]
+            print(f"Resuming with simulation counts: Attacker {sim_balancer.attacker_sims}, "
+                  f"Defender {sim_balancer.defender_sims}")
+        if win_rate_tracker is not None and training_history.get('win_rate_smoothed'):
+            win_rate_tracker.attacker_wins_smooth, win_rate_tracker.defender_wins_smooth = \
+                training_history['win_rate_smoothed'][-1]
     else:
         # Initialize new training history with metadata
         training_history = {
@@ -2880,28 +2638,42 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             print(f"Iteration {iteration + 1}/{config.num_iterations} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print("=" * 70)
             
-            # Recreate worker pool if it was terminated in the previous iteration
+            # Remove the Inductor cache folders of worker processes that have exited (each worker writes one
+            # folder named after its PID, see _play_self_play_game_worker); otherwise they pile up in temp_dir
+            for cache_dir in glob.glob(os.path.join(temp_dir_path, 'torchinductor_*')):
+                pid = cache_dir.rsplit('_', 1)[-1]
+                if pid.isdigit() and not os.path.exists(f'/proc/{pid}'):
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+
+            # Recreate worker pool if it was closed in the previous iteration
             if config.num_workers > 1 and worker_pool is None:
                 print(f"Recreating worker pool with {config.num_workers} workers...")
                 worker_pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
-            
+
             # 1. Self-play
             print("\n[1/4] Self-play game generation...")
             selfplay_start = time.time()
-            agent = Agent(network, 
+            agent = Agent(network,
                          num_simulations=config.num_mcts_simulations,
                          c_puct=config.c_puct,
                          device=config.device)
-            
+
             # Get current simulation counts (dynamic or static)
             if sim_balancer is not None:
                 attacker_sims, defender_sims = sim_balancer.get_simulation_counts()
-                new_buffer, attacker_game_wins, defender_game_wins, avg_game_length, worker_pool = generate_self_play_data(
+                new_buffer, attacker_game_wins, defender_game_wins, avg_game_length = generate_self_play_data(
                     agent, config, pool=worker_pool, attacker_sims=attacker_sims, defender_sims=defender_sims)
             else:
-                new_buffer, attacker_game_wins, defender_game_wins, avg_game_length, worker_pool = generate_self_play_data(
+                new_buffer, attacker_game_wins, defender_game_wins, avg_game_length = generate_self_play_data(
                     agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
+
+            # All games are done: close the pool so that its workers do not hold memory during training.
+            # It is recreated at the start of the next iteration; evaluation uses its own pools.
+            if worker_pool is not None:
+                worker_pool.close()
+                worker_pool.join()
+                worker_pool = None
             
             # Calculate draws from self-play
             total_games = config.num_games_per_iteration
@@ -2913,10 +2685,13 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 new_attacker_sims, new_defender_sims = sim_balancer.get_simulation_counts()
                 print(f"Simulation counts adjusted: Attacker {attacker_sims} -> {new_attacker_sims}, "
                       f"Defender {defender_sims} -> {new_defender_sims}")
-            
+                training_history.setdefault('sim_counts', []).append([new_attacker_sims, new_defender_sims])
+
             # Update win rate tracker with actual game results
             if config.use_dynamic_boosting:
                 win_rate_tracker.update(attacker_game_wins, defender_game_wins)
+                training_history.setdefault('win_rate_smoothed', []).append(
+                    [win_rate_tracker.attacker_wins_smooth, win_rate_tracker.defender_wins_smooth])
                 attacker_boost, defender_boost = win_rate_tracker.get_boost_factors()
                 attacker_rate, defender_rate = win_rate_tracker.get_win_rates()
                 print(f"Win rates (smoothed): Attacker {attacker_rate:.1%}, Defender {defender_rate:.1%}")
@@ -2938,6 +2713,13 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             
             # 2. Train network
             if len(replay_buffer) >= config.min_buffer_size:
+                if config.use_stepping_lr:
+                    # LR for this iteration: lr_step_values[k], with k the number of step iterations already
+                    # completed. A step at 100 applies from iteration 101 on (as printed, counting from 1).
+                    step_idx = sum(iteration >= step_iter for step_iter in config.lr_step_iterations)
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = config.lr_step_values[step_idx]
+
                 print(f"\n[2/4] Training network for {config.num_epochs} epochs...")
                 training_start = time.time()
                 losses = train_network(network, replay_buffer, optimizer, config,
@@ -2996,30 +2778,15 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 training_history['timing']['selfplay_time'].append(selfplay_time)
                 training_history['timing']['training_time'].append(training_time)
                 
-                # Learning rate update (only after training)
-                if config.use_stepping_lr:
-                    # Stepping LR: find the appropriate LR for current iteration
-                    # lr_step_iterations defines boundaries, lr_step_values defines LR for each region
-                    step_idx = 0
-                    for i, step_iter in enumerate(config.lr_step_iterations):
-                        if iteration >= step_iter:  # Step at the specified iteration
-                            step_idx = i + 1
-                    new_lr = config.lr_step_values[step_idx]
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = new_lr
-                    current_lr = new_lr
-                else:
-                    # Exponential decay
+                print(f"\nLearning rate: {current_lr:.6f}")  # the one used in this iteration
+
+                # Exponential learning rate decay for the next iteration (stepping LR is set before training)
+                if not config.use_stepping_lr:
                     scheduler.step()
-                    current_lr = optimizer.param_groups[0]['lr']
-                    
                     # Apply learning rate floor
-                    if current_lr < config.lr_floor:
+                    if optimizer.param_groups[0]['lr'] < config.lr_floor:
                         for param_group in optimizer.param_groups:
                             param_group['lr'] = config.lr_floor
-                        current_lr = config.lr_floor
-                
-                print(f"\nLearning rate: {current_lr:.6f}")
             else:
                 print(f"\n[2/4] Skipping training: buffer size {len(replay_buffer)} < "
                       f"minimum {config.min_buffer_size}")

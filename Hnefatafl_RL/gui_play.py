@@ -41,7 +41,7 @@ from typing import Optional, Tuple, List
 from brandubh import Brandubh, EMPTY, ATTACKER, DEFENDER, KING
 from tablut import Tablut
 from hnefatafl import Hnefatafl
-from network import BrandubhNet, MoveEncoder
+from network import BrandubhNet, MoveEncoder, StateHistory
 from network_tablut import TablutNet, TablutMoveEncoder
 from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
 
@@ -245,10 +245,12 @@ class TaflGUI:
         """Load neural network from checkpoint."""
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            
+            config = checkpoint.get('config', {})
+            # MCTS discount the network was trained with (its value targets were discounted the same way)
+            self.search_discount = config.get('search_discount', 1.0)
+
             # Extract config from checkpoint
             if 'config' in checkpoint:
-                config = checkpoint['config']
                 num_res_blocks = config.get('num_res_blocks', 4)
                 num_channels = config.get('num_channels', 64)
                 
@@ -302,12 +304,18 @@ class TaflGUI:
             elif self.game_type == 'hnefatafl':
                 network = HnefataflNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
             else:
-                network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-            network.load_state_dict(checkpoint['model_state_dict'])
+                network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels,
+                                      value_head_hidden_size=config.get('value_head_hidden_size', 64),
+                                      history_length=config.get('history_length', 1))
+            if isinstance(network, BrandubhNet):
+                network.load_state_dict_compatible(checkpoint['model_state_dict'])
+            else:
+                network.load_state_dict(checkpoint['model_state_dict'])
             network.eval()
-            
+
             print(f"Loaded network from {checkpoint_path}")
-            print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels")
+            print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels, "
+                  f"history length {getattr(network, 'history_length', 1)}, search discount {self.search_discount}")
             
             return network
         except Exception as e:
@@ -326,7 +334,11 @@ class TaflGUI:
     
     def _evaluate_with_network(self):
         """Evaluate current position with raw neural network."""
-        state = self.game.get_state()
+        history_length = getattr(self.network, 'history_length', 1)
+        if history_length > 1:
+            state = StateHistory.from_game(self.game, history_length).get_state_with_history(self.game.current_player)
+        else:
+            state = self.game.get_state()
         state_tensor = torch.from_numpy(state).unsqueeze(0)
         
         with torch.no_grad():
@@ -352,9 +364,11 @@ class TaflGUI:
         
         # Create MCTS if needed
         if self.mcts is None:
-            self.mcts = MCTS(self.network, num_simulations=self.num_simulations, 
+            self.mcts = MCTS(self.network, num_simulations=self.num_simulations,
                            c_puct=self.c_puct, device='cpu',
-                           move_encoder_class=self._get_move_encoder())
+                           move_encoder_class=self._get_move_encoder(),
+                           history_length=getattr(self.network, 'history_length', 1),
+                           search_discount=self.search_discount)
         
         # Run MCTS search
         visit_probs = self.mcts.search(self.game.clone())
@@ -519,10 +533,12 @@ class TaflGUI:
         # Create AI agent if needed (separate from MCTS evaluation object)
         if self.ai_agent is None:
             from agent import Agent
-            self.ai_agent = Agent(self.network, num_simulations=self.num_simulations, 
+            self.ai_agent = Agent(self.network, num_simulations=self.num_simulations,
                             c_puct=self.c_puct, device='cpu',
                             add_dirichlet_noise=self.add_dirichlet_noise,
-                            move_encoder_class=self._get_move_encoder())
+                            move_encoder_class=self._get_move_encoder(),
+                            history_length=getattr(self.network, 'history_length', 1),
+                            search_discount=self.search_discount)
         
         print(f"AI making move for {'Attackers' if self.game.current_player == 0 else 'Defenders'}...")
         

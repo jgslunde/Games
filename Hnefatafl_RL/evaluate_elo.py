@@ -79,44 +79,40 @@ def load_checkpoint(checkpoint_path: str, network_class, move_encoder_class, dev
         device: Device to load on
     
     Returns:
-        Loaded network
+        (network, search_discount): the loaded network, and the MCTS discount it was trained with
     """
     try:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        
-        # Extract config
-        if 'config' in checkpoint:
-            config = checkpoint['config']
-            num_res_blocks = config.get('num_res_blocks', 4)
-            num_channels = config.get('num_channels', 64)
+
+        # Extract config (older checkpoints stored the sizes at the top level)
+        config = checkpoint.get('config', checkpoint)
+        network_kwargs = dict(num_res_blocks=config.get('num_res_blocks', 4), num_channels=config.get('num_channels', 64))
+        if network_class is BrandubhNet:
+            network_kwargs.update(value_head_hidden_size=config.get('value_head_hidden_size', 64),
+                                  history_length=config.get('history_length', 1))
+
+        # Create and load network (handle different checkpoint formats)
+        network = network_class(**network_kwargs)
+        state_dict = checkpoint.get('network_state_dict') or checkpoint.get('model_state_dict') or checkpoint
+        if isinstance(network, BrandubhNet):
+            network.load_state_dict_compatible(state_dict)
         else:
-            num_res_blocks = checkpoint.get('num_res_blocks', 4)
-            num_channels = checkpoint.get('num_channels', 64)
-        
-        # Create and load network
-        network = network_class(num_res_blocks=num_res_blocks, num_channels=num_channels)
-        
-        # Handle different checkpoint formats
-        if 'network_state_dict' in checkpoint:
-            network.load_state_dict(checkpoint['network_state_dict'])
-        elif 'model_state_dict' in checkpoint:
-            network.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            network.load_state_dict(checkpoint)
-        
+            network.load_state_dict(state_dict)
+
         network.eval()
-        return network
+        return network, config.get('search_discount', 1.0)
         
     except Exception as e:
         raise RuntimeError(f"Error loading checkpoint {checkpoint_path}: {e}")
 
 
-def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, network1_path: str, 
+def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, network1_path: str,
                     network2_path: str, network_class, move_encoder_class, num_simulations: int,
-                    c_puct: float, device: str = 'cpu') -> int:
+                    c_puct: float, device: str = 'cpu', temperature: float = 1.0, temperature_plies: int = 10,
+                    max_moves: int = 100) -> int:
     """
     Play a single game between two checkpoints (worker function for multiprocessing).
-    
+
     Args:
         agent1_is_attacker: Whether agent1 plays as attacker (FIRST argument for partial)
         game_class: Game class to instantiate
@@ -128,19 +124,25 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
         num_simulations: MCTS simulations per move
         c_puct: MCTS exploration constant
         device: Device to use (cpu/cuda)
-    
+        temperature: Sampling temperature for the first temperature_plies plies, then 0. Without it
+                     both agents are deterministic and every game with the same colours is identical.
+        temperature_plies: Number of opening plies played with temperature
+        max_moves: The game is a draw once more than this many plies have been played
+
     Returns:
         0 if agent1 wins, 1 if agent2 wins, 2 if draw
     """
-    # Load networks
-    network1 = load_checkpoint(network1_path, network_class, move_encoder_class, device)
-    network2 = load_checkpoint(network2_path, network_class, move_encoder_class, device)
-    
+    # Load networks; each agent searches with the discount its network was trained with
+    network1, search_discount1 = load_checkpoint(network1_path, network_class, move_encoder_class, device)
+    network2, search_discount2 = load_checkpoint(network2_path, network_class, move_encoder_class, device)
+
     # Create agents
     agent1 = Agent(network1, num_simulations=num_simulations, c_puct=c_puct,
-                  device=device, move_encoder_class=move_encoder_class)
+                  device=device, move_encoder_class=move_encoder_class,
+                  history_length=getattr(network1, 'history_length', 1), search_discount=search_discount1)
     agent2 = Agent(network2, num_simulations=num_simulations, c_puct=c_puct,
-                  device=device, move_encoder_class=move_encoder_class)
+                  device=device, move_encoder_class=move_encoder_class,
+                  history_length=getattr(network2, 'history_length', 1), search_discount=search_discount2)
     
     # Set up agents based on colors
     if agent1_is_attacker:
@@ -154,18 +156,18 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
     
     while not game.game_over:
         agent = agents[game.current_player]
-        move = agent.select_move(game, temperature=0.0)  # Deterministic play
-        
+        move = agent.select_move(game, temperature=temperature if move_count < temperature_plies else 0.0)
+
         if move is None:
             game.game_over = True
             game.winner = 1 - game.current_player
             break
-        
+
         game.make_move(move)
         move_count += 1
-        
-        # Prevent infinite games
-        if move_count > 500:
+
+        # Move limit (a win on the last allowed ply still counts as a win)
+        if move_count > max_moves and not game.game_over:
             game.game_over = True
             game.winner = None
             break
@@ -183,7 +185,8 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
 
 def play_match(checkpoint1_path: str, checkpoint2_path: str, game_class, game_rules: dict,
               network_class, move_encoder_class, num_simulations: int, c_puct: float,
-              num_games: int = 10, num_workers: int = 1, device: str = 'cpu') -> Tuple[int, int, int]:
+              num_games: int = 10, num_workers: int = 1, device: str = 'cpu', temperature: float = 1.0,
+              temperature_plies: int = 10, max_moves: int = 100) -> Tuple[int, int, int]:
     """
     Play multiple games between two checkpoints, alternating colors.
     Uses multiprocessing to parallelize games.
@@ -200,7 +203,8 @@ def play_match(checkpoint1_path: str, checkpoint2_path: str, game_class, game_ru
         num_games: Number of games to play (each agent plays num_games//2 as each color)
         num_workers: Number of parallel workers
         device: Device to use (cpu/cuda)
-    
+        temperature, temperature_plies, max_moves: see play_single_game
+
     Returns:
         (checkpoint1_wins, checkpoint2_wins, draws)
     """
@@ -221,7 +225,10 @@ def play_match(checkpoint1_path: str, checkpoint2_path: str, game_class, game_ru
         move_encoder_class=move_encoder_class,
         num_simulations=num_simulations,
         c_puct=c_puct,
-        device=device
+        device=device,
+        temperature=temperature,
+        temperature_plies=temperature_plies,
+        max_moves=max_moves
     )
     
     # Play games in parallel
@@ -253,17 +260,18 @@ def expected_score(elo_diff: float) -> float:
     return 1.0 / (1.0 + 10.0 ** (-elo_diff / 400.0))
 
 
-def compute_elo_ratings(match_results: List[Tuple[int, int, float]], 
+def compute_elo_ratings(match_results: List[Tuple[int, int, float, int]],
                        num_checkpoints: int,
                        base_elo: float = 1500.0) -> np.ndarray:
     """
     Compute ELO ratings that best fit the match results.
-    
+
     Uses maximum likelihood estimation to find ELO ratings that minimize
     the cross-entropy loss between predicted and observed match outcomes.
-    
+    Each match counts with its number of games, so a 40-game match weighs twice a 20-game match.
+
     Args:
-        match_results: List of (checkpoint1_idx, checkpoint2_idx, score1) tuples
+        match_results: List of (checkpoint1_idx, checkpoint2_idx, score1, num_games) tuples
                       where score1 is the fraction of points scored by checkpoint1
         num_checkpoints: Total number of checkpoints
         base_elo: Base ELO rating (first checkpoint gets this rating)
@@ -291,18 +299,18 @@ def compute_elo_ratings(match_results: List[Tuple[int, int, float]],
         total_loss = 0.0
         epsilon = 1e-10  # Small value to prevent log(0)
         
-        for idx1, idx2, actual_score in match_results:
+        for idx1, idx2, actual_score, num_games in match_results:
             # Calculate ELO difference
             elo_diff = elo_diffs[idx1] - elo_diffs[idx2]
-            
+
             # Predicted score for checkpoint 1
             predicted_score = expected_score(elo_diff)
-            
-            # Cross-entropy loss
-            # -[s * log(p) + (1-s) * log(1-p)]
-            loss = -(actual_score * np.log(predicted_score + epsilon) + 
-                    (1 - actual_score) * np.log(1 - predicted_score + epsilon))
-            
+
+            # Cross-entropy loss summed over the games of the match
+            # -n * [s * log(p) + (1-s) * log(1-p)]
+            loss = -num_games * (actual_score * np.log(predicted_score + epsilon) +
+                                 (1 - actual_score) * np.log(1 - predicted_score + epsilon))
+
             total_loss += loss
         
         return total_loss
@@ -462,11 +470,22 @@ def main():
     parser.add_argument("--base-elo", type=float, default=1500.0,
                        help="Base ELO rating for first checkpoint (default: 1500.0)")
     
+    # Play settings
+    parser.add_argument("--temperature", type=float, default=1.0,
+                       help="Sampling temperature for the opening plies; with 0 all games with the same "
+                            "colours are identical (default: 1.0)")
+    parser.add_argument("--temperature-plies", type=int, default=10,
+                       help="Number of opening plies played with --temperature (default: 10)")
+    parser.add_argument("--max-moves", type=int, default=100,
+                       help="A game is a draw once more than this many plies have been played (default: 100)")
+
     # Game rules (optional overrides)
     parser.add_argument("--king-capture-pieces", type=int, default=None, choices=[2, 3, 4],
                        help="Number of pieces to capture king (default: from checkpoint)")
-    parser.add_argument("--throne-enabled", type=bool, default=None,
-                       help="Whether throne is enabled (default: from checkpoint)")
+    parser.add_argument("--throne-enabled", action="store_true", dest="throne_enabled", default=None,
+                       help="Throne is enabled (default: from checkpoint)")
+    parser.add_argument("--throne-disabled", action="store_false", dest="throne_enabled",
+                       help="Throne is disabled (default: from checkpoint)")
     
     # System settings
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
@@ -498,13 +517,6 @@ def main():
         move_encoder_class = MoveEncoder
         board_size = 7
     
-    # Game rules (use defaults or checkpoint values)
-    game_rules = {}
-    if args.king_capture_pieces is not None:
-        game_rules['king_capture_pieces'] = args.king_capture_pieces
-    if args.throne_enabled is not None:
-        game_rules['throne_enabled'] = args.throne_enabled
-    
     # Find all checkpoint files
     checkpoint_pattern = os.path.join(args.checkpoint_dir, args.pattern)
     all_checkpoints = sorted(glob.glob(checkpoint_pattern))
@@ -534,7 +546,17 @@ def main():
     
     checkpoints = all_checkpoints
     num_checkpoints = len(checkpoints)
-    
+
+    # Game rules: the training rules stored in the first checkpoint, with command-line overrides.
+    # Rules missing from the checkpoint use the game class defaults.
+    first_config = torch.load(checkpoints[0], map_location='cpu', weights_only=False).get('config', {})
+    rule_names = ['king_capture_pieces', 'king_can_capture', 'throne_is_hostile', 'throne_enabled']
+    game_rules = {name: first_config[name] for name in rule_names if name in first_config}
+    if args.king_capture_pieces is not None:
+        game_rules['king_capture_pieces'] = args.king_capture_pieces
+    if args.throne_enabled is not None:
+        game_rules['throne_enabled'] = args.throne_enabled
+
     print("=" * 80)
     print(f"ELO Evaluation - {args.game.capitalize()} ({board_size}x{board_size})")
     print("=" * 80)
@@ -543,6 +565,9 @@ def main():
     print(f"Games per match:       {args.num_games}")
     print(f"Checkpoint distance:   {args.checkpoint_distance}")
     print(f"MCTS simulations:      {args.simulations}")
+    print(f"Game rules:            {game_rules}")
+    print(f"Opening temperature:   {args.temperature} for {args.temperature_plies} plies")
+    print(f"Draw after:            {args.max_moves} plies")
     print(f"Parallel workers:      {args.num_workers}")
     print(f"Device:                {args.device}")
     print("=" * 80)
@@ -621,7 +646,10 @@ def main():
                 c_puct=args.c_puct,
                 num_games=args.num_games,
                 num_workers=args.num_workers,
-                device=args.device
+                device=args.device,
+                temperature=args.temperature,
+                temperature_plies=args.temperature_plies,
+                max_moves=args.max_moves
             )
             
             match_results_raw.append((i, j, wins1, wins2, draws))
@@ -645,7 +673,7 @@ def main():
         if total_games > 0:
             # Score for checkpoint 1: (wins + 0.5 * draws) / total_games
             score1 = (wins1 + 0.5 * draws) / total_games
-            match_results_for_elo.append((idx1, idx2, score1))
+            match_results_for_elo.append((idx1, idx2, score1, total_games))
     
     # Compute ELO ratings
     elo_ratings = compute_elo_ratings(match_results_for_elo, num_checkpoints, args.base_elo)

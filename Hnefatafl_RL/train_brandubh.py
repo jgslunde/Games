@@ -130,7 +130,7 @@ DEFAULT_THRONE_ENABLED = False  # Whether throne exists and blocks movement
 DEFAULT_EVAL_GAMES = 128
 DEFAULT_EVAL_WIN_RATE = 0.70
 DEFAULT_EVAL_FREQUENCY = 4
-DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 9999999  # Evaluate every iteration until 100% win rate achieved
+DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 9999999  # Evaluate vs random every N iterations (9999999 = never; 1 = every iteration until 100% wins)
 
 # Checkpointing
 DEFAULT_SAVE_FREQUENCY = 1
@@ -162,15 +162,17 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
                        help=f"Training batch size (default: {DEFAULT_BATCH_SIZE})")
     parser.add_argument("--lr", type=float, default=DEFAULT_LEARNING_RATE,
-                       help=f"Learning rate (default: {DEFAULT_LEARNING_RATE})")
+                       help=f"Initial learning rate, only used with --no-stepping-lr (default: {DEFAULT_LEARNING_RATE})")
     parser.add_argument("--lr-decay", type=float, default=DEFAULT_LR_DECAY,
-                       help=f"Learning rate decay per iteration (default: {DEFAULT_LR_DECAY})")
+                       help=f"Learning rate decay per iteration, only used with --no-stepping-lr (default: {DEFAULT_LR_DECAY})")
     parser.add_argument("--lr-floor", type=float, default=DEFAULT_LR_FLOOR,
-                       help=f"Minimum learning rate floor (default: {DEFAULT_LR_FLOOR})")
-    
+                       help=f"Minimum learning rate, only used with --no-stepping-lr (default: {DEFAULT_LR_FLOOR})")
+
     # Stepping learning rate schedule
     parser.add_argument("--use-stepping-lr", action="store_true", default=DEFAULT_USE_STEPPING_LR,
                        help=f"Use stepping LR schedule instead of exponential decay (default: {DEFAULT_USE_STEPPING_LR})")
+    parser.add_argument("--no-stepping-lr", action="store_false", dest="use_stepping_lr",
+                       help="Use exponential decay (--lr, --lr-decay, --lr-floor) instead of the stepping LR schedule")
     parser.add_argument("--lr-step-iterations", type=int, nargs='+', default=DEFAULT_LR_STEP_ITERATIONS,
                        help=f"Iterations at which to step LR (e.g., 50 100 150) (default: {DEFAULT_LR_STEP_ITERATIONS})")
     parser.add_argument("--lr-step-values", type=float, nargs='+', default=DEFAULT_LR_STEP_VALUES,
@@ -289,9 +291,13 @@ if __name__ == "__main__":
     parser.add_argument("--no-data-augmentation", action="store_false", dest="use_data_augmentation",
                        help="Disable data augmentation")
     parser.add_argument("--track-unique-states", action="store_true", default=DEFAULT_TRACK_UNIQUE_STATES,
-                       help="Track and report unique board state diversity during self-play (adds overhead, default: False)")
+                       help=f"Track and report unique board state diversity during self-play (adds overhead, default: {DEFAULT_TRACK_UNIQUE_STATES})")
+    parser.add_argument("--no-track-unique-states", action="store_false", dest="track_unique_states",
+                       help="Do not track unique board states")
     parser.add_argument("--use-random-opening-moves", action="store_true", default=DEFAULT_USE_RANDOM_OPENING_MOVES,
-                       help="In 50%% of games, play 1-4 random moves (2-8 ply) before MCTS (default: False)")
+                       help=f"In 50%% of games, play 1-4 random moves (2-8 ply) before MCTS (default: {DEFAULT_USE_RANDOM_OPENING_MOVES})")
+    parser.add_argument("--no-random-opening-moves", action="store_false", dest="use_random_opening_moves",
+                       help="Start every self-play game from the normal start position")
     parser.add_argument("--max-game-length", type=int, default=DEFAULT_MAX_GAME_LENGTH,
                        help=f"Maximum moves before declaring draw (default: {DEFAULT_MAX_GAME_LENGTH})")
     parser.add_argument("--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT,

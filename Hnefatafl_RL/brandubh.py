@@ -112,15 +112,6 @@ class Brandubh:
         """Record the current position for repetition detection."""
         self.position_history.append(self._get_position_hash())
     
-    def _check_repetition_draw(self) -> bool:
-        """Check if the current position has occurred 3 times (illegal to cause third repetition)."""
-        if len(self.position_history) < 6:  # Need at least 6 moves for 3-fold repetition
-            return False
-        
-        current_pos = self._get_position_hash()
-        count = self.position_history.count(current_pos)
-        return count >= 3
-    
     def get_piece_planes(self) -> np.ndarray:
         """
         Get piece planes only (without current player plane).
@@ -192,7 +183,16 @@ class Brandubh:
         
         # Count how many times this position has occurred
         count = self.position_history.count(position_hash)
-        
+        if count >= 2:
+            # A capturing move never repeats a position: pieces are never added, so a board with fewer
+            # pieces than the current one has not occurred before. The check above ignored captures.
+            board_after_move, game_over, winner = self.board.copy(), self.game_over, self.winner
+            self._check_captures(to_r, to_c)
+            if np.count_nonzero(self.board) < np.count_nonzero(board_after_move):
+                count = 0
+            self.board[:] = board_after_move
+            self.game_over, self.winner = game_over, winner
+
         # Undo the move
         self.board[from_r, from_c] = piece
         self.board[to_r, to_c] = original_to_piece
@@ -275,7 +275,10 @@ class Brandubh:
     def _check_captures(self, r: int, c: int):
         """Check if the move at (r, c) captures any enemy pieces."""
         piece = self.board[r, c]
-        
+        # A king that may not capture never captures when it moves
+        if piece == KING and not self.king_can_capture:
+            return
+
         # Check all 4 directions for captures
         for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             self._check_capture_in_direction(r, c, dr, dc, piece)
@@ -319,8 +322,10 @@ class Brandubh:
             
             opposite = self.board[nr2, nc2]
             is_hostile_square = self._is_hostile_square(nr2, nc2, enemy)
-            
-            if self._is_friendly(piece, opposite) or is_hostile_square:
+            # A king that may not capture is not the second capturing piece either
+            is_friendly_anvil = self._is_friendly(piece, opposite) and (opposite != KING or self.king_can_capture)
+
+            if is_friendly_anvil or is_hostile_square:
                 self.board[nr, nc] = EMPTY
     
     def _is_king_captured(self, king_r: int, king_c: int) -> bool:
@@ -409,15 +414,8 @@ class Brandubh:
         """Check if two pieces are on the same team."""
         if piece1 == EMPTY or piece2 == EMPTY:
             return False
-        
-        if piece1 == ATTACKER:
-            return piece2 == ATTACKER
-        else:  # piece1 is DEFENDER or KING
-            # If king cannot capture and piece1 is king, only king is friendly with itself
-            if not self.king_can_capture and piece1 == KING:
-                return piece2 == KING
-            # Otherwise defenders and king are friendly
-            return piece2 in [DEFENDER, KING]
+        # Teams: attackers, and defenders together with the king (king_can_capture is handled in the captures)
+        return (piece1 == ATTACKER) == (piece2 == ATTACKER)
     
     def _check_game_over(self):
         """Check if the game is over."""
