@@ -216,9 +216,10 @@ def test_temperature_and_time_limit():
     assert sum(agent.mcts.select_move(game, temperature=0.1) == b for _ in range(2000)) < 20
     assert sum(agent.select_move_with_stats(game, temperature=0.1)[0] == b for _ in range(2000)) < 20
 
-    # Time-limited search (used by play.py --time-per-move)
+    # Time-limited search (used by play.py --time-per-move). One second, so that even a fully loaded
+    # node runs more than num_simulations simulations
     agent = Agent(BrandubhNet(num_res_blocks=1, num_channels=8).eval(), num_simulations=2, move_encoder_class=MoveEncoder)
-    move, _, _ = agent.select_move_with_stats(game, time_limit=0.2)
+    move, _, _ = agent.select_move_with_stats(game, time_limit=1.0)
     assert move in game.get_legal_moves() and agent.mcts.root.visit_count > 2
     print("  temperature: low temperature picks the most visited move; time limit works")
     return True
@@ -512,6 +513,44 @@ def test_checkpoint_save_and_resume_history():
     return True
 
 
+def test_gui_reads_checkpoint_settings():
+    """The GUI must take the variant, rules, search settings and move limit from a Tablut checkpoint
+    (no --game needed), show the same raw policy and value as the search uses, and play moves."""
+    import os
+    import tempfile
+    os.environ.setdefault('SDL_VIDEODRIVER', 'dummy')  # no window needed
+    from network_tablut import TablutNet
+    from gui_play import TaflGUI
+    config = TrainingConfig()
+    config.checkpoint_dir = tempfile.mkdtemp()
+    config.board_size, config.throne_enabled, config.max_game_length = 9, False, 3
+    config.num_res_blocks, config.num_channels, config.eval_mcts_sims_attacker = 1, 8, 5
+    config.eval_c_puct, config.search_discount = 1.5, 0.99
+    network = TablutNet(1, 8)
+    save_checkpoint(network, torch.optim.AdamW(network.parameters()), 1, config, {}, 'tablut.pth')
+    gui = TaflGUI(os.path.join(config.checkpoint_dir, 'tablut.pth'))
+    assert gui.game_class is Tablut and not gui.game.throne_enabled and gui.max_moves == 3
+    assert (gui.simulations, gui.c_puct, gui.ai_mcts.search_discount) == (5, 1.5, 0.99)
+    moves = gui.game.get_legal_moves()
+    probs, value = gui.analysis_mcts._evaluate(gui.game, moves)
+    assert np.allclose([gui.move_probs[m] for m in moves], probs, atol=1e-6), "policy differs"
+    assert abs(gui.value - value) < 1e-6, "value differs"
+    # A clicked move, then AI moves until the move limit ends the game in a draw
+    gui._handle_click(gui._square_rect(moves[0][:2]).center, 1)
+    gui._handle_click(gui._square_rect(moves[0][2:]).center, 1)
+    while True:
+        while gui.pending_move is not None:
+            gui._update_animation()
+        if gui.game.game_over:
+            break
+        gui._do('ai')
+    assert gui.game.move_count == 4 and gui.game.winner is None, "move limit not applied"
+    gui._draw_board()
+    gui._draw_panel()
+    print("  GUI: Tablut variant, rules and search settings from the checkpoint, moves, move limit")
+    return True
+
+
 if __name__ == "__main__":
     print("Testing training-pipeline fixes...")
     tests = [test_augmentation_consistent, test_from_game_matches_tracked_history,
@@ -522,7 +561,7 @@ if __name__ == "__main__":
              test_sim_balancer_band, test_replay_buffer_symmetries,
              test_train_network_small_buffers, test_low_temperature_and_eval_mode,
              test_larger_board_networks, test_legal_move_cache,
-             test_checkpoint_save_and_resume_history]
+             test_checkpoint_save_and_resume_history, test_gui_reads_checkpoint_settings]
     all_passed = True
     for test in tests:
         try:
