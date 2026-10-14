@@ -86,18 +86,14 @@ def load_checkpoint(checkpoint_path: str, network_class, move_encoder_class, dev
 
         # Extract config (older checkpoints stored the sizes at the top level)
         config = checkpoint.get('config', checkpoint)
-        network_kwargs = dict(num_res_blocks=config.get('num_res_blocks', 4), num_channels=config.get('num_channels', 64))
-        if network_class is BrandubhNet:
-            network_kwargs.update(value_head_hidden_size=config.get('value_head_hidden_size', 64),
-                                  history_length=config.get('history_length', 1))
+        network = network_class(num_res_blocks=config.get('num_res_blocks', 4),
+                                num_channels=config.get('num_channels', 64),
+                                value_head_hidden_size=config.get('value_head_hidden_size', 64),
+                                history_length=config.get('history_length', 1))
 
-        # Create and load network (handle different checkpoint formats)
-        network = network_class(**network_kwargs)
+        # Load the weights (handle different checkpoint formats)
         state_dict = checkpoint.get('network_state_dict') or checkpoint.get('model_state_dict') or checkpoint
-        if isinstance(network, BrandubhNet):
-            network.load_state_dict_compatible(state_dict)
-        else:
-            network.load_state_dict(state_dict)
+        network.load_state_dict_compatible(state_dict)
 
         network.eval()
         return network, config.get('search_discount', 1.0)
@@ -549,9 +545,17 @@ def main():
 
     # Game rules: the training rules stored in the first checkpoint, with command-line overrides.
     # Rules missing from the checkpoint use the game class defaults.
-    first_config = torch.load(checkpoints[0], map_location='cpu', weights_only=False).get('config', {})
     rule_names = ['king_capture_pieces', 'king_can_capture', 'throne_is_hostile', 'throne_enabled']
-    game_rules = {name: first_config[name] for name in rule_names if name in first_config}
+    training_rules = []
+    for cp in checkpoints:
+        config = torch.load(cp, map_location='cpu', weights_only=False).get('config', {})
+        training_rules.append({name: config[name] for name in rule_names if name in config})
+    game_rules = dict(training_rules[0])
+    other_rules = [cp for cp, rules in zip(checkpoints, training_rules) if rules != game_rules]
+    if other_rules:
+        print(f"WARNING: {len(other_rules)} checkpoints were trained with other rules than "
+              f"{checkpoints[0]} ({game_rules}), e.g. {other_rules[0]}. "
+              "All games use one set of rules (see below).")
     if args.king_capture_pieces is not None:
         game_rules['king_capture_pieces'] = args.king_capture_pieces
     if args.throne_enabled is not None:

@@ -48,7 +48,10 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
         # Set torch to use only 1 thread per worker to avoid conflicts
         # This MUST be done before creating any torch objects
         torch.set_num_threads(1)
-        
+        # Fresh seed for every game: forked workers share the parent's random state once the parent
+        # has drawn a random number, and would then play identical games
+        np.random.seed()
+
         # Create game environment
         if game_name == 'brandubh':
             game_cls = Brandubh
@@ -106,26 +109,18 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
             search_discount2 = 1.0
         
         # Create networks with correct architecture
-        if network_cls is BrandubhNet:
-            network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1, history_length=history_length1,
-                                   value_head_hidden_size=value_head_hidden_size1).to(device)
-            network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2, history_length=history_length2,
-                                   value_head_hidden_size=value_head_hidden_size2).to(device)
-        else:
-            network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1).to(device)
-            network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2).to(device)
-        
+        network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1,
+                               history_length=history_length1,
+                               value_head_hidden_size=value_head_hidden_size1).to(device)
+        network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2,
+                               history_length=history_length2,
+                               value_head_hidden_size=value_head_hidden_size2).to(device)
+
         # Load state dicts - handle different checkpoint formats
         state_dict1 = checkpoint1.get('network_state_dict') or checkpoint1.get('model_state_dict') or checkpoint1
         state_dict2 = checkpoint2.get('network_state_dict') or checkpoint2.get('model_state_dict') or checkpoint2
-        if isinstance(network1, BrandubhNet):
-            network1.load_state_dict_compatible(state_dict1)
-        else:
-            network1.load_state_dict(state_dict1)
-        if isinstance(network2, BrandubhNet):
-            network2.load_state_dict_compatible(state_dict2)
-        else:
-            network2.load_state_dict(state_dict2)
+        network1.load_state_dict_compatible(state_dict1)
+        network2.load_state_dict_compatible(state_dict2)
         
         network1.eval()
         network2.eval()
@@ -250,25 +245,22 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, g
         
         # Determine network type based on game_class or board_size
         if game_class == Tablut or board_size == 9:
-            network = TablutNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+            network_class = TablutNet
         elif game_class == Hnefatafl or board_size == 11:
-            network = HnefataflNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
+            network_class = HnefataflNet
         else:
-            network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels, history_length=history_length,
-                                  value_head_hidden_size=value_head_hidden_size)
-        
+            network_class = BrandubhNet
+        network = network_class(num_res_blocks=num_res_blocks, num_channels=num_channels,
+                                history_length=history_length,
+                                value_head_hidden_size=value_head_hidden_size)
+
         state_dict = checkpoint.get('network_state_dict') or checkpoint.get('model_state_dict') or checkpoint
-        if isinstance(network, BrandubhNet):
-            network.load_state_dict_compatible(state_dict)
-        else:
-            network.load_state_dict(state_dict)
+        network.load_state_dict_compatible(state_dict)
         network.eval()
-        
+
         print(f"Loaded network from {checkpoint_path}")
-        if isinstance(network, BrandubhNet):
-            print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels, history_length={history_length}")
-        else:
-            print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels")
+        print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels, "
+              f"history_length={history_length}")
         print(f"  Search discount: {search_discount}")
 
         return network, rules, search_discount

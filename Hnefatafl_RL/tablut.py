@@ -73,6 +73,9 @@ class Tablut:
         # Position history for repetition detection (3-fold repetition = illegal move)
         self.position_history = []
         self.move_count = 0
+        # Cache of get_legal_moves: the key (board, player to move, history length) and the moves
+        self._legal_moves_key = None
+        self._legal_moves = []
         
         self._setup_board()
         self._record_position()
@@ -116,7 +119,12 @@ class Tablut:
     def _record_position(self):
         """Record the current position for repetition detection."""
         self.position_history.append(self._get_position_hash())
-    
+
+    def get_piece_planes(self) -> np.ndarray:
+        """Piece planes only, [attackers, defenders, king] (used for history planes)."""
+        planes = np.stack([self.board == piece for piece in (ATTACKER, DEFENDER, KING)])
+        return planes.astype(np.float32)
+
     def get_state(self) -> np.ndarray:
         """
         Get board state representation suitable for neural networks.
@@ -129,31 +137,45 @@ class Tablut:
         state[3] = np.full((9, 9), self.current_player, dtype=np.float32)
         return state
     
-    def get_legal_moves(self) -> List[Tuple[int, int, int, int]]:
+    def get_legal_moves(self, stop_at_first: bool = False) -> List[Tuple[int, int, int, int]]:
         """
         Get all legal moves for current player.
         Returns list of (from_row, from_col, to_row, to_col)
         Filters out moves that would result in three-fold repetition.
+
+        The full list is cached until the board, the player to move or the length of the position
+        history changes (the history only grows through make_move), so the move check in make_move
+        and the MCTS expansion of a position do not generate the moves again.
+
+        Args:
+            stop_at_first: if the moves are not cached, return only the first legal move found
+                           (enough to know whether there is any)
         """
-        moves = []
-        
+        key = (self.board.tobytes(), self.current_player, len(self.position_history))
+        if key == self._legal_moves_key:
+            return list(self._legal_moves)
+
         if self.current_player == ATTACKER_PLAYER:
             piece_types = [ATTACKER]
         else:
             piece_types = [DEFENDER, KING]
-        
+
+        # A move can only give a third occurrence of a position if some position has occurred twice
+        # already
+        check_repetition = len(set(self.position_history)) < len(self.position_history)
+
+        legal_moves = []
         for r in range(9):
             for c in range(9):
                 if self.board[r, c] in piece_types:
-                    moves.extend(self._get_piece_moves(r, c))
-        
-        # Filter out moves that would cause three-fold repetition
-        legal_moves = []
-        for move in moves:
-            if not self._would_cause_repetition(move):
-                legal_moves.append(move)
-        
-        return legal_moves
+                    for move in self._get_piece_moves(r, c):
+                        if not (check_repetition and self._would_cause_repetition(move)):
+                            legal_moves.append(move)
+                            if stop_at_first:
+                                return legal_moves
+
+        self._legal_moves_key, self._legal_moves = key, legal_moves
+        return list(legal_moves)
     
     def _would_cause_repetition(self, move: Tuple[int, int, int, int]) -> bool:
         """
@@ -418,7 +440,7 @@ class Tablut:
         # Check if current player has no legal moves (stalemate = loss)
         # Note: Three-fold repetition is now handled by filtering illegal moves,
         # so a player with only repetition moves will have no legal moves
-        if not self.get_legal_moves():
+        if not self.get_legal_moves(stop_at_first=True):
             self.game_over = True
             self.winner = 1 - self.current_player
             return
@@ -435,6 +457,10 @@ class Tablut:
         new_game.corner_set = self.corner_set
         new_game.position_history = self.position_history.copy()
         new_game.move_count = self.move_count
+        # The cached list is never changed in place (get_legal_moves returns copies), so it can be
+        # shared
+        new_game._legal_moves_key = self._legal_moves_key
+        new_game._legal_moves = self._legal_moves
         # Copy rule parameters
         new_game.king_capture_pieces = self.king_capture_pieces
         new_game.king_can_capture = self.king_can_capture

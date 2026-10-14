@@ -190,8 +190,9 @@ class MCTSNode:
             probs = np.zeros(len(actions))
             probs[np.argmax(visits)] = 1.0
         else:
-            # Apply temperature
-            visits_temp = visits ** (1.0 / temperature)
+            # Apply temperature. Dividing by the largest count first keeps the largest entry at 1,
+            # so a small temperature cannot round every entry down to 0.
+            visits_temp = (visits / visits.max()) ** (1.0 / temperature)
             probs = visits_temp / visits_temp.sum()
         
         return {action: prob for action, prob in zip(actions, probs)}
@@ -230,6 +231,9 @@ class MCTS:
                            When > 1, the network receives T*3 + 1 input planes instead of 4
         """
         self.network = network
+        # Inference needs the BatchNorm running statistics; in training mode every search would use
+        # batch-of-one statistics and also change the running statistics
+        network.eval()
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.device = device
@@ -479,8 +483,10 @@ class MCTS:
             # Choose most visited
             move = moves[np.argmax(probs)]
         else:
-            # Sample from the visit shares raised to 1/temperature (sharper for temperature < 1)
-            probs = probs ** (1.0 / temperature)
+            # Sample from the visit shares raised to 1/temperature (sharper for temperature < 1).
+            # Dividing by the largest share first keeps it at 1, so a small temperature cannot give
+            # all zeros.
+            probs = (probs / probs.max()) ** (1.0 / temperature)
             move = moves[np.random.choice(len(moves), p=probs / probs.sum())]
 
         return move
@@ -572,7 +578,7 @@ class RandomRolloutMCTS:
             move = moves[np.argmax(probs)]
         else:
             # Sample an index: np.random.choice cannot pick from a list of move tuples directly
-            probs = probs ** (1.0 / temperature)
+            probs = (probs / probs.max()) ** (1.0 / temperature)
             move = moves[np.random.choice(len(moves), p=probs / probs.sum())]
 
         return move

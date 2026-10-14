@@ -174,8 +174,9 @@ class BrandubhNet(nn.Module):
             new_weight[:, -1] = saved_input_weight[:, -1]
             state_dict = {**state_dict, 'conv_input.weight': new_weight}  # do not modify the caller's dict
 
-        # Use standard load_state_dict
-        return super().load_state_dict(state_dict, strict=strict)
+        # Standard load_state_dict (called via nn.Module, not super(), because TablutNet and
+        # HnefataflNet reuse this method)
+        return nn.Module.load_state_dict(self, state_dict, strict=strict)
     
     def optimize_for_inference(self, use_compile: bool = True, compile_mode: str = 'default'):
         """

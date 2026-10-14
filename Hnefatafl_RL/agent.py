@@ -100,8 +100,10 @@ class Agent:
             # Choose most visited
             move_idx = np.argmax(probs)
         else:
-            # Sample from the visit shares raised to 1/temperature (sharper for temperature < 1)
-            sharpened = probs ** (1.0 / temperature)
+            # Sample from the visit shares raised to 1/temperature (sharper for temperature < 1).
+            # Dividing by the largest share first keeps it at 1, so a small temperature cannot give
+            # all zeros.
+            sharpened = (probs / probs.max()) ** (1.0 / temperature)
             move_idx = np.random.choice(len(moves), p=sharpened / sharpened.sum())
         move = moves[move_idx]
 

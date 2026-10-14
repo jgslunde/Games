@@ -299,18 +299,12 @@ class TaflGUI:
                 print("Warning: No config found in checkpoint, using command-line/default rules")
             
             # Create and load network (select appropriate network for board size)
-            if self.game_type == 'tablut':
-                network = TablutNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-            elif self.game_type == 'hnefatafl':
-                network = HnefataflNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-            else:
-                network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels,
-                                      value_head_hidden_size=config.get('value_head_hidden_size', 64),
-                                      history_length=config.get('history_length', 1))
-            if isinstance(network, BrandubhNet):
-                network.load_state_dict_compatible(checkpoint['model_state_dict'])
-            else:
-                network.load_state_dict(checkpoint['model_state_dict'])
+            network_classes = {'tablut': TablutNet, 'hnefatafl': HnefataflNet}
+            network_class = network_classes.get(self.game_type, BrandubhNet)
+            network = network_class(num_res_blocks=num_res_blocks, num_channels=num_channels,
+                                    value_head_hidden_size=config.get('value_head_hidden_size', 64),
+                                    history_length=config.get('history_length', 1))
+            network.load_state_dict_compatible(checkpoint['model_state_dict'])
             network.eval()
 
             print(f"Loaded network from {checkpoint_path}")
