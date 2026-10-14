@@ -934,7 +934,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
     Args:
         agent: Agent to use for self-play
         config: Training configuration
-        pool: Optional multiprocessing pool to use (if None, creates temporary pool)
+        pool: Optional multiprocessing pool to use (if None, creates temporary pool). It is terminated
+              at the end (the unfinished games are killed), so the caller must create a new one.
         temp_network_path: Path to temporary network file (avoids pickling large tensors)
         attacker_sims: Override for attacker simulation count (uses config value if None)
         defender_sims: Override for defender simulation count (uses config value if None)
@@ -978,7 +979,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         cleanup_temp_file = False
     
     try:
-        # Worker arguments for each of the num_games_per_iteration games
+        # Worker arguments for up to 2 * num_games_per_iteration games (only the first N finished are used)
         worker_args = [(temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
                         num_sims_attacker, num_sims_defender,
                         config.c_puct, config.temperature, config.temperature_mode,
@@ -991,11 +992,14 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                         config.fpu_reduction, config.temp_dir, config.track_unique_states,
                         config.use_random_opening_moves, config.max_game_length, config.search_discount,
                         config.history_length)
-                       for game_idx in range(config.num_games_per_iteration)]
+                       for game_idx in range(2 * config.num_games_per_iteration)]
 
-        # Play games in parallel. Exactly num_games_per_iteration games are played and all are kept:
-        # keeping only the first N finished games out of more would drop the longest games and bias the
-        # data towards short games. imap_unordered with chunksize=1 hands out one game at a time.
+        # Play games in parallel. imap_unordered with chunksize=1 hands out one game at a time, and once
+        # num_games_per_iteration games are done the games still running are killed. This keeps every
+        # worker busy until the end (waiting for the last games instead leaves ~10-18 % of worker time
+        # idle). The cost is a small bias against long games, since a long game started late is more
+        # likely to be killed: with ~4 games per worker about a third to a half of the draws are lost; the
+        # bias roughly halves with each doubling of the games per worker.
         if config.num_workers > 1:
             run_pool = pool if pool is not None else mp.Pool(processes=config.num_workers, maxtasksperchild=10)
             game_results = []
@@ -1006,16 +1010,21 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                     if len(game_results) in (config.num_games_per_iteration // 4, config.num_games_per_iteration // 2,
                                              3 * config.num_games_per_iteration // 4):
                         print(f"  Progress: {len(game_results)}/{config.num_games_per_iteration} games")
+                    if len(game_results) == config.num_games_per_iteration:
+                        print(f"  Reached {config.num_games_per_iteration} games, terminating remaining workers...")
+                        break
             except Exception as e:
                 print(f"\nError during self-play: {e}", file=sys.stderr, flush=True)
-                run_pool.terminate()  # stop the remaining games
                 raise
             finally:
-                if pool is None:  # temporary pool
-                    run_pool.close()
-                    run_pool.join()
+                # Kill the games still running. The pool cannot be used afterwards (the caller recreates it).
+                run_pool.terminate()
+                run_pool.join()
+                # Collect the dead workers' file descriptors before the next pool is created
+                import gc
+                gc.collect()
         else:
-            game_results = [_play_self_play_game_worker(*args) for args in worker_args]
+            game_results = [_play_self_play_game_worker(*args) for args in worker_args[:config.num_games_per_iteration]]
     finally:
         # Clean up temporary file
         if cleanup_temp_file:
@@ -2645,7 +2654,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 if pid.isdigit() and not os.path.exists(f'/proc/{pid}'):
                     shutil.rmtree(cache_dir, ignore_errors=True)
 
-            # Recreate worker pool if it was closed in the previous iteration
+            # Recreate worker pool (self-play terminates it at the end of each iteration)
             if config.num_workers > 1 and worker_pool is None:
                 print(f"Recreating worker pool with {config.num_workers} workers...")
                 worker_pool = mp.Pool(processes=config.num_workers, maxtasksperchild=50)
@@ -2668,12 +2677,9 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                     agent, config, pool=worker_pool)
             selfplay_time = time.time() - selfplay_start
 
-            # All games are done: close the pool so that its workers do not hold memory during training.
+            # generate_self_play_data terminated the pool (so its workers hold no memory during training).
             # It is recreated at the start of the next iteration; evaluation uses its own pools.
-            if worker_pool is not None:
-                worker_pool.close()
-                worker_pool.join()
-                worker_pool = None
+            worker_pool = None
             
             # Calculate draws from self-play
             total_games = config.num_games_per_iteration
