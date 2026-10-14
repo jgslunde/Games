@@ -87,7 +87,7 @@ class TrainingConfig:
     # Dynamic simulation balancing (keeps each side's score, draws counting half, at or above a minimum)
     use_dynamic_sim_balancing = False # Dynamically adjust attacker/defender simulation counts to balance win rates
     dynamic_sim_adjustment_rate = 0.1 # Fraction of win rate difference used for adjustment (default: 0.1 = 10%)
-    dynamic_sim_min_win_rate = 0.5    # Keep each side's score >= this (band [x, 1-x]); 0.5 = push towards 50%
+    dynamic_sim_min_win_rate = 0.2    # Keep each side's score >= this (band [x, 1-x]); 0.5 = push towards 50%
     
     # Temperature (exploration during self-play)
     temperature = 1.0                 # Sampling temperature for moves
