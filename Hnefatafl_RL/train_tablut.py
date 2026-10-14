@@ -1,12 +1,12 @@
 """
 Training script for Tablut (9x9 Tafl) using AlphaZero.
 
-This script configures and runs the training pipeline specifically for Tablut.
-For other board sizes or game variants, create a similar training script.
+Same options as train_brandubh.py; only the defaults below are chosen for the 9x9 board.
 """
 
 import argparse
 import multiprocessing as mp
+from math import sqrt
 
 # Import the generic training module
 from train import TrainingConfig, train
@@ -37,54 +37,66 @@ def temperature_threshold_type(value):
 
 DEFAULT_ITERATIONS = 1000
 DEFAULT_GAMES = 512
-DEFAULT_SIMS_ATTACKER_SELFPLAY = 120
-DEFAULT_SIMS_DEFENDER_SELFPLAY = 120
-DEFAULT_SIMS_ATTACKER_EVAL = 120
-DEFAULT_SIMS_DEFENDER_EVAL = 120
+# A simulation costs ~3x a Brandubh one (network and move generation on 9x9)
+DEFAULT_SIMS_ATTACKER_SELFPLAY = 400
+DEFAULT_SIMS_DEFENDER_SELFPLAY = 400
+DEFAULT_SIMS_ATTACKER_EVAL = 400
+DEFAULT_SIMS_DEFENDER_EVAL = 400
 DEFAULT_BATCH_SIZE = 256
-DEFAULT_LEARNING_RATE = 1e-3*(DEFAULT_BATCH_SIZE/256)
+DEFAULT_LEARNING_RATE = 1e-3*sqrt(DEFAULT_BATCH_SIZE/256)
 DEFAULT_EPOCHS = 10
-DEFAULT_BATCHES_PER_EPOCH = 100
+DEFAULT_BATCHES_PER_EPOCH = 200
 DEFAULT_EVAL_VS_RANDOM = 64
 DEFAULT_NUM_WORKERS = mp.cpu_count()  # Use all available CPU cores
 DEFAULT_DEVICE = None  # Device for training in the main process; None = TrainingConfig.device ("cpu")
 DEFAULT_RESUME = None  # Path to checkpoint file, or None to start fresh
+DEFAULT_TEMP_DIR = "/dev/shm/" # Location for temp torch files (RAM-disk by default).
 
 # Temperature parameters
 DEFAULT_TEMPERATURE = 1.0
-DEFAULT_TEMPERATURE_MODE = "king"  # "fixed", "king", or "decay"
-DEFAULT_TEMPERATURE_THRESHOLD = 15  # For "fixed" mode
-DEFAULT_TEMPERATURE_DECAY_MOVES = 30  # For "decay" mode
+DEFAULT_TEMPERATURE_MODE = "decay"  # "fixed", "king", or "decay"
+DEFAULT_TEMPERATURE_THRESHOLD = 10  # For "fixed" mode
+DEFAULT_TEMPERATURE_DECAY_MOVES = 30  # For "decay" mode (games are 2-3x longer than in Brandubh)
 
 # Evaluation temperature parameters
-DEFAULT_EVAL_TEMPERATURE = 0.0  # Deterministic play during evaluation
+DEFAULT_EVAL_TEMPERATURE = 0.65  # Starting temperature during evaluation play 
 DEFAULT_EVAL_TEMPERATURE_MODE = "fixed"  # "fixed", "king", or "decay"
-DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 0  # For "fixed" mode
-DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 0  # For "decay" mode
+DEFAULT_EVAL_TEMPERATURE_THRESHOLD = 20  # For "fixed" mode
+DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES = 20  # For "decay" mode
 
 # Network architecture
-DEFAULT_RES_BLOCKS = 5
-DEFAULT_CHANNELS = 64
-DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 64
+DEFAULT_RES_BLOCKS = 6
+DEFAULT_CHANNELS = 48
+DEFAULT_VALUE_HEAD_HIDDEN_SIZE = 128
+DEFAULT_HISTORY_LENGTH = 1  # Number of timesteps for history planes (1 = current only, for backward compatibility)
 
 # Replay buffer
-DEFAULT_REPLAY_BUFFER_SIZE = 6_000_000
-DEFAULT_MIN_BUFFER_SIZE = 10*DEFAULT_BATCH_SIZE
+# ~3x more positions per iteration than Brandubh; 10 M samples = 1.25 M positions (~13 GB)
+DEFAULT_REPLAY_BUFFER_SIZE = 10_000_000
+DEFAULT_MIN_BUFFER_SIZE = 400_000
 DEFAULT_USE_DATA_AUGMENTATION = True  # Enable symmetry-based data augmentation
+DEFAULT_TRACK_UNIQUE_STATES = True
+DEFAULT_USE_RANDOM_OPENING_MOVES = True
+
+# Game length limit
+DEFAULT_MAX_GAME_LENGTH = 200  # Maximum moves before declaring draw
+
+# Time-weighted rewards (discounting future rewards)
+DEFAULT_REWARD_DISCOUNT = 0.99  # Discount factor per move (1.0 = no discount); 0.99^100 = 0.37
 
 # Learning rate decay and regularization
 DEFAULT_LR_DECAY = 0.99
-DEFAULT_LR_FLOOR = 1e-6
-DEFAULT_WEIGHT_DECAY = 1e-4
-DEFAULT_VALUE_LOSS_WEIGHT = 20.0
+DEFAULT_LR_FLOOR = 3e-5
+DEFAULT_WEIGHT_DECAY = 1e-2
+DEFAULT_VALUE_LOSS_WEIGHT = 1.5
 
 # Stepping learning rate schedule (alternative to exponential decay)
-DEFAULT_USE_STEPPING_LR = False  # If True, use stepping LR instead of exponential decay
-DEFAULT_LR_STEP_ITERATIONS = []  # Iterations at which to step LR (e.g., [50, 100, 150])
-DEFAULT_LR_STEP_VALUES = []      # LR values for each step (must be len(lr_step_iterations) + 1)
+DEFAULT_USE_STEPPING_LR = True  # If True, use stepping LR instead of exponential decay
+DEFAULT_LR_STEP_ITERATIONS = [100, 200, 300]  # Iterations at which to step LR (e.g., [50, 100, 150])
+DEFAULT_LR_STEP_VALUES = [1e-3, 5e-4, 1e-4, 1e-5] # LR values for each step (must be len(lr_step_iterations) + 1)
 
 # Dynamic loss boosting
-DEFAULT_USE_DYNAMIC_BOOSTING = True
+DEFAULT_USE_DYNAMIC_BOOSTING = False
 DEFAULT_DYNAMIC_BOOST_ALPHA = 0.1
 DEFAULT_DYNAMIC_BOOST_MIN = 0.2
 DEFAULT_DYNAMIC_BOOST_MAX = 5.0
@@ -94,12 +106,21 @@ DEFAULT_DRAW_PENALTY_ATTACKER = 0.0  # Draw value for attackers (neutral)
 DEFAULT_DRAW_PENALTY_DEFENDER = 0.0  # Draw value for defenders (neutral)
 
 # MCTS exploration
-DEFAULT_C_PUCT = 1.4
+DEFAULT_C_PUCT = 2.0
+DEFAULT_FPU_REDUCTION = 0.0  # First Play Urgency: reduction relative to parent Q-value (like Leela Chess Zero)
+DEFAULT_SEARCH_DISCOUNT = 0.99  # Search depth discount per move during MCTS backup (same as reward)
+DEFAULT_EVAL_C_PUCT = 1.5  # Evaluation c_puct
+DEFAULT_EVAL_FPU_REDUCTION = -0.25  # Evaluation FPU reduction
+
+# Dynamic simulation balancing
+DEFAULT_USE_DYNAMIC_SIM_BALANCING = True  # Dynamically adjust simulation counts to balance win rates
+DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE = 0.2  # Fraction of win rate difference used for adjustment
+DEFAULT_DYNAMIC_SIM_MIN_WIN_RATE = 0.2  # Keep each side's score (draws = half) >= this; 0.5 = push towards 50%
 
 # Dirichlet noise (exploration during self-play)
 DEFAULT_ADD_DIRICHLET_NOISE = True  # Enable Dirichlet noise in self-play for exploration
-DEFAULT_DIRICHLET_ALPHA = 0.3  # Concentration parameter (lower = more concentrated)
-DEFAULT_DIRICHLET_EPSILON = 0.25  # Weight of noise (0.25 = 25% noise, 75% network priors)
+DEFAULT_DIRICHLET_ALPHA = 0.15  # Concentration (lower = more concentrated); ~2x more legal moves
+DEFAULT_DIRICHLET_EPSILON = 0.35  # Weight of noise (0.25 = 25% noise, 75% network priors)
 
 # Game rules
 DEFAULT_KING_CAPTURE_PIECES = 2  # 2, 3, or 4 pieces needed to capture king
@@ -109,9 +130,9 @@ DEFAULT_THRONE_ENABLED = False  # Whether throne exists and blocks movement
 
 # Evaluation
 DEFAULT_EVAL_GAMES = 128
-DEFAULT_EVAL_WIN_RATE = 0.55
+DEFAULT_EVAL_WIN_RATE = 0.70
 DEFAULT_EVAL_FREQUENCY = 4
-DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 1  # Evaluate every iteration until 100% win rate achieved
+DEFAULT_EVAL_VS_RANDOM_FREQUENCY = 9999999  # Evaluate vs random every N iterations (9999999 = never; 1 = every iteration until 100% wins)
 
 # Checkpointing
 DEFAULT_SAVE_FREQUENCY = 1
@@ -143,15 +164,17 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
                        help=f"Training batch size (default: {DEFAULT_BATCH_SIZE})")
     parser.add_argument("--lr", type=float, default=DEFAULT_LEARNING_RATE,
-                       help=f"Learning rate (default: {DEFAULT_LEARNING_RATE})")
+                       help=f"Initial learning rate, only used with --no-stepping-lr (default: {DEFAULT_LEARNING_RATE})")
     parser.add_argument("--lr-decay", type=float, default=DEFAULT_LR_DECAY,
-                       help=f"Learning rate decay per iteration (default: {DEFAULT_LR_DECAY})")
+                       help=f"Learning rate decay per iteration, only used with --no-stepping-lr (default: {DEFAULT_LR_DECAY})")
     parser.add_argument("--lr-floor", type=float, default=DEFAULT_LR_FLOOR,
-                       help=f"Minimum learning rate floor (default: {DEFAULT_LR_FLOOR})")
-    
+                       help=f"Minimum learning rate, only used with --no-stepping-lr (default: {DEFAULT_LR_FLOOR})")
+
     # Stepping learning rate schedule
     parser.add_argument("--use-stepping-lr", action="store_true", default=DEFAULT_USE_STEPPING_LR,
                        help=f"Use stepping LR schedule instead of exponential decay (default: {DEFAULT_USE_STEPPING_LR})")
+    parser.add_argument("--no-stepping-lr", action="store_false", dest="use_stepping_lr",
+                       help="Use exponential decay (--lr, --lr-decay, --lr-floor) instead of the stepping LR schedule")
     parser.add_argument("--lr-step-iterations", type=int, nargs='+', default=DEFAULT_LR_STEP_ITERATIONS,
                        help=f"Iterations at which to step LR (e.g., 50 100 150) (default: {DEFAULT_LR_STEP_ITERATIONS})")
     parser.add_argument("--lr-step-values", type=float, nargs='+', default=DEFAULT_LR_STEP_VALUES,
@@ -192,18 +215,52 @@ if __name__ == "__main__":
                        help=f"Number of channels in conv layers (default: {DEFAULT_CHANNELS})")
     parser.add_argument("--value-head-size", type=int, default=DEFAULT_VALUE_HEAD_HIDDEN_SIZE,
                        help=f"Size of value head hidden layer (default: {DEFAULT_VALUE_HEAD_HIDDEN_SIZE})")
+    parser.add_argument("--history-length", type=int, default=DEFAULT_HISTORY_LENGTH,
+                       help=f"Number of timesteps for history planes input. 1=current only. Higher values let network see game history. (default: {DEFAULT_HISTORY_LENGTH})")
     
     # MCTS parameters
     parser.add_argument("--c-puct", type=float, default=DEFAULT_C_PUCT,
-                       help=f"MCTS exploration constant (default: {DEFAULT_C_PUCT})")
+                       help=f"MCTS exploration constant for self-play (default: {DEFAULT_C_PUCT})")
+    parser.add_argument("--fpu-reduction", type=float, default=DEFAULT_FPU_REDUCTION,
+                       help=f"First Play Urgency reduction for self-play relative to parent Q-value (default: {DEFAULT_FPU_REDUCTION}, like Leela Chess Zero)")
+    parser.add_argument("--search-discount", type=float, default=DEFAULT_SEARCH_DISCOUNT,
+                       help=f"Search depth discount per move during MCTS backup. Prefer shorter winning paths. (default: {DEFAULT_SEARCH_DISCOUNT})")
+    parser.add_argument("--eval-c-puct", type=float, default=DEFAULT_EVAL_C_PUCT,
+                       help=f"MCTS exploration constant for evaluation (default: {DEFAULT_EVAL_C_PUCT})")
+    parser.add_argument("--eval-fpu-reduction", type=float, default=DEFAULT_EVAL_FPU_REDUCTION,
+                       help=f"First Play Urgency reduction for evaluation relative to parent Q-value (default: {DEFAULT_EVAL_FPU_REDUCTION})")
+    
+    # Dynamic simulation balancing
+    parser.add_argument("--use-dynamic-sim-balancing", action="store_true", default=DEFAULT_USE_DYNAMIC_SIM_BALANCING,
+                       help=f"Dynamically adjust simulation counts to balance win rates, see "
+                            f"--dynamic-sim-min-win-rate (default: {DEFAULT_USE_DYNAMIC_SIM_BALANCING})")
+    parser.add_argument("--no-dynamic-sim-balancing", action="store_false", dest="use_dynamic_sim_balancing",
+                       help="Disable dynamic simulation balancing (use fixed counts)")
+    parser.add_argument("--dynamic-sim-adjustment-rate", type=float, default=DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE,
+                       help=f"Fraction of win rate difference used for simulation adjustment (default: {DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE})")
+    parser.add_argument("--dynamic-sim-min-win-rate", type=float, default=DEFAULT_DYNAMIC_SIM_MIN_WIN_RATE,
+                       help="Keep each side's self-play score (wins + draws/2) at or above this, i.e. the attacker's "
+                            "score in [x, 1-x]. Inside that band the simulation split drifts back to equal. "
+                            f"0.5 pushes towards a 50%% score (default: {DEFAULT_DYNAMIC_SIM_MIN_WIN_RATE})")
+    
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
                        help=f"Sampling temperature for move selection in self-play (default: {DEFAULT_TEMPERATURE})")
-    parser.add_argument("--temperature-threshold", type=temperature_threshold_type, default=DEFAULT_TEMPERATURE_THRESHOLD,
-                       help=f"Move number after which temperature=0, or 'king' to drop when king leaves throne (default: {DEFAULT_TEMPERATURE_THRESHOLD})")
+    parser.add_argument("--temperature-mode", type=str, default=DEFAULT_TEMPERATURE_MODE, 
+                       choices=["fixed", "king", "decay"],
+                       help=f"Temperature mode: 'fixed' (drop at threshold), 'king' (drop when king leaves), 'decay' (linear) (default: {DEFAULT_TEMPERATURE_MODE})")
+    parser.add_argument("--temperature-threshold", type=int, default=DEFAULT_TEMPERATURE_THRESHOLD,
+                       help=f"Move number for temperature drop in 'fixed' mode (default: {DEFAULT_TEMPERATURE_THRESHOLD})")
+    parser.add_argument("--temperature-decay-moves", type=int, default=DEFAULT_TEMPERATURE_DECAY_MOVES,
+                       help=f"Number of moves for linear decay in 'decay' mode (default: {DEFAULT_TEMPERATURE_DECAY_MOVES})")
     parser.add_argument("--eval-temperature", type=float, default=DEFAULT_EVAL_TEMPERATURE,
                        help=f"Sampling temperature for evaluation games (default: {DEFAULT_EVAL_TEMPERATURE})")
-    parser.add_argument("--eval-temperature-threshold", type=temperature_threshold_type, default=DEFAULT_EVAL_TEMPERATURE_THRESHOLD,
-                       help=f"Move threshold for evaluation temperature, or 'king' (default: {DEFAULT_EVAL_TEMPERATURE_THRESHOLD})")
+    parser.add_argument("--eval-temperature-mode", type=str, default=DEFAULT_EVAL_TEMPERATURE_MODE,
+                       choices=["fixed", "king", "decay"],
+                       help=f"Temperature mode for evaluation (default: {DEFAULT_EVAL_TEMPERATURE_MODE})")
+    parser.add_argument("--eval-temperature-threshold", type=int, default=DEFAULT_EVAL_TEMPERATURE_THRESHOLD,
+                       help=f"Move threshold for eval temperature in 'fixed' mode (default: {DEFAULT_EVAL_TEMPERATURE_THRESHOLD})")
+    parser.add_argument("--eval-temperature-decay-moves", type=int, default=DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES,
+                       help=f"Decay moves for eval in 'decay' mode (default: {DEFAULT_EVAL_TEMPERATURE_DECAY_MOVES})")
     
     # Dirichlet noise (exploration)
     parser.add_argument("--add-dirichlet-noise", action="store_true", default=DEFAULT_ADD_DIRICHLET_NOISE,
@@ -240,6 +297,18 @@ if __name__ == "__main__":
                        help=f"Enable symmetry-based data augmentation (default: {DEFAULT_USE_DATA_AUGMENTATION})")
     parser.add_argument("--no-data-augmentation", action="store_false", dest="use_data_augmentation",
                        help="Disable data augmentation")
+    parser.add_argument("--track-unique-states", action="store_true", default=DEFAULT_TRACK_UNIQUE_STATES,
+                       help=f"Track and report unique board state diversity during self-play (adds overhead, default: {DEFAULT_TRACK_UNIQUE_STATES})")
+    parser.add_argument("--no-track-unique-states", action="store_false", dest="track_unique_states",
+                       help="Do not track unique board states")
+    parser.add_argument("--use-random-opening-moves", action="store_true", default=DEFAULT_USE_RANDOM_OPENING_MOVES,
+                       help=f"In 50%% of games, play 1-4 random moves (2-8 ply) before MCTS (default: {DEFAULT_USE_RANDOM_OPENING_MOVES})")
+    parser.add_argument("--no-random-opening-moves", action="store_false", dest="use_random_opening_moves",
+                       help="Start every self-play game from the normal start position")
+    parser.add_argument("--max-game-length", type=int, default=DEFAULT_MAX_GAME_LENGTH,
+                       help=f"Maximum moves before declaring draw (default: {DEFAULT_MAX_GAME_LENGTH})")
+    parser.add_argument("--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT,
+                       help=f"Time-weighted reward discount factor per move. Values closer to game end get stronger rewards. (default: {DEFAULT_REWARD_DISCOUNT})")
     
     # Evaluation
     parser.add_argument("--eval-games", type=int, default=DEFAULT_EVAL_GAMES,
@@ -258,6 +327,8 @@ if __name__ == "__main__":
                        help=f"Number of parallel workers (default: {DEFAULT_NUM_WORKERS} CPUs)")
     parser.add_argument("--device", type=str, default=DEFAULT_DEVICE,
                        help="Device for training in the main process (cuda/cpu, default: cpu)")
+    parser.add_argument("--temp-dir", type=str, default=DEFAULT_TEMP_DIR,
+                       help="Temporary directory for PyTorch cache files (default: system /tmp, or use /dev/shm for RAM disk)")
     
     # Checkpointing
     parser.add_argument("--save-frequency", type=int, default=DEFAULT_SAVE_FREQUENCY,
@@ -319,13 +390,25 @@ if __name__ == "__main__":
     config.num_res_blocks = args.res_blocks
     config.num_channels = args.channels
     config.value_head_hidden_size = args.value_head_size
+    config.history_length = args.history_length
     
     # MCTS parameters
     config.c_puct = args.c_puct
+    config.fpu_reduction = args.fpu_reduction
+    config.search_discount = args.search_discount
+    config.eval_c_puct = args.eval_c_puct
+    config.eval_fpu_reduction = args.eval_fpu_reduction
+    config.use_dynamic_sim_balancing = args.use_dynamic_sim_balancing
+    config.dynamic_sim_adjustment_rate = args.dynamic_sim_adjustment_rate
+    config.dynamic_sim_min_win_rate = args.dynamic_sim_min_win_rate
     config.temperature = args.temperature
+    config.temperature_mode = args.temperature_mode
     config.temperature_threshold = args.temperature_threshold
+    config.temperature_decay_moves = args.temperature_decay_moves
     config.eval_temperature = args.eval_temperature
+    config.eval_temperature_mode = args.eval_temperature_mode
     config.eval_temperature_threshold = args.eval_temperature_threshold
+    config.eval_temperature_decay_moves = args.eval_temperature_decay_moves
     
     # Dirichlet noise parameters
     config.add_dirichlet_noise = args.add_dirichlet_noise
@@ -343,6 +426,18 @@ if __name__ == "__main__":
     config.min_buffer_size = args.min_buffer_size
     config.use_data_augmentation = args.use_data_augmentation
     
+    # State diversity tracking
+    config.track_unique_states = args.track_unique_states
+    
+    # Random opening moves
+    config.use_random_opening_moves = args.use_random_opening_moves
+    
+    # Game length limit
+    config.max_game_length = args.max_game_length
+    
+    # Time-weighted rewards
+    config.reward_discount = args.reward_discount
+    
     # Evaluation
     config.eval_games = args.eval_games
     config.eval_win_rate = args.eval_win_rate
@@ -354,6 +449,7 @@ if __name__ == "__main__":
     config.num_workers = args.num_workers
     if args.device is not None:
         config.device = args.device
+    config.temp_dir = args.temp_dir
     
     # Checkpointing
     config.save_frequency = args.save_frequency

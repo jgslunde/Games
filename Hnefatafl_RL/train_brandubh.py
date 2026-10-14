@@ -114,7 +114,7 @@ DEFAULT_EVAL_FPU_REDUCTION = -0.25  # Evaluation FPU reduction
 # Dynamic simulation balancing
 DEFAULT_USE_DYNAMIC_SIM_BALANCING = True  # Dynamically adjust simulation counts to balance win rates
 DEFAULT_DYNAMIC_SIM_ADJUSTMENT_RATE = 0.2  # Fraction of win rate difference used for adjustment
-DEFAULT_DYNAMIC_SIM_MIN_WIN_RATE = 0.5  # Keep each side's score (draws = half) >= this; 0.5 = push towards 50%
+DEFAULT_DYNAMIC_SIM_MIN_WIN_RATE = 0.2  # Keep each side's score (draws = half) >= this; 0.5 = push towards 50%
 
 # Dirichlet noise (exploration during self-play)
 DEFAULT_ADD_DIRICHLET_NOISE = True  # Enable Dirichlet noise in self-play for exploration
