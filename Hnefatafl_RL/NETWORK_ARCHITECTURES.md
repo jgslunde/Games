@@ -11,13 +11,16 @@ nodes per move.
   can reach the square behind the victim, the king wins through an open line to a corner, a block
   needs a piece that can reach that line. A 3x3 convolution sees one square in each direction, so
   it needs many layers to follow a line. A kernel that spans a whole row or column sees the line in
-  one layer, and on a board of 7 to 11 squares it costs no more than a 3x3 kernel.
+  one layer. It is 2N-1 long and centred, so that every square, also a corner, sees all of its row
+  and column (a kernel only N long reaches N//2 squares to each side).
 - The old dense policy head (one big linear layer from the whole board to every move) holds half
   to two thirds of all parameters and has to learn every from-square separately. A 1x1 convolution
   that outputs one plane per (direction, distance) gives the same output in the same index order
   with a few hundred parameters.
 - Measured in the browser (WASM, one thread): the new networks evaluate 4.5x (7x7), 2.3x (9x9) and
   4.5x (11x11) faster than the current ones at the same depth, with 5 to 12 times fewer parameters.
+  These numbers are for line kernels only N long. The 2N-1 kernels now used cost about 1.5x more
+  per line network in PyTorch (section 4), so the speed advantage in self-play is now 1.2x to 1.8x.
   Playing strength is not measured yet; that is what the configs in section 5 are for.
 - Transformers, dilated kernels, 5x5 kernels, depthwise convolutions and squeeze-excitation were
   considered and rejected for this setup (section 3).
@@ -60,13 +63,16 @@ the network the answer directly.
 | Block | What one layer sees | Verdict | Cost of a 6-block trunk, relative to `res` (browser) |
 |---|---|---|---|
 | `res`: 3x3, 3x3 | 8 neighbours | local shapes only (sandwiches, forts, diagonal guards) | 1.0 |
-| `line`: 1x1 down, 1xN + Nx1, 1x1 up | whole row and column | the main bet; line facts are few, so the narrow inner width is enough | 0.37 to 0.43 |
+| `line`: 1x1 down, 1x(2N-1) + (2N-1)x1, 1x1 up | whole row and column | the main bet; line facts are few, so the narrow inner width is enough | 0.37 to 0.43 |
 | `line3`: like `line` with a 3x3 first | local shape, then lines over it | best "complete" block; use on 9x9 and 11x11 if diagonal shapes matter | 0.48 to 0.56 |
-| `thick`: 3xN + Nx3 | row, column and the neighbouring rows and columns | merges two thin line layers into one, but loses the nonlinearity between them; same cost as `res` | 0.76 to 1.16 |
+| `thick`: 3x(2N-1) + (2N-1)x3 | row, column and the neighbouring rows and columns | merges two thin line layers into one, but loses the nonlinearity between them; same cost as `res` | 0.76 to 1.16 |
 | 5x5 | 24 neighbours | still local, +1 reach, 1.7x to 1.9x the cost | rejected |
 | dilated 3x3 | taps two squares apart | skips squares, so it cannot check "nothing in between" | rejected |
 | depthwise separable | 8 neighbours, 4x to 8x fewer multiply-adds | only 30 % faster in practice, worse per multiply-add than line blocks | rejected |
 | transformer (attention over squares) | any square | right for a large GPU network (Leela Chess Zero); at this size and batch 1 it is 2x to 6x slower per evaluation than a line network with the same parameters, and it has to learn the line structure that the line kernel has built in | rejected for the browser |
+
+The browser costs in this table were measured with line kernels only N long; the 2N-1 kernels make
+`line`, `line3` and `thick` dearer (section 4).
 
 Other options: `global_pool` adds a KataGo-style bias from board-wide average and maximum
 features (material, how many attackers near each corner); it costs about 8 % and is on in the 9x9
@@ -95,13 +101,15 @@ board size is the number of facts built on other facts, so add blocks before cha
 | Planes | What they give the network | Cost |
 |---|---|---|
 | `constant_planes`: ones, corners, throne | edges and special squares in the first layer | none |
-| `mobility_planes`: squares each side can move to, squares the king can move to | Reach and Arrival, computed exactly by the move generator | a few microseconds per node in the engine |
-| `region_plane`: squares connected to the king without crossing an attacker | the encirclement question, answered | a flood fill per node |
+| `mobility_planes`: squares each side can move to, squares the king can move to | Reach and Arrival, computed exactly by the move generator | 0.17 ms per position at 11x11 |
+| `region_plane`: squares connected to the king without crossing an attacker | the encirclement question, answered | 0.15 ms per position at 11x11 |
 | `history_length`: piece planes of earlier positions | repetition and tempo | none |
 
 The reach and region planes hand the network its hardest facts. In training they are built in
-Python with numpy (`reach_planes`, `king_region_plane`, checked against the move generator in
-`test_tafl_network.py`). A browser build must compute the same planes in the same order; the
+Python (`reach_planes` with numpy: the nearest piece in each direction of every square;
+`king_region_plane` with `scipy.ndimage.label`), checked against the move generator and the
+encirclement test in `test_tafl_network.py`. For scale: one network call of `line_10x64_gpool`
+takes 6.6 ms and generating the legal moves of a Hnefatafl position 0.9 ms (one core of owl31). A browser build must compute the same planes in the same order; the
 `.json` file written by `convert_to_onnx.py` lists them.
 
 ## 4. Measured inference cost
@@ -135,44 +143,61 @@ Self-play runs the networks in PyTorch, not in ONNX Runtime, and PyTorch pays mo
 The line networks have about twice as many (small) operations as the old ones, so the self-play
 gain is smaller than the browser gain, and in eager mode there is none at 9x9. Measured with
 `benchmark_network.py --network-config ... --compile` (batch 1, one thread, `torch.compile` with
-the C++ wrapper, as the self-play workers run it), on the shipped configs:
+the C++ wrapper, as the self-play workers run it), on the shipped configs, with the 2N-1 line
+kernels, on one core of an idle owl31 (AMD EPYC 7551):
 
-| Board | Baseline config | Line config | Self-play speed-up | Browser speed-up |
-|---|---|---|---|---|
-| 7x7 | 0.57 ms | `line_4x32`: 0.27 ms | 2.1x | 4.5x |
-| 9x9 | 0.92 ms | `line_6x48_gpool`: 0.77 ms | 1.2x | 2.3x |
-| 11x11 | 3.12 ms | `line_6x64_gpool`: 1.07 ms | 2.9x | 4.5x |
+| Board | Baseline config | Line config | Self-play speed-up |
+|---|---|---|---|
+| 7x7 | 6x32 res + SE: 1.36 ms | `line_4x32`: 0.75 ms | 1.8x |
+| 9x9 | 6x48 res: 2.64 ms | `line_6x48_gpool`: 2.07 ms | 1.3x |
+| 11x11 | 8x64 res: 8.06 ms | `line_10x64_gpool`: 6.62 ms | 1.2x |
 
-So the browser, which is the target, gains the most; training still gets faster, just less so.
+The first version had line kernels only N long (a corner square then saw only half of its edge
+line in one block). On owl31 that version of `line_10x64_gpool` took 4.3 ms, so the full-line
+kernels cost about 1.5x. Half of their work multiplies the zero padding; a matrix-product form
+without padding was only 11 % faster in a test, not worth the extra code. The browser gains more
+than self-play, as before, but the browser numbers above need measuring again.
 
-## 5. The twelve configs (`configs/<game>/<name>.json`)
+## 5. The configs (`configs/<game>/<name>.json`)
 
-Each board has a baseline that reproduces the removed `train_<game>.py` defaults (the same training
-settings, the same network as a `tafl_network` config), and three experiments that change only
-the `network` section, so a comparison measures the network alone. Parameter counts are of the
-shipped configs.
+Each board has a baseline and experiments that change only the `network` section, so a comparison
+measures the network alone (`test_tafl_network.py` checks this). The Brandubh and Tablut baselines
+reproduce the removed `train_<game>.py` defaults, except an evaluation temperature of 1.0 instead of
+0.65 (0.65 repeated the same few openings). The Hnefatafl baseline is new: the old script's
+settings had never been tuned (see the note below the table). Parameter counts are of the shipped
+configs.
 
 | Game | Config | Network | Parameters | Hypothesis |
 |---|---|---|---|---|
 | brandubh | `baseline` | 6x32 res + SE, dense heads, 4 planes | 243,911 | the current network |
-| brandubh | `line_4x32` | 4 line blocks x 32, conv policy, pooled value, 7 planes | 27,707 | equal or better per node, 4x the nodes |
-| brandubh | `line_4x32_mobility` | as above + reach planes, 10 planes | 28,571 | faster learning; if large, 3 blocks are enough |
-| brandubh | `line3_4x32` | 4 line3 blocks x 32, 7 planes | 37,051 | tells whether diagonal shapes matter at 7x7 |
+| brandubh | `line_4x32` | 4 line blocks x 32, conv policy, pooled value, 7 planes | 39,995 | equal or better per node, 1.8x the nodes |
+| brandubh | `line_4x32_mobility` | as above + reach planes, 10 planes | 40,859 | faster learning; if large, 3 blocks are enough |
+| brandubh | `line3_4x32` | 4 line3 blocks x 32, 7 planes | 49,339 | tells whether diagonal shapes matter at 7x7 |
 | tablut | `baseline` | 6x48 res, dense heads, 4 planes | 685,079 | the current network |
-| tablut | `line_6x48_gpool` | 6 line blocks x 48, global pool, 7 planes | 93,707 | 2.3x faster at equal depth |
-| tablut | `line3_6x48_gpool` | 6 line3 blocks x 48, global pool, 7 planes | 125,099 | my guess for the eventual winner at 9x9 |
-| tablut | `line_6x48_gpool_mobility` | line_6x48_gpool + reach planes, 10 planes | 95,003 | the engine-computed planes |
-| hnefatafl | `baseline` | 6x96 res, dense heads, 4 planes | 2,185,567 | the current network |
-| hnefatafl | `line_6x64_gpool` | 6 line blocks x 64, global pool, 7 planes | 183,883 | 4.5x faster; the base for the others |
-| hnefatafl | `line_10x64_gpool` | 10 line blocks x 64, global pool, 7 planes | 294,603 | depth for encirclement; expected to beat 6x96 at equal cost |
-| hnefatafl | `line_6x64_gpool_mobility_region` | line_6x64_gpool + reach planes + king-region plane, 11 planes | 186,187 | the encirclement question answered by the engine |
+| tablut | `line_6x48_gpool` | 6 line blocks x 48, global pool, 7 planes | 149,003 | 1.3x faster at equal depth |
+| tablut | `line3_6x48_gpool` | 6 line3 blocks x 48, global pool, 7 planes | 180,395 | my guess for the eventual winner at 9x9 |
+| tablut | `line_6x48_gpool_mobility` | line_6x48_gpool + reach planes, 10 planes | 150,299 | the engine-computed planes |
+| hnefatafl | `baseline` | 8x64 res, dense heads, 4 planes | 1,786,367 | the reference: an old-style network with the same settings |
+| hnefatafl | `line_10x64_gpool` | 10 line blocks x 64, global pool, 7 planes | 509,323 | the main run; depth for encirclement, 1.2x faster than the baseline |
+| hnefatafl | `line_10x64_gpool_mobility_region` | line_10x64_gpool + reach planes + king-region plane, 11 planes | 511,627 | the encirclement question answered by the engine (+0.3 ms per node) |
 
 Not in the configs, but one `--set` away: `network.policy_head=bilinear`,
-`network.tie_blocks=true`, `network.features.history_length=4`, `network.blocks=["thick",...]`.
+`network.tie_blocks=true`, `network.features.history_length=4`, `network.blocks=["thick",...]`,
+and the cheaper `network.blocks` of 6 line blocks.
 
-Note on the hnefatafl baseline: it keeps the old `value_loss_weight` of 40 and no simulation
-balancing, because that is what the old script did. The experiments keep them too, for a fair
-comparison; they are probably not good settings.
+Note on the Hnefatafl settings: the old `train_hnefatafl.py` defaults (still in the git history)
+were never tuned, and some would have crippled any network: value targets discounted by 0.98 per
+ply (0.98^150 = 0.05, so positions far from the end got targets near zero) while the search did not
+discount, a value-loss weight of 40, no simulation balancing, and a 40 M-sample replay buffer
+(about 100 GB, since every stored position keeps a 4,840-entry policy). The configs now use the
+settings that worked for Brandubh and Tablut, scaled to the longer games: discount 0.995 in both
+the targets and the search (0.995^150 = 0.47), c_puct 2.0 and FPU 0 in self-play (1.5 and -0.25
+in evaluation), Dirichlet alpha 0.1 (about three times as many legal moves as Brandubh), the 20-80
+simulation balancer, random openings, a draw after 300 plies, value-loss weight 1.5, weight decay
+0.01, a 12 M-sample buffer (1.5 M positions, about 40 iterations), and 256 games per iteration.
+With 128 workers, 128 games would mean that about half of the started games are killed at the
+cut-off (mostly long ones, which tilts the data towards short games); 256 games bring that down to
+about a third.
 
 ## 6. How to run and compare
 
@@ -232,6 +257,6 @@ directions 0 up, 1 down, 2 left, 3 right; take the softmax over the legal moves 
 | `run_config.py` | `TrainingConfig` and the JSON run config: sections, `--set` overrides, typo detection |
 | `run_training.py` | the entry point: `python run_training.py <config.json> [--set ...]` |
 | `train.py` | the pipeline; workers receive the network config and build the network from it |
-| `configs/` | the twelve run configs |
+| `configs/` | the run configs (section 5); `run_hnefatafl.sh <name>` starts a Hnefatafl one |
 | `test_tafl_network.py` | planes vs move generator, head index order, every block kind through ONNX, checkpoint loading, configs, a short end-to-end run |
 | `network.py`, `network_tablut.py`, `network_hnefatafl.py` | the old fixed classes; still loaded for old checkpoints (`arch: legacy`) |

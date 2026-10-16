@@ -43,8 +43,9 @@ def test_reach_planes_match_move_generator():
     for spec in GAMES.values():
         n = spec.board_size
         for throne_enabled in (False, True):
-            for _ in range(12):
-                game = random_position(spec.game_class, rng, dict(throne_enabled=throne_enabled))
+            for _ in range(30):
+                game = random_position(spec.game_class, rng, dict(throne_enabled=throne_enabled),
+                                       max_plies=150)
                 expected = np.zeros((3, n, n), dtype=np.float32)
                 for r in range(n):
                     for c in range(n):
@@ -123,6 +124,25 @@ def test_policy_head_index_order():
         assert logits.shape == (2, n * n * 4 * (n - 1))
         assert (logits[:, ~torch.from_numpy(on_board)] == -1e4).all() and torch.isfinite(logits).all()
     print("  conv and bilinear policy heads use the MoveEncoder index order")
+    return True
+
+
+def test_line_block_sees_whole_lines():
+    """One line block must connect every square to every square of its row and column, also from a
+    corner (a kernel only N long would reach just N//2 squares to each side)."""
+    from tafl_network import LineBlock
+    torch.manual_seed(0)
+    for n in (7, 9, 11):
+        for kind in ("line", "thick"):
+            block = LineBlock(16, n, kind)
+            inner = block.row.in_channels
+            for conv, square in ((block.row, lambda k: (0, k)), (block.col, lambda k: (k, 0))):
+                for k in range(n):
+                    x = torch.zeros(1, inner, n, n)
+                    x[0, :, square(k)[0], square(k)[1]] = 1.0
+                    seen = conv(x)[0, :, 0, 0].abs().sum() > 0
+                    assert seen, f"{kind} {n}x{n}: corner misses square {k}"
+    print("  line blocks: every square sees its whole row and column in one block")
     return True
 
 
@@ -223,22 +243,35 @@ def test_checkpoint_loading_and_stem_adaptation():
 
 def test_run_configs():
     """All shipped configs must load, round-trip through their JSON form, accept overrides and
-    reject unknown keys; the baselines must match the old training-script defaults."""
+    reject unknown keys. Within a game the experiments may differ from the baseline only in the
+    network (so a comparison measures the network), and the search must discount like the value
+    targets."""
     found = 0
     for game in ("brandubh", "tablut", "hnefatafl"):
+        with open(os.path.join(CONFIG_DIR, game, "baseline.json")) as f:
+            baseline_data = json.load(f)
         for name in sorted(os.listdir(os.path.join(CONFIG_DIR, game))):
-            config = load_config(os.path.join(CONFIG_DIR, game, name))
+            path = os.path.join(CONFIG_DIR, game, name)
+            config = load_config(path)
             found += 1
             assert config.game == game and config.board_size == game_spec(game).board_size
             assert from_dict(config.to_dict()).to_dict() == config.to_dict(), f"round trip changed {name}"
             assert config.to_flat_dict()["num_channels"] == config.network.channels
+            assert config.search_discount == config.reward_discount, f"{name}: discounts differ"
             build_network(config.network, config.board_size)  # every network builds
-    assert found == 12
+            with open(path) as f:
+                data = json.load(f)
+            assert data["system"]["num_workers"] is None, f"{name}: num_workers must be null"
+            for section in ("game", "self_play", "training", "replay_buffer", "evaluation"):
+                assert data[section] == baseline_data[section], f"{game}/{name}: {section} differs"
+    assert found == 11
     baseline = load_config(os.path.join(CONFIG_DIR, "brandubh", "baseline.json"))
     assert (baseline.num_mcts_sims_attacker, baseline.batch_size, baseline.network.value_hidden,
-            baseline.network.squeeze_excitation, baseline.throne_enabled) == (1000, 256, 256, True, False)
+            baseline.network.squeeze_excitation, baseline.throne_enabled) == \
+        (1000, 256, 256, True, False)
     hnef = load_config(os.path.join(CONFIG_DIR, "hnefatafl", "baseline.json"))
-    assert (hnef.king_capture_pieces, hnef.value_loss_weight, hnef.network.channels) == (4, 40.0, 96)
+    assert (hnef.king_capture_pieces, hnef.value_loss_weight, hnef.network.channels,
+            hnef.network.num_blocks, hnef.reward_discount) == (4, 1.5, 64, 8, 0.995)
     changed = apply_overrides(baseline, ["self_play.num_iterations=3", "network.channels=48",
                                          "network.features.history_length=4", 'network.blocks=["line","line"]',
                                          "num_workers=2", "name=test"])
@@ -310,8 +343,9 @@ def test_training_end_to_end():
 if __name__ == "__main__":
     print("Testing the configurable networks, features and configs...")
     tests = [test_reach_planes_match_move_generator, test_feature_layout, test_policy_head_index_order,
-             test_architectures_forward_and_onnx, test_checkpoint_loading_and_stem_adaptation,
-             test_run_configs, test_training_end_to_end]
+             test_line_block_sees_whole_lines, test_architectures_forward_and_onnx,
+             test_checkpoint_loading_and_stem_adaptation, test_run_configs,
+             test_training_end_to_end]
     all_passed = True
     for test in tests:
         try:

@@ -9,14 +9,16 @@ A NetworkConfig describes one of the architectures in tafl_network.py:
     channels             width of the residual trunk
     blocks               list of block kinds, in order (or an int: that many "res" blocks):
                            "res"    3x3 conv, 3x3 conv (the classic AlphaZero block)
-                           "line"   1x1 conv down to `bottleneck` x channels, then a full-row (1xN)
-                                    and a full-column (Nx1) conv added together, then 1x1 up.
-                                    One block gives every square a view of its whole row and
-                                    column, which is where all Tafl rules act.
+                           "line"   1x1 conv down to `bottleneck` x channels, then a row conv
+                                    (1 x 2N-1) and a column conv (2N-1 x 1) added together, then
+                                    1x1 up. The kernels are centred and 2N-1 long, so one block
+                                    gives every square a view of its whole row and column, which
+                                    is where all Tafl rules act.
                            "line3"  like "line" with a 3x3 conv before the row/column convs
                                     (local shapes and lines in one block)
-                           "thick"  like "line" with 3xN and Nx3 kernels (sees the neighbouring
-                                    rows and columns too; about three times the cost of "line")
+                           "thick"  like "line" with 3 x 2N-1 and 2N-1 x 3 kernels (sees the
+                                    neighbouring rows and columns too; about three times the cost
+                                    of "line")
     bottleneck           inner width of line/line3/thick blocks as a fraction of `channels`
     squeeze_excitation   squeeze-and-excitation in "res" blocks (the old BrandubhNet had it)
     global_pool          "none", "every_other" or "all": blocks that add a bias computed from

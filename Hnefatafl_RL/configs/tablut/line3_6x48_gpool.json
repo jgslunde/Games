@@ -99,7 +99,7 @@
     "eval_mcts_sims_defender": 400,
     "eval_c_puct": 1.5,
     "eval_fpu_reduction": -0.25,
-    "eval_temperature": 0.65,
+    "eval_temperature": 1.0,
     "eval_temperature_mode": "fixed",
     "eval_temperature_threshold": 20,
     "eval_temperature_decay_moves": 20,

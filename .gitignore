@@ -132,6 +132,8 @@ dmypy.json
 Hnefatafl_RL/checkpoints*/
 RL_tictactoe/checkpoints*/
 RL_tictactoe/.RL_venv/
+*_venv/
+*.pth
 
 # Compiled C++ binaries
 Hnefatafl/CppBitBoard/Hnefatafl7x7
