@@ -15,6 +15,7 @@ from collections import defaultdict
 import math
 
 from brandubh import Brandubh
+from features import FeatureSpec, build_features
 from network import StateHistory
 
 
@@ -208,7 +209,8 @@ class MCTS:
                  device: str = 'cpu', dirichlet_alpha: float = 0.3, 
                  dirichlet_epsilon: float = 0.25, add_dirichlet_noise: bool = False,
                  move_encoder_class=None, fpu_reduction: float = -0.5,
-                 search_discount: float = 1.0, history_length: int = 1):
+                 search_discount: float = 1.0, history_length: int = 1,
+                 feature_spec: Optional[FeatureSpec] = None):
         """
         Initialize MCTS.
         
@@ -221,14 +223,18 @@ class MCTS:
             dirichlet_epsilon: weight of Dirichlet noise at root
             add_dirichlet_noise: whether to add exploration noise
             move_encoder_class: MoveEncoder class for encoding/decoding moves
-                               (if None, imports from network module for backward compatibility)
+                               (if None, the encoder of the game's board size is used)
             fpu_reduction: First Play Urgency reduction relative to parent's Q-value (default: -0.5)
                           Negative = pessimistic (unvisited nodes look worse than parent)
                           This follows Leela Chess Zero's implementation
             search_discount: Discount factor applied per move during value backup (default: 1.0 = no discount)
                             Values < 1 make the network prefer shorter paths to victory
             history_length: Number of timesteps of game history to include in network input (default: 1)
-                           When > 1, the network receives T*3 + 1 input planes instead of 4
+                           When > 1, the network receives T*3 + 1 input planes instead of 4.
+                           Ignored when feature_spec is given.
+            feature_spec: The input planes the network expects (features.FeatureSpec). Networks
+                          built by tafl_network carry it as network.feature_spec. Default: the
+                          piece planes of `history_length` positions and the player plane.
         """
         self.network = network
         # Inference needs the BatchNorm running statistics; in training mode every search would use
@@ -243,7 +249,10 @@ class MCTS:
         self.move_encoder_class = move_encoder_class
         self.fpu_reduction = fpu_reduction
         self.search_discount = search_discount
-        self.history_length = history_length
+        if feature_spec is None:
+            feature_spec = FeatureSpec(history_length=history_length)
+        self.feature_spec = feature_spec
+        self.history_length = feature_spec.history_length
         
         # Performance tracking
         self.timing_stats = {
@@ -387,30 +396,16 @@ class MCTS:
             policy_probs: probability distribution over legal_moves (same order)
             value: estimated value for current player
         """
-        # Get MoveEncoder class (backward compatible)
+        # Get MoveEncoder class: the given one, else the encoder of this board size
         if self.move_encoder_class is None:
-            # Try to infer from network module name
-            network_module = self.network.__class__.__module__
-            if 'tablut' in network_module.lower():
-                from network_tablut import TablutMoveEncoder
-                move_encoder = TablutMoveEncoder
-            elif 'hnefatafl' in network_module.lower():
-                from network_hnefatafl import HnefataflMoveEncoder
-                move_encoder = HnefataflMoveEncoder
-            else:
-                from network import MoveEncoder
-                move_encoder = MoveEncoder
-        else:
-            move_encoder = self.move_encoder_class
-        
-        # Get state representation
-        if state_history is not None and self.history_length > 1:
-            # Use history planes. The history already ends with this position (search() pushed it), so it
-            # gives the same layout as the training states: [current, previous, ..., player plane].
-            state = state_history.get_state_with_history(game.current_player)
-        else:
-            # Standard single-state input (backward compatible)
-            state = game.get_state()
+            from games import game_spec_for_board
+            self.move_encoder_class = game_spec_for_board(game.board.shape[0]).move_encoder_class
+        move_encoder = self.move_encoder_class
+
+        # The network input. With history planes the history already ends with this position
+        # (search() pushed it), so this gives the same layout as the training states.
+        state = build_features(game, self.feature_spec,
+                               state_history if self.history_length > 1 else None)
         
         state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)
         

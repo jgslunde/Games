@@ -4,10 +4,10 @@
 
 | Purpose | Brandubh (7x7) | Tablut (9x9) | Shared/Generic |
 |---------|----------------|--------------|----------------|
-| Game Logic | `brandubh.py` | `tablut.py` | - |
-| Neural Network | `network.py` (BrandubhNet, MoveEncoder) | `network_tablut.py` (TablutNet, TablutMoveEncoder) | - |
+| Game Logic | `brandubh.py` | `tablut.py` | `games.py` (registry of all variants) |
+| Neural Network | `network.py` (legacy BrandubhNet, MoveEncoder) | `network_tablut.py` (legacy TablutNet, TablutMoveEncoder) | **`tafl_network.py`** (configurable network for all boards, see `network_config.py`, `features.py`, NETWORK_ARCHITECTURES.md) |
 | Agent | - | - | **`agent.py` (Agent, RandomAgent, MCTSAgent)** |
-| Training Script | `train_brandubh.py` | `train_tablut.py` | `train.py` (generic pipeline) |
+| Training config | `configs/brandubh/*.json` | `configs/tablut/*.json` | `run_training.py` + `train.py` (generic pipeline) |
 | Tests | `test_brandubh.py` | `test_tablut.py` | - |
 
 **Note:** The `agent.py` module is now completely generic and works with both games!
@@ -49,7 +49,7 @@ from agent import TablutAgent    # Same as Agent
 python gui_play.py --game brandubh --checkpoint checkpoints/best_model.pth
 
 # Training
-python train_brandubh.py --checkpoint-dir checkpoints
+python run_training.py configs/brandubh/baseline.json --checkpoint-dir checkpoints
 ```
 
 ### Tablut (9x9)
@@ -58,7 +58,7 @@ python train_brandubh.py --checkpoint-dir checkpoints
 python gui_play.py --game tablut --checkpoint checkpoints_tablut/best_model.pth
 
 # Training
-python train_tablut.py --checkpoint-dir checkpoints_tablut
+python run_training.py configs/tablut/baseline.json --checkpoint-dir checkpoints_tablut
 ```
 
 ## Key Constants

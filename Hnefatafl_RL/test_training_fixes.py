@@ -521,10 +521,12 @@ def test_gui_reads_checkpoint_settings():
     os.environ.setdefault('SDL_VIDEODRIVER', 'dummy')  # no window needed
     from network_tablut import TablutNet
     from gui_play import TaflGUI
+    from network_config import NetworkConfig
     config = TrainingConfig()
     config.checkpoint_dir = tempfile.mkdtemp()
-    config.board_size, config.throne_enabled, config.max_game_length = 9, False, 3
-    config.num_res_blocks, config.num_channels, config.eval_mcts_sims_attacker = 1, 8, 5
+    config.game, config.throne_enabled, config.max_game_length = "tablut", False, 3
+    config.network = NetworkConfig(arch="legacy", channels=8, blocks=1, policy_head="dense", value_head="dense")
+    config.eval_mcts_sims_attacker = 5
     config.eval_c_puct, config.search_discount = 1.5, 0.99
     network = TablutNet(1, 8)
     save_checkpoint(network, torch.optim.AdamW(network.parameters()), 1, config, {}, 'tablut.pth')

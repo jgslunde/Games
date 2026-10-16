@@ -1,0 +1,109 @@
+{
+  "name": "hnefatafl: 6 line blocks x 64, global-pool bias in every other block, conv policy, pooled value",
+  "game": {
+    "game": "hnefatafl",
+    "king_capture_pieces": 4,
+    "king_can_capture": true,
+    "throne_is_hostile": true,
+    "throne_enabled": true,
+    "max_game_length": 500
+  },
+  "network": {
+    "arch": "tafl",
+    "channels": 64,
+    "blocks": [
+      "line",
+      "line",
+      "line",
+      "line",
+      "line",
+      "line"
+    ],
+    "global_pool": "every_other",
+    "global_pool_channels": 16,
+    "bottleneck": 0.5,
+    "tie_blocks": false,
+    "squeeze_excitation": false,
+    "policy_head": "conv",
+    "value_head": "pooled",
+    "value_hidden": 64,
+    "value_pool_channels": 16,
+    "features": {
+      "history_length": 1,
+      "constant_planes": true,
+      "mobility_planes": false,
+      "region_plane": false
+    }
+  },
+  "self_play": {
+    "num_iterations": 1000,
+    "num_games_per_iteration": 512,
+    "num_mcts_sims_attacker": 300,
+    "num_mcts_sims_defender": 300,
+    "c_puct": 1.4,
+    "fpu_reduction": -0.5,
+    "search_discount": 1.0,
+    "temperature": 1.0,
+    "temperature_mode": "decay",
+    "temperature_threshold": 15,
+    "temperature_decay_moves": 60,
+    "add_dirichlet_noise": true,
+    "dirichlet_alpha": 0.3,
+    "dirichlet_epsilon": 0.25,
+    "use_random_opening_moves": false,
+    "use_dynamic_sim_balancing": false,
+    "dynamic_sim_adjustment_rate": 0.1,
+    "dynamic_sim_min_win_rate": 0.2,
+    "reward_discount": 0.98,
+    "track_unique_states": false
+  },
+  "training": {
+    "batch_size": 256,
+    "num_epochs": 20,
+    "batches_per_epoch": 100,
+    "learning_rate": 0.001,
+    "lr_decay": 0.99,
+    "lr_floor": 1e-06,
+    "use_stepping_lr": false,
+    "lr_step_iterations": [],
+    "lr_step_values": [],
+    "weight_decay": 0.0001,
+    "value_loss_weight": 40.0,
+    "use_dynamic_boosting": false,
+    "dynamic_boost_alpha": 0.1,
+    "dynamic_boost_min": 0.2,
+    "dynamic_boost_max": 5.0,
+    "attacker_win_loss_boost": 1.0,
+    "draw_penalty_attacker": 0.0,
+    "draw_penalty_defender": 0.0
+  },
+  "replay_buffer": {
+    "replay_buffer_size": 40000000,
+    "min_buffer_size": 2560,
+    "use_data_augmentation": true
+  },
+  "evaluation": {
+    "eval_games": 128,
+    "eval_win_rate": 0.65,
+    "eval_frequency": 4,
+    "eval_mcts_sims_attacker": 300,
+    "eval_mcts_sims_defender": 300,
+    "eval_c_puct": 1.4,
+    "eval_fpu_reduction": -0.5,
+    "eval_temperature": 1.0,
+    "eval_temperature_mode": "fixed",
+    "eval_temperature_threshold": 20,
+    "eval_temperature_decay_moves": 60,
+    "eval_vs_random_games": 64,
+    "eval_vs_random_frequency": 2
+  },
+  "system": {
+    "num_workers": null,
+    "device": "cpu",
+    "temp_dir": null,
+    "checkpoint_dir": "checkpoints_hnefatafl/line_6x64_gpool",
+    "save_frequency": 1,
+    "log_frequency": 1,
+    "verbose": true
+  }
+}
