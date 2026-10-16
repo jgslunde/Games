@@ -41,8 +41,24 @@ def load_checkpoint(checkpoint_path, board_size=None):
 
 
 def export_to_onnx(network, output_path, board_size, num_planes, opset_version=12):
-    """Export the network; the batch axis is dynamic, the input is [batch, num_planes, N, N]."""
+    """
+    Export the network; the batch axis is dynamic, the input is [batch, num_planes, N, N].
+
+    Weights and BatchNorm statistics below the smallest normal float32 (about 1.2e-38) are set to 0
+    first (in place). Such "subnormal" numbers make CPUs 10-100x slower unless the program flushes
+    them to zero, which training does but WebAssembly in the browser cannot. Zeroing them changes
+    the outputs by far less than float32 precision.
+    """
     print(f"\nExporting to ONNX format...")
+    tiny = torch.finfo(torch.float32).tiny
+    flushed = 0
+    with torch.no_grad():
+        for tensor in list(network.parameters()) + list(network.buffers()):
+            if tensor.is_floating_point():
+                subnormal = (tensor != 0) & (tensor.abs() < tiny)
+                flushed += int(subnormal.sum())
+                tensor[subnormal] = 0.0
+    print(f"  Subnormal weights set to 0: {flushed}")
     dummy_input = torch.randn(1, num_planes, board_size, board_size)
     torch.onnx.export(
         network,
@@ -91,7 +107,13 @@ def write_model_info(network, net_config, checkpoint, board_size, onnx_path):
         'network_description': describe_network(network),
         'num_parameters': count_parameters(network),
         'rules': {name: config[name] for name in rule_names if name in config},
-        'search_discount': config.get('search_discount'),
+        # The search settings of the training run's evaluation games (None if the checkpoint is too
+        # old to record them). An unvisited move is valued at the mean value of its parent node,
+        # seen by the player to move there, plus fpu_reduction (negative = pessimistic). During
+        # backup the value is multiplied by -discount at every ply, as the training targets were.
+        'search': {'c_puct': config.get('eval_c_puct'),
+                   'fpu_reduction': config.get('eval_fpu_reduction'),
+                   'discount': config.get('search_discount')},
         'run_name': config.get('name'),
         'iteration': checkpoint.get('iteration'),
     }
