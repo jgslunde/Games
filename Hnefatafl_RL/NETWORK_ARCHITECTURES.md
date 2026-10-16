@@ -22,8 +22,9 @@ nodes per move.
   These numbers are for line kernels only N long. The 2N-1 kernels now used cost about 1.5x more
   per line network in PyTorch (section 4), so the speed advantage in self-play is now 1.2x to 1.8x.
   Playing strength is not measured yet; that is what the configs in section 5 are for.
-- Transformers, dilated kernels, 5x5 kernels, depthwise convolutions and squeeze-excitation were
-  considered and rejected for this setup (section 3).
+- Dilated kernels, 5x5 kernels, depthwise convolutions and squeeze-excitation were considered and
+  rejected for this setup (section 3). A pure transformer was rejected too, but an `attention`
+  block exists for hybrids: one Hnefatafl config replaces two of its ten line blocks with it.
 
 ## 2. What the network has to compute
 
@@ -70,6 +71,7 @@ the network the answer directly.
 | dilated 3x3 | taps two squares apart | skips squares, so it cannot check "nothing in between" | rejected |
 | depthwise separable | 8 neighbours, 4x to 8x fewer multiply-adds | only 30 % faster in practice, worse per multiply-add than line blocks | rejected |
 | transformer (attention over squares) | any square | right for a large GPU network (Leela Chess Zero); at this size and batch 1 it is 2x to 6x slower per evaluation than a line network with the same parameters, and it has to learn the line structure that the line kernel has built in | rejected for the browser |
+| `attention`: self-attention over the squares with a learned bias per (row, column) offset, then a feed-forward layer | any square, also diagonally and far away | a few of them among line blocks: whole-board shapes such as a ring of attackers in one step; written out by hand so it exports to ONNX opset 12 | two of them cost ~1.6 ms more than two line blocks (11x11, PyTorch) |
 
 The browser costs in this table were measured with line kernels only N long; the 2N-1 kernels make
 `line`, `line3` and `thick` dearer (section 4).
@@ -180,6 +182,7 @@ configs.
 | hnefatafl | `baseline` | 8x64 res, dense heads, 4 planes | 1,786,367 | the reference: an old-style network with the same settings |
 | hnefatafl | `line_10x64_gpool` | 10 line blocks x 64, global pool, 7 planes | 509,323 | the main run; depth for encirclement, 1.2x faster than the baseline |
 | hnefatafl | `line_10x64_gpool_mobility_region` | line_10x64_gpool + reach planes + king-region plane, 11 planes | 511,627 | the encirclement question answered by the engine (+0.3 ms per node) |
+| hnefatafl | `line_10x64_gpool_attention` | line_10x64_gpool with blocks 4 and 8 as attention blocks, 7 planes | 485,075 | whole-board shapes learned instead of computed; 8.2 ms per call against 6.6 ms |
 
 Not in the configs, but one `--set` away: `network.policy_head=bilinear`,
 `network.tie_blocks=true`, `network.features.history_length=4`, `network.blocks=["thick",...]`,

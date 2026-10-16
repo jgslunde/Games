@@ -347,10 +347,11 @@ def test_corner_is_hostile():
     
     # Defender should be captured against the board edge or we need attacker on other side
     # Let's simplify and just verify corner acts as hostile in _is_hostile_square
-    assert game._is_hostile_square(0, 0), "Corner (0,0) should be hostile"
-    assert game._is_hostile_square(0, 8), "Corner (0,8) should be hostile"
-    assert game._is_hostile_square(8, 0), "Corner (8,0) should be hostile"
-    assert game._is_hostile_square(8, 8), "Corner (8,8) should be hostile"
+    for target in (ATTACKER, DEFENDER):
+        assert game._is_hostile_square(0, 0, target), "Corner (0,0) should be hostile"
+        assert game._is_hostile_square(0, 8, target), "Corner (0,8) should be hostile"
+        assert game._is_hostile_square(8, 0, target), "Corner (8,0) should be hostile"
+        assert game._is_hostile_square(8, 8, target), "Corner (8,8) should be hostile"
     
     print("✓ Corner is hostile test passed")
 
@@ -359,8 +360,12 @@ def test_throne_is_hostile():
     """Test throne_is_hostile rule."""
     game = Tablut(throne_is_hostile=True, throne_enabled=True)
     
-    # Throne should be hostile
-    assert game._is_hostile_square(4, 4), "Throne should be hostile when throne_is_hostile=True"
+    # The empty throne is hostile to defenders when throne_is_hostile=True (to attackers always);
+    # an occupied throne is never hostile
+    assert not game._is_hostile_square(4, 4, DEFENDER), "Throne with the king on it is not hostile"
+    game.board[4, 4] = EMPTY
+    assert game._is_hostile_square(4, 4, DEFENDER), "Throne should be hostile when throne_is_hostile=True"
+    assert game._is_hostile_square(4, 4, ATTACKER), "Empty throne is always hostile to attackers"
     
     # Test capture against throne
     game.board = np.zeros((9, 9), dtype=np.int8)
@@ -408,7 +413,8 @@ def test_throne_not_hostile():
     """Test throne is not hostile when throne_is_hostile=False."""
     game = Tablut(throne_is_hostile=False, throne_enabled=True)
     
-    assert not game._is_hostile_square(4, 4), "Throne should not be hostile when throne_is_hostile=False"
+    game.board[4, 4] = EMPTY
+    assert not game._is_hostile_square(4, 4, DEFENDER), "Throne should not be hostile to defenders"
     
     # Same setup as before, but defender should NOT be captured
     game.board = np.zeros((9, 9), dtype=np.int8)

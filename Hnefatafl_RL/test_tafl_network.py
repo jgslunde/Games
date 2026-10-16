@@ -146,6 +146,26 @@ def test_line_block_sees_whole_lines():
     return True
 
 
+def test_attention_block_sees_whole_board():
+    """One attention block must connect opposite corners (no convolution block can), and its
+    position bias must depend only on the offset between two squares."""
+    from tafl_network import AttentionBlock
+    torch.manual_seed(0)
+    for n in (7, 9, 11):
+        block = AttentionBlock(16, n, heads=4).eval()
+        with torch.no_grad():
+            block.position_bias.normal_()
+            x = torch.randn(1, 16, n, n)
+            changed = x.clone()
+            changed[0, :, n - 1, n - 1] += torch.randn(16)  # not a constant: layer norm removes it
+            assert not torch.allclose(block(x)[0, :, 0, 0], block(changed)[0, :, 0, 0]), f"{n}x{n}"
+        index = block.offset_index.view(n, n, n, n)
+        # Square (1, 2) -> (3, 5) has the same offset as (0, 0) -> (2, 3)
+        assert index[1, 2, 3, 5] == index[0, 0, 2, 3] and index[0, 0, 2, 3] != index[0, 0, 3, 2]
+    print("  attention blocks: one block connects opposite corners; position bias by offset")
+    return True
+
+
 ARCHITECTURES = [
     dict(channels=16, blocks=["res"] * 2, squeeze_excitation=True, policy_head="dense", value_head="dense"),
     dict(channels=16, blocks=["line"] * 2, policy_head="conv", value_head="pooled",
@@ -154,6 +174,9 @@ ARCHITECTURES = [
          value_head="pooled", features=dict(history_length=3, mobility_planes=True, region_plane=True)),
     dict(channels=16, blocks=["thick"] * 2, global_pool="all", policy_head="bilinear", policy_bilinear_dim=8),
     dict(channels=16, blocks=["line"] * 3, tie_blocks=True, global_pool="all", policy_head="conv"),
+    dict(channels=16, blocks=["line", "attention", "line"], attention_heads=4,
+         global_pool="every_other", policy_head="conv", value_head="pooled",
+         features=dict(constant_planes=True)),
 ]
 
 
@@ -264,7 +287,7 @@ def test_run_configs():
             assert data["system"]["num_workers"] is None, f"{name}: num_workers must be null"
             for section in ("game", "self_play", "training", "replay_buffer", "evaluation"):
                 assert data[section] == baseline_data[section], f"{game}/{name}: {section} differs"
-    assert found == 11
+    assert found == 12
     baseline = load_config(os.path.join(CONFIG_DIR, "brandubh", "baseline.json"))
     assert (baseline.num_mcts_sims_attacker, baseline.batch_size, baseline.network.value_hidden,
             baseline.network.squeeze_excitation, baseline.throne_enabled) == \
@@ -343,7 +366,8 @@ def test_training_end_to_end():
 if __name__ == "__main__":
     print("Testing the configurable networks, features and configs...")
     tests = [test_reach_planes_match_move_generator, test_feature_layout, test_policy_head_index_order,
-             test_line_block_sees_whole_lines, test_architectures_forward_and_onnx,
+             test_line_block_sees_whole_lines, test_attention_block_sees_whole_board,
+             test_architectures_forward_and_onnx,
              test_checkpoint_loading_and_stem_adaptation, test_run_configs,
              test_training_end_to_end]
     all_passed = True
