@@ -129,8 +129,49 @@ def main():
                        help="Device to run on (default: cpu)")
     parser.add_argument("--no-flush-denormal", action="store_true",
                        help="Disable denormal flushing (for comparison - will be slower!)")
-    
+    parser.add_argument("--network-config", type=str, default=None, metavar="JSON",
+                       help="Time one network config (a NetworkConfig JSON, or a run config with a "
+                            "'network' section) on the game's board instead of the size grid")
+    parser.add_argument("--compile", action="store_true",
+                       help="With --network-config: time the torch.compile'd network (as the self-play workers run it)")
+
     args = parser.parse_args()
+
+    if args.network_config:
+        # A single configurable network (tafl_network.py) at batch 1: the number that matters for
+        # the search in play, before the browser-side timing
+        import json
+        from network_config import NetworkConfig
+        from tafl_network import build_network, count_parameters
+        with open(args.network_config) as f:
+            data = json.load(f)
+        if 'network' in data and isinstance(data['network'], dict):
+            board_size = {'brandubh': 7, 'tablut': 9, 'hnefatafl': 11}[data.get('game', {}).get('game', args.game)]
+            data = data['network']
+        else:
+            board_size = {'brandubh': 7, 'tablut': 9, 'hnefatafl': 11}[args.game]
+        config = NetworkConfig.from_dict(data)
+        torch.set_num_threads(1)
+        network = build_network(config, board_size).eval()
+        if args.compile:
+            # As in the self-play workers: compiled kernels called from generated C++
+            from torch._inductor import config as inductor_config
+            inductor_config.cpp_wrapper = True
+            network = torch.compile(network, mode='default')
+        x = (torch.rand(args.batch_size, config.features.num_planes, board_size, board_size) < 0.2).float()
+        with torch.no_grad():
+            for _ in range(20):
+                network(x)
+            times = []
+            for _ in range(args.iterations):
+                start = time.perf_counter()
+                network(x)
+                times.append(time.perf_counter() - start)
+        print(f"{config.describe()}: {count_parameters(network):,} parameters, "
+              f"{board_size}x{board_size}, batch {args.batch_size}, 1 thread, "
+              f"{'torch.compile' if args.compile else 'eager'}: "
+              f"median {1000 * np.median(times):.3f} ms, mean {1000 * np.mean(times):.3f} ms")
+        return
     
     # Enable denormal flushing by default for fast inference
     # Denormal (subnormal) floating point numbers are 10-100x slower on CPU

@@ -31,9 +31,10 @@ from functools import partial
 from brandubh import Brandubh
 from tablut import Tablut
 from hnefatafl import Hnefatafl
-from network import BrandubhNet, MoveEncoder
-from network_tablut import TablutNet, TablutMoveEncoder
-from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
+from network import MoveEncoder
+from network_tablut import TablutMoveEncoder
+from network_hnefatafl import HnefataflMoveEncoder
+from tafl_network import load_network
 from agent import Agent
 
 
@@ -68,42 +69,30 @@ def extract_iteration_number(checkpoint_path: str) -> Optional[int]:
     return None
 
 
-def load_checkpoint(checkpoint_path: str, network_class, move_encoder_class, device: str = 'cpu'):
+def load_checkpoint(checkpoint_path: str, board_size: int, device: str = 'cpu'):
     """
-    Load a neural network from checkpoint.
-    
+    Load a neural network from checkpoint. The architecture (and the input planes it expects)
+    is read from the checkpoint, so checkpoints of different architectures can be compared.
+
     Args:
         checkpoint_path: Path to checkpoint file
-        network_class: Network class to instantiate
-        move_encoder_class: Move encoder class
+        board_size: Board size of the game
         device: Device to load on
-    
+
     Returns:
         (network, search_discount): the loaded network, and the MCTS discount it was trained with
     """
     try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-
-        # Extract config (older checkpoints stored the sizes at the top level)
-        config = checkpoint.get('config', checkpoint)
-        network = network_class(num_res_blocks=config.get('num_res_blocks', 4),
-                                num_channels=config.get('num_channels', 64),
-                                value_head_hidden_size=config.get('value_head_hidden_size', 64),
-                                history_length=config.get('history_length', 1))
-
-        # Load the weights (handle different checkpoint formats)
-        state_dict = checkpoint.get('network_state_dict') or checkpoint.get('model_state_dict') or checkpoint
-        network.load_state_dict_compatible(state_dict)
-
-        network.eval()
+        network, checkpoint = load_network(checkpoint_path, board_size=board_size, device=device)
+        config = checkpoint.get('config', {}) if isinstance(checkpoint.get('config'), dict) else {}
         return network, config.get('search_discount', 1.0)
-        
+
     except Exception as e:
         raise RuntimeError(f"Error loading checkpoint {checkpoint_path}: {e}")
 
 
 def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, network1_path: str,
-                    network2_path: str, network_class, move_encoder_class, num_simulations: int,
+                    network2_path: str, board_size: int, move_encoder_class, num_simulations: int,
                     c_puct: float, device: str = 'cpu', temperature: float = 1.0, temperature_plies: int = 10,
                     max_moves: int = 100) -> int:
     """
@@ -115,7 +104,7 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
         game_rules: Dictionary of game rules
         network1_path: Path to first checkpoint
         network2_path: Path to second checkpoint
-        network_class: Network class to instantiate
+        board_size: Board size (the networks are built from their checkpoints)
         move_encoder_class: Move encoder class
         num_simulations: MCTS simulations per move
         c_puct: MCTS exploration constant
@@ -128,9 +117,10 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
     Returns:
         0 if agent1 wins, 1 if agent2 wins, 2 if draw
     """
-    # Load networks; each agent searches with the discount its network was trained with
-    network1, search_discount1 = load_checkpoint(network1_path, network_class, move_encoder_class, device)
-    network2, search_discount2 = load_checkpoint(network2_path, network_class, move_encoder_class, device)
+    # Load networks; each agent searches with the discount its network was trained with and builds
+    # the input planes its network expects (Agent takes them from network.feature_spec or history_length)
+    network1, search_discount1 = load_checkpoint(network1_path, board_size, device)
+    network2, search_discount2 = load_checkpoint(network2_path, board_size, device)
 
     # Create agents
     agent1 = Agent(network1, num_simulations=num_simulations, c_puct=c_puct,
@@ -180,19 +170,19 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
 
 
 def play_match(checkpoint1_path: str, checkpoint2_path: str, game_class, game_rules: dict,
-              network_class, move_encoder_class, num_simulations: int, c_puct: float,
+              board_size: int, move_encoder_class, num_simulations: int, c_puct: float,
               num_games: int = 10, num_workers: int = 1, device: str = 'cpu', temperature: float = 1.0,
               temperature_plies: int = 10, max_moves: int = 100) -> Tuple[int, int, int]:
     """
     Play multiple games between two checkpoints, alternating colors.
     Uses multiprocessing to parallelize games.
-    
+
     Args:
         checkpoint1_path: Path to first checkpoint
         checkpoint2_path: Path to second checkpoint
         game_class: Game class to instantiate
         game_rules: Dictionary of game rules
-        network_class: Network class to instantiate
+        board_size: Board size of the game
         move_encoder_class: Move encoder class
         num_simulations: MCTS simulations per move
         c_puct: MCTS exploration constant
@@ -217,7 +207,7 @@ def play_match(checkpoint1_path: str, checkpoint2_path: str, game_class, game_ru
         game_rules=game_rules,
         network1_path=checkpoint1_path,
         network2_path=checkpoint2_path,
-        network_class=network_class,
+        board_size=board_size,
         move_encoder_class=move_encoder_class,
         num_simulations=num_simulations,
         c_puct=c_puct,
@@ -499,17 +489,14 @@ def main():
     # Select game configuration
     if args.game == "tablut":
         game_class = Tablut
-        network_class = TablutNet
         move_encoder_class = TablutMoveEncoder
         board_size = 9
     elif args.game == "hnefatafl":
         game_class = Hnefatafl
-        network_class = HnefataflNet
         move_encoder_class = HnefataflMoveEncoder
         board_size = 11
     else:  # brandubh
         game_class = Brandubh
-        network_class = BrandubhNet
         move_encoder_class = MoveEncoder
         board_size = 7
     
@@ -644,7 +631,7 @@ def main():
                 checkpoint2_path=checkpoint2,
                 game_class=game_class,
                 game_rules=game_rules,
-                network_class=network_class,
+                board_size=board_size,
                 move_encoder_class=move_encoder_class,
                 num_simulations=args.simulations,
                 c_puct=args.c_puct,

@@ -1,8 +1,8 @@
 """
 Self-play training loop for Tafl-style games using AlphaZero.
 
-This is a generic training module that can be used with different board sizes
-and game variants. For Brandubh (7x7), use train_brandubh.py.
+This is a generic training module for all board sizes and game variants. Runs are started with
+run_training.py and a JSON config (see run_config.py and the configs/ directory).
 
 Implements the complete AlphaZero training pipeline:
 - Self-play game generation with MCTS
@@ -11,10 +11,8 @@ Implements the complete AlphaZero training pipeline:
 - Model evaluation and checkpointing
 - Data augmentation (symmetries)
 
-To use with a different game:
-1. Create a game class similar to Brandubh with the same interface
-2. Create a network class that takes board_size as a parameter
-3. Create a training script that configures TrainingConfig and calls train()
+The game variant (games.py) and the network architecture (network_config.py, tafl_network.py)
+are both chosen by the TrainingConfig, so no game-specific training script is needed.
 """
 
 import os
@@ -39,149 +37,14 @@ except ImportError:
     print("ERROR: PyTorch is required for training. Install with: pip install torch")
     exit(1)
 
-from network import BrandubhNet
+import torch.nn as nn
+
 from agent import Agent
-
-
-# =============================================================================
-# TRAINING HYPERPARAMETERS
-# =============================================================================
-
-class TrainingConfig:
-    """Configuration for training."""
-    
-    # Game and architecture configuration (set these when initializing)
-    game_class = None                 # Game class (e.g., Brandubh)
-    network_class = None              # Network class (e.g., BrandubhNet)
-    agent_class = None                # Agent class (e.g., BrandubhAgent)
-    move_encoder_class = None         # Move encoder class (e.g., MoveEncoder)
-    board_size = 7                    # Board size (e.g., 7 for Brandubh)
-    
-    # Computed properties (derived from board_size)
-    @property
-    def num_squares(self):
-        return self.board_size * self.board_size
-    
-    @property
-    def policy_size(self):
-        """Policy size: num_squares * 4 directions * (board_size-1) max distance"""
-        return self.num_squares * 4 * (self.board_size - 1)
-    
-    # Game rules (tunable)
-    king_capture_pieces = 2           # Pieces required to capture king (2, 3, or 4)
-    king_can_capture = True           # Whether king can help capture enemy pieces
-    throne_is_hostile = False         # Whether throne counts as hostile square for captures
-    throne_enabled = True             # Whether throne exists and blocks non-king movement
-    
-    # Self-play
-    num_iterations = 100              # Number of training iterations
-    num_games_per_iteration = 100     # Self-play games per iteration
-    num_mcts_simulations = 100        # MCTS simulations per move (deprecated, use attacker/defender specific)
-    num_mcts_sims_attacker = 100      # MCTS simulations for attacker in self-play
-    num_mcts_sims_defender = 100      # MCTS simulations for defender in self-play
-    c_puct = 1.4                      # MCTS exploration constant for self-play
-    fpu_reduction = -0.5              # First Play Urgency for self-play: reduction relative to parent Q-value (default: -0.5, like Leela Chess Zero)
-    search_discount = 1.0             # Search depth discount per move during MCTS backup (1.0 = no discount)
-    num_workers = mp.cpu_count()      # Number of parallel workers (default: all CPUs)
-    
-    # Dynamic simulation balancing (keeps each side's score, draws counting half, at or above a minimum)
-    use_dynamic_sim_balancing = False # Dynamically adjust attacker/defender simulation counts to balance win rates
-    dynamic_sim_adjustment_rate = 0.1 # Fraction of win rate difference used for adjustment (default: 0.1 = 10%)
-    dynamic_sim_min_win_rate = 0.2    # Keep each side's score >= this (band [x, 1-x]); 0.5 = push towards 50%
-    
-    # Temperature (exploration during self-play)
-    temperature = 1.0                 # Sampling temperature for moves
-    temperature_mode = "king"         # "fixed": drop at threshold, "king": drop when king leaves, "decay": linear decay
-    temperature_threshold = 15        # Move number after which temperature = 0 (for "fixed" mode)
-    temperature_decay_moves = 30      # Number of moves for linear decay (for "decay" mode)
-    
-    # Temperature (for network evaluation games)
-    eval_temperature = 0.0            # Temperature for evaluation games (0 = deterministic)
-    eval_temperature_mode = "fixed"   # "fixed", "king", or "decay"
-    eval_temperature_threshold = 0    # Move threshold for eval temperature (for "fixed" mode)
-    eval_temperature_decay_moves = 0  # Decay moves for eval (for "decay" mode)
-    
-    # Dirichlet noise (exploration during self-play)
-    add_dirichlet_noise = True        # Add Dirichlet noise to root for exploration
-    dirichlet_alpha = 0.3             # Concentration parameter (lower = more concentrated)
-    dirichlet_epsilon = 0.25          # Weight of noise (0.25 = 25% noise, 75% network priors)
-    
-    # Neural network
-    num_res_blocks = 4                # Residual blocks in network
-    num_channels = 64                 # Channels in convolutional layers
-    value_head_hidden_size = 64       # Hidden layer size in value head
-    history_length = 1                # Number of timesteps to include in network input (1 = current only)
-    
-    # Training
-    batch_size = 32                   # Training batch size
-    num_epochs = 10                   # Epochs per iteration
-    batches_per_epoch = 100           # Number of batches to sample per epoch (limits training data)
-    learning_rate = 0.001             # Initial learning rate
-    lr_decay = 0.95                   # Learning rate decay per iteration
-    lr_floor = 1e-6                   # Minimum learning rate (floor below which LR won't decay)
-    
-    # Stepping learning rate schedule (alternative to exponential decay)
-    use_stepping_lr = False           # If True, use stepping LR instead of exponential decay
-    lr_step_iterations = []           # Iterations at which to step LR (e.g., [50, 100, 150])
-    lr_step_values = []               # LR values for each step (must be len(lr_step_iterations) + 1)
-                                      # e.g., [0.001, 0.0003, 0.0001, 0.00003] for 4 regions
-    
-    weight_decay = 1e-4               # L2 regularization
-    value_loss_weight = 10.0           # Weight for value loss (policy loss weight is always 1.0)
-    
-    # Dynamic loss boosting (set use_dynamic_boosting=False to use static boost)
-    use_dynamic_boosting = True       # Use dynamic loss boosting based on win rates
-    dynamic_boost_alpha = 0.1         # Smoothing factor for win rate tracking (0-1, higher = more reactive)
-    dynamic_boost_min = 0.5           # Minimum boost factor
-    dynamic_boost_max = 3.0           # Maximum boost factor
-    attacker_win_loss_boost = 1.0     # Static boost (only used if use_dynamic_boosting=False)
-    
-    draw_penalty_attacker = 0.0       # Draw value for attackers (neutral)
-    draw_penalty_defender = 0.0       # Draw value for defenders (neutral)
-    
-    # Replay buffer
-    replay_buffer_size = 50000        # Maximum samples in replay buffer
-    min_buffer_size = 1000            # Minimum samples before training
-    use_data_augmentation = True      # Use symmetry-based data augmentation (8x data)
-    
-    # Evaluation
-    eval_games = 20                   # Games for evaluation
-    eval_win_rate = 0.55              # Win rate threshold to replace best model
-    eval_frequency = 5                # Evaluate every N iterations
-    eval_mcts_sims_attacker = 100     # MCTS simulations for attacker in evaluation
-    eval_mcts_sims_defender = 100     # MCTS simulations for defender in evaluation
-    eval_c_puct = 1.4                 # MCTS exploration constant for evaluation
-    eval_fpu_reduction = -0.5         # First Play Urgency for evaluation: reduction relative to parent Q-value
-    
-    # Random baseline evaluation
-    eval_vs_random_games = 10         # Games vs random (per color)
-    eval_vs_random_frequency = 1      # Evaluate vs random every N iterations
-    
-    # Checkpointing
-    checkpoint_dir = "checkpoints"    # Directory for model checkpoints
-    save_frequency = 5                # Save model every N iterations
-    
-    # Device
-    device = "cpu"  # Force CPU for multiprocessing compatibility
-    
-    # Temporary file directory (for PyTorch compilation cache and checkpoint transfers)
-    temp_dir = None                   # None = use system default (/tmp), or specify path (e.g., "/dev/shm" for RAM disk)
-    
-    # Logging
-    log_frequency = 1                 # Log every N iterations
-    verbose = True                    # Print detailed logs
-    
-    # Board state diversity analysis
-    track_unique_states = False       # Track unique board states encountered during self-play (adds overhead)
-    
-    # Random opening moves
-    use_random_opening_moves = False  # In 50% of games, play 1-4 random moves (2-8 ply) before MCTS
-    
-    # Game length limit
-    max_game_length = 500             # Maximum moves before declaring draw
-    
-    # Time-weighted rewards (discounting future rewards)
-    reward_discount = 0.98            # Discount factor per move (1.0 = no discount)
+from features import build_features
+from games import game_spec
+from network_config import NetworkConfig
+from run_config import TrainingConfig, save_config  # TrainingConfig lives in run_config.py (JSON form there)
+from tafl_network import build_network, load_weights, describe_network
 
 
 # =============================================================================
@@ -604,23 +467,21 @@ def _play_self_play_game_worker_wrapper(args):
     return _play_self_play_game_worker(*args)
 
 
-def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
+def _play_self_play_game_worker(network_path, network_config, game_name,
                                 num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_mode,
                                 temperature_threshold, temperature_decay_moves, game_idx,
-                                king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled, board_size,
-                                network_module, network_class_name, game_module, game_class_name,
+                                king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled,
                                 add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, fpu_reduction, temp_dir=None,
                                 track_unique_states=False, use_random_opening_moves=False, max_game_length=500,
-                                search_discount=1.0, history_length=1):
+                                search_discount=1.0):
     """
     Worker function for parallel self-play game generation.
     Must be at module level for multiprocessing. Imports torch inside to avoid pickling issues.
-    
+
     Args:
         network_path: Path to saved network weights file
-        num_res_blocks: Number of residual blocks in network
-        num_channels: Number of channels in network
-        value_head_hidden_size: Hidden layer size in value head
+        network_config: NetworkConfig.to_dict() of the network (architecture and input planes)
+        game_name: Game variant name (see games.py); gives the game class, board size and move encoder
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
@@ -633,11 +494,6 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         king_can_capture: Whether king can capture
         throne_is_hostile: Whether throne is hostile for captures
         throne_enabled: Whether throne exists and blocks movement
-        board_size: Size of game board
-        network_module: Module name for network (e.g., 'network', 'network_tablut')
-        network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
-        game_module: Module name for game (e.g., 'brandubh', 'tablut')
-        game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
         add_dirichlet_noise: Whether to add Dirichlet noise for exploration
         dirichlet_alpha: Concentration parameter for Dirichlet noise
         dirichlet_epsilon: Weight of Dirichlet noise (0-1)
@@ -647,8 +503,7 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         use_random_opening_moves: If True, 50% of games start with 1-4 random moves (2-8 ply)
         max_game_length: Maximum number of moves before declaring draw
         search_discount: Discount factor per move during MCTS value backup (1.0 = no discount)
-        history_length: Number of timesteps for history planes in network input (1 = current only)
-    
+
     Returns:
         dict with game data and MCTS timing information
     """
@@ -687,52 +542,37 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                                         f'torchinductor_{socket.gethostname()}_{os.getpid()}')
         os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
         
-        # Import dynamically based on config
-        import importlib
-        game_mod = importlib.import_module(game_module)
-        GameClass = getattr(game_mod, game_class_name)
-        
-        network_mod = importlib.import_module(network_module)
-        NetworkClass = getattr(network_mod, network_class_name)
-        
-        # Import MoveEncoder from the same network module
-        # For Brandubh: MoveEncoder from network.py
-        # For Tablut: TablutMoveEncoder from network_tablut.py
-        # For Hnefatafl: HnefataflMoveEncoder from network_hnefatafl.py
-        if 'hnefatafl' in network_module.lower():
-            MoveEncoderClass = getattr(network_mod, 'HnefataflMoveEncoder')
-        elif 'tablut' in network_module.lower():
-            MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
-        else:
-            MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
-        
+        # Game variant, network architecture and input planes from the config
+        spec = game_spec(game_name)
+        GameClass, MoveEncoderClass, board_size = spec.game_class, spec.move_encoder_class, spec.board_size
+        net_config = NetworkConfig.from_dict(network_config)
+        feature_spec = net_config.features
+
         from mcts import MCTS
-        
+
         # Reconstruct network on CPU and load from file
-        network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels, 
-                             value_head_hidden_size=value_head_hidden_size,
-                             history_length=history_length)
+        network = build_network(net_config, board_size)
         checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
-        network.load_state_dict_compatible(checkpoint['model_state_dict'])
+        load_weights(network, checkpoint)
         network.to('cpu')
         network.eval()
-        
+
         # Optimize for CPU inference with compilation for 2.5-2.75x speedup
         # Each worker has its own cache directory, so no contention
         network = network.optimize_for_inference(use_compile=True, compile_mode='default')
-        
+
         # Create MCTS instances for each player (with different simulation counts)
         # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
-        mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu', 
+        mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu',
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
                             dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
                             fpu_reduction=fpu_reduction, search_discount=search_discount,
-                            history_length=history_length)
+                            feature_spec=feature_spec)
         mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu',
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
                             dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
                             fpu_reduction=fpu_reduction, search_discount=search_discount,
-                            history_length=history_length)
+                            feature_spec=feature_spec)
         mcts_attacker.reset_timing_stats()
         mcts_defender.reset_timing_stats()
         
@@ -754,9 +594,9 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
         
         # Initialize state history for history planes support
         # Import StateHistory from network module
-        if history_length > 1:
+        if feature_spec.history_length > 1:
             from network import StateHistory
-            state_history = StateHistory(history_length=history_length, board_size=board_size)
+            state_history = StateHistory(history_length=feature_spec.history_length, board_size=board_size)
             state_history.push(game.get_piece_planes())
         else:
             state_history = None
@@ -812,14 +652,8 @@ def _play_self_play_game_worker(network_path, num_res_blocks, num_channels, valu
                 # Drop temperature after a fixed number of moves
                 temp = temperature if move_count < temperature_threshold else 0.0
             
-            # Get state for training
-            # If using history planes, get full state with history; otherwise use simple state
-            if state_history is not None:
-                # Get state with history planes (history_length * 3 + 1 channels)
-                state = state_history.get_state_with_history(game.current_player)
-            else:
-                # Standard 4-channel state (backward compatible)
-                state = game.get_state()
+            # The network input of this position (the same planes the search builds)
+            state = build_features(game, feature_spec, state_history)
             
             # Check for mate-in-1 (winning move in current position)
             mate_in_1_move = None
@@ -1021,18 +855,16 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
     
     try:
         # Worker arguments for up to 2 * num_games_per_iteration games (only the first N finished are used)
-        worker_args = [(temp_network_path, config.num_res_blocks, config.num_channels, config.value_head_hidden_size,
+        network_config = config.network.to_dict()
+        worker_args = [(temp_network_path, network_config, config.game,
                         num_sims_attacker, num_sims_defender,
                         config.c_puct, config.temperature, config.temperature_mode,
                         config.temperature_threshold, config.temperature_decay_moves,
                         game_idx, config.king_capture_pieces, config.king_can_capture,
-                        config.throne_is_hostile, config.throne_enabled, config.board_size,
-                        config.network_class.__module__, config.network_class.__name__,
-                        config.game_class.__module__, config.game_class.__name__,
+                        config.throne_is_hostile, config.throne_enabled,
                         config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
                         config.fpu_reduction, config.temp_dir, config.track_unique_states,
-                        config.use_random_opening_moves, config.max_game_length, config.search_discount,
-                        config.history_length)
+                        config.use_random_opening_moves, config.max_game_length, config.search_discount)
                        for game_idx in range(2 * config.num_games_per_iteration)]
 
         # Play games in parallel. imap_unordered with chunksize=1 hands out one game at a time, and once
@@ -1229,8 +1061,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
 # TRAINING
 # =============================================================================
 
-def train_network(network: BrandubhNet, buffer: ReplayBuffer, 
-                  optimizer: optim.Optimizer, config: TrainingConfig, 
+def train_network(network: nn.Module, buffer: ReplayBuffer,
+                  optimizer: optim.Optimizer, config: TrainingConfig,
                   attacker_boost: float = 1.0, defender_boost: float = 1.0) -> Dict[str, float]:
     """
     Train the neural network on samples from the replay buffer.
@@ -1510,30 +1342,23 @@ def train_network(network: BrandubhNet, buffer: ReplayBuffer,
 # EVALUATION
 # =============================================================================
 
-def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value_head_hidden_size,
+def _evaluate_vs_random_worker(network_path, network_config, game_name,
                                 num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
-                                network_module, network_class_name, game_module, game_class_name, fpu_reduction=-0.5,
-                                history_length=1, rules=None, max_moves=500, search_discount=1.0):
+                                fpu_reduction=-0.5, rules=None, max_moves=500, search_discount=1.0):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
-    
+
     Args:
         network_path: Path to saved network weights file
-        num_res_blocks: Number of residual blocks
-        num_channels: Number of channels
-        value_head_hidden_size: Hidden layer size in value head
+        network_config: NetworkConfig.to_dict() of the network
+        game_name: Game variant name (see games.py)
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         nn_plays_attacker: Whether NN plays as attacker
         game_idx: Game index (unused, for pool.map)
-        network_module: Module name for network (e.g., 'network', 'network_tablut')
-        network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
-        game_module: Module name for game (e.g., 'brandubh', 'tablut')
-        game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
         fpu_reduction: First Play Urgency reduction relative to parent Q-value (for evaluation)
-        history_length: Number of timesteps for history planes in network input
         rules: Game-rule keyword arguments for the game class (same rules as self-play)
         max_moves: Plies after which the game is a draw (same limit as self-play)
         search_discount: MCTS backup discount per move (same as self-play)
@@ -1560,48 +1385,33 @@ def _evaluate_vs_random_worker(network_path, num_res_blocks, num_channels, value
                                     f'torchinductor_{socket.gethostname()}_{os.getpid()}')
     os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
-    # Import dynamically based on config
-    import importlib
-    game_mod = importlib.import_module(game_module)
-    GameClass = getattr(game_mod, game_class_name)
-    
-    network_mod = importlib.import_module(network_module)
-    NetworkClass = getattr(network_mod, network_class_name)
-    
-    # Import MoveEncoder from the same network module
-    # For Brandubh: MoveEncoder from network.py
-    # For Tablut: TablutMoveEncoder from network_tablut.py
-    # For Hnefatafl: HnefataflMoveEncoder from network_hnefatafl.py
-    if 'hnefatafl' in network_module.lower():
-        MoveEncoderClass = getattr(network_mod, 'HnefataflMoveEncoder')
-    elif 'tablut' in network_module.lower():
-        MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
-    else:
-        MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
-    
+    # Game variant, network architecture and input planes from the config
+    spec = game_spec(game_name)
+    GameClass, MoveEncoderClass, board_size = spec.game_class, spec.move_encoder_class, spec.board_size
+    net_config = NetworkConfig.from_dict(network_config)
+
     from agent import Agent, RandomAgent, play_game
-    
+
     # Reconstruct network on CPU and load from file
-    network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
-                         value_head_hidden_size=value_head_hidden_size,
-                         history_length=history_length)
+    network = build_network(net_config, board_size)
     checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
-    network.load_state_dict_compatible(checkpoint['model_state_dict'])
+    load_weights(network, checkpoint)
     network.to('cpu')
     network.eval()
-    
+
     # Optimize for CPU inference with compilation for 2.5-2.75x speedup
     # Each worker has its own cache directory, so no contention
     network = network.optimize_for_inference(use_compile=True, compile_mode='default')
-    
+
     # Determine which simulations to use based on NN's role
     num_simulations = num_sims_attacker if nn_plays_attacker else num_sims_defender
-    
+
     # Create agents on CPU
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     nn_agent = Agent(network, num_simulations=num_simulations,
                      c_puct=c_puct, device='cpu', move_encoder_class=MoveEncoderClass,
-                     fpu_reduction=fpu_reduction, history_length=history_length, search_discount=search_discount)
+                     fpu_reduction=fpu_reduction, feature_spec=net_config.features,
+                     search_discount=search_discount)
     random_agent = RandomAgent()
     
     # Play game
@@ -1647,7 +1457,7 @@ def calculate_elo_difference(win_rate: float) -> float:
     return elo_diff
 
 
-def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig, 
+def evaluate_vs_random(network: nn.Module, config: TrainingConfig,
                        num_games: int = 10, pool=None, temp_network_path=None) -> Dict[str, float]:
     """
     Evaluate network against random player.
@@ -1687,22 +1497,17 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
 
     try:
         # Create worker functions with partial for attacker and defender games
+        network_config = config.network.to_dict()
         worker_func_attacker = partial(
             _evaluate_vs_random_worker,
             temp_network_path,
-            config.num_res_blocks,
-            config.num_channels,
-            config.value_head_hidden_size,
+            network_config,
+            config.game,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.eval_c_puct,
             True,  # nn_plays_attacker
-            network_module=config.network_class.__module__,
-            network_class_name=config.network_class.__name__,
-            game_module=config.game_class.__module__,
-            game_class_name=config.game_class.__name__,
             fpu_reduction=config.eval_fpu_reduction,
-            history_length=config.history_length,
             rules=game_rules,
             max_moves=config.max_game_length,
             search_discount=config.search_discount
@@ -1711,19 +1516,13 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
         worker_func_defender = partial(
             _evaluate_vs_random_worker,
             temp_network_path,
-            config.num_res_blocks,
-            config.num_channels,
-            config.value_head_hidden_size,
+            network_config,
+            config.game,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.eval_c_puct,
             False,  # nn_plays_attacker
-            network_module=config.network_class.__module__,
-            network_class_name=config.network_class.__name__,
-            game_module=config.game_class.__module__,
-            game_class_name=config.game_class.__name__,
             fpu_reduction=config.eval_fpu_reduction,
-            history_length=config.history_length,
             rules=game_rules,
             max_moves=config.max_game_length,
             search_discount=config.search_discount
@@ -1793,36 +1592,29 @@ def evaluate_vs_random(network: BrandubhNet, config: TrainingConfig,
 
 
 def _evaluate_networks_worker(new_network_path, old_network_path,
-                             num_res_blocks, num_channels, value_head_hidden_size, num_sims_attacker, num_sims_defender, c_puct,
+                             network_config, game_name, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker,
-                             network_module, network_class_name, game_module, game_class_name,
                              game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_reduction, temp_dir=None,
-                             history_length=1, rules=None, max_moves=500, search_discount=1.0):
+                             rules=None, max_moves=500, search_discount=1.0):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
-    
+
     Args:
         new_network_path: Path to saved new network weights file
         old_network_path: Path to saved old network weights file
-        num_res_blocks: Number of residual blocks
-        num_channels: Number of channels
-        value_head_hidden_size: Hidden layer size in value head
+        network_config: NetworkConfig.to_dict() of both networks
+        game_name: Game variant name (see games.py)
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         new_plays_attacker: Whether new network plays as attacker
-        network_module: Module name for network (e.g., 'network', 'network_tablut')
-        network_class_name: Network class name (e.g., 'BrandubhNet', 'TablutNet')
-        game_module: Module name for game (e.g., 'brandubh', 'tablut')
-        game_class_name: Game class name (e.g., 'Brandubh', 'Tablut')
         game_idx: Game index (unused, for pool.map)
         temperature: Sampling temperature for move selection
         temperature_mode: "fixed", "king", or "decay"
         temperature_threshold: Move number for temperature drop (for "fixed" mode)
         temperature_decay_moves: Number of moves for linear decay (for "decay" mode)
         fpu_reduction: First Play Urgency reduction relative to parent Q-value (for evaluation)
-        history_length: Number of timesteps for history planes in network input
         rules: Game-rule keyword arguments for the game class (same rules as self-play)
         max_moves: Plies after which the game is a draw (same limit as self-play)
         search_discount: MCTS backup discount per move (same as self-play)
@@ -1859,67 +1651,49 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                                     f'torchinductor_{socket.gethostname()}_{os.getpid()}')
     os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
-    # Import dynamically based on config
-    import importlib
-    game_mod = importlib.import_module(game_module)
-    GameClass = getattr(game_mod, game_class_name)
-    
-    network_mod = importlib.import_module(network_module)
-    NetworkClass = getattr(network_mod, network_class_name)
-    
-    # Import MoveEncoder from the same network module
-    # For Brandubh: MoveEncoder from network.py
-    # For Tablut: TablutMoveEncoder from network_tablut.py
-    # For Hnefatafl: HnefataflMoveEncoder from network_hnefatafl.py
-    if 'hnefatafl' in network_module.lower():
-        MoveEncoderClass = getattr(network_mod, 'HnefataflMoveEncoder')
-    elif 'tablut' in network_module.lower():
-        MoveEncoderClass = getattr(network_mod, 'TablutMoveEncoder')
-    else:
-        MoveEncoderClass = getattr(network_mod, 'MoveEncoder')
-    
+    # Game variant, network architecture and input planes from the config
+    spec = game_spec(game_name)
+    GameClass, MoveEncoderClass, board_size = spec.game_class, spec.move_encoder_class, spec.board_size
+    net_config = NetworkConfig.from_dict(network_config)
+
     from agent import Agent, play_game
-    
+
     # Reconstruct networks on CPU and load from files
-    new_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
-                             value_head_hidden_size=value_head_hidden_size,
-                             history_length=history_length)
+    new_network = build_network(net_config, board_size)
     checkpoint = torch.load(new_network_path, map_location='cpu', weights_only=False)
-    new_network.load_state_dict_compatible(checkpoint['model_state_dict'])
+    load_weights(new_network, checkpoint)
     new_network.to('cpu')
     new_network.eval()
-    
+
     # Optimize for CPU inference with compilation for 2.5-2.75x speedup
     # Each worker has its own cache directory, so no contention
     new_network = new_network.optimize_for_inference(use_compile=True, compile_mode='default')
-    
-    old_network = NetworkClass(num_res_blocks=num_res_blocks, num_channels=num_channels,
-                             value_head_hidden_size=value_head_hidden_size,
-                             history_length=history_length)
+
+    old_network = build_network(net_config, board_size)
     checkpoint = torch.load(old_network_path, map_location='cpu', weights_only=False)
-    old_network.load_state_dict_compatible(checkpoint['model_state_dict'])
+    load_weights(old_network, checkpoint)
     old_network.to('cpu')
     old_network.eval()
-    
+
     # Optimize for CPU inference with compilation for 2.5-2.75x speedup
     old_network = old_network.optimize_for_inference(use_compile=True, compile_mode='default')
-    
+
     # Determine simulations based on roles
     # Both agents use role-appropriate simulation counts
     new_sims = num_sims_attacker if new_plays_attacker else num_sims_defender
     old_sims = num_sims_defender if new_plays_attacker else num_sims_attacker
-    
+
     # Create agents on CPU, without Dirichlet noise: the match measures the real players, and the
     # evaluation temperature already varies the openings.
     # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
     new_agent = Agent(new_network, num_simulations=new_sims,
                       c_puct=c_puct, device='cpu',
                       move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction,
-                      history_length=history_length, search_discount=search_discount)
+                      feature_spec=net_config.features, search_discount=search_discount)
     old_agent = Agent(old_network, num_simulations=old_sims,
                       c_puct=c_puct, device='cpu',
                       move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction,
-                      history_length=history_length, search_discount=search_discount)
+                      feature_spec=net_config.features, search_discount=search_discount)
     
     # Play game
     if new_plays_attacker:
@@ -1948,7 +1722,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
             return 0.0  # New network loses
 
 
-def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet, 
+def evaluate_networks(new_network: nn.Module, old_network: nn.Module,
                      config: TrainingConfig, pool=None, temp_new_path=None, temp_old_path=None) -> float:
     """
     Evaluate new network against old network.
@@ -2014,21 +1788,17 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
         game_rules = dict(king_capture_pieces=config.king_capture_pieces, king_can_capture=config.king_can_capture,
                           throne_is_hostile=config.throne_is_hostile, throne_enabled=config.throne_enabled)
 
+        network_config = config.network.to_dict()
         worker_func_new_attacker = partial(
             _evaluate_networks_worker,
             temp_new_path,
             temp_old_path,
-            config.num_res_blocks,
-            config.num_channels,
-            config.value_head_hidden_size,
+            network_config,
+            config.game,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.eval_c_puct,
             True,  # new_plays_attacker
-            config.network_class.__module__,
-            config.network_class.__name__,
-            config.game_class.__module__,
-            config.game_class.__name__,
             # game_idx is provided by map()
             # temperature and mode parameters below
             temperature=config.eval_temperature,
@@ -2037,27 +1807,21 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_decay_moves=config.eval_temperature_decay_moves,
             fpu_reduction=config.eval_fpu_reduction,
             temp_dir=config.temp_dir,
-            history_length=config.history_length,
             rules=game_rules,
             max_moves=config.max_game_length,
             search_discount=config.search_discount
         )
-        
+
         worker_func_new_defender = partial(
             _evaluate_networks_worker,
             temp_new_path,
             temp_old_path,
-            config.num_res_blocks,
-            config.num_channels,
-            config.value_head_hidden_size,
+            network_config,
+            config.game,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.eval_c_puct,
             False,  # new_plays_attacker
-            config.network_class.__module__,
-            config.network_class.__name__,
-            config.game_class.__module__,
-            config.game_class.__name__,
             # game_idx is provided by map()
             # temperature and mode parameters below
             temperature=config.eval_temperature,
@@ -2066,7 +1830,6 @@ def evaluate_networks(new_network: BrandubhNet, old_network: BrandubhNet,
             temperature_decay_moves=config.eval_temperature_decay_moves,
             fpu_reduction=config.eval_fpu_reduction,
             temp_dir=config.temp_dir,
-            history_length=config.history_length,
             rules=game_rules,
             max_moves=config.max_game_length,
             search_discount=config.search_discount
@@ -2156,7 +1919,7 @@ def clean_state_dict(state_dict):
     return cleaned
 
 
-def save_checkpoint(network: BrandubhNet, optimizer: optim.Optimizer,
+def save_checkpoint(network: nn.Module, optimizer: optim.Optimizer,
                    iteration: int, config: TrainingConfig,
                    metrics: Dict, filename: str = None):
     """Save model checkpoint. `metrics` is the training history so far (used on resume)."""
@@ -2169,12 +1932,14 @@ def save_checkpoint(network: BrandubhNet, optimizer: optim.Optimizer,
 
     checkpoint = {
         'iteration': iteration,
-        'model_state_dict': network.state_dict(),
+        'model_state_dict': clean_state_dict(network.state_dict()),
         'optimizer_state_dict': optimizer.state_dict(),
         'metrics': metrics,
-        # All settings, including class defaults that were not set on this instance (config.__dict__
-        # holds only the latter)
-        'config': {name: getattr(config, name) for name in dir(config) if not name.startswith('_')}
+        # All settings as one flat dict (incl. the old network keys, for older tools), the network
+        # architecture (used to rebuild the network from the checkpoint) and the JSON run config
+        'config': config.to_flat_dict(),
+        'network_config': config.network.to_dict(),
+        'run_config': config.to_dict(),
     }
 
     # Write to a temporary file and rename it, so a job killed while saving never leaves a broken
@@ -2184,12 +1949,12 @@ def save_checkpoint(network: BrandubhNet, optimizer: optim.Optimizer,
     print(f"Saved checkpoint: {filepath}")
 
 
-def load_checkpoint(filepath: str, network: BrandubhNet,
+def load_checkpoint(filepath: str, network: nn.Module,
                    optimizer: optim.Optimizer = None) -> Tuple[int, Dict]:
     """Load model checkpoint. Returns the iteration and the training history saved with it."""
     checkpoint = torch.load(filepath, weights_only=False)
 
-    network.load_state_dict_compatible(checkpoint['model_state_dict'])
+    load_weights(network, checkpoint)
 
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -2233,18 +1998,25 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     if config.temp_dir is not None:
         print(f"Using custom temp directory: {temp_dir_path}")
     
-    # Validate that required game configuration is set
-    if config.game_class is None:
-        raise ValueError("config.game_class must be set (e.g., to Brandubh)")
-    if config.network_class is None:
-        raise ValueError("config.network_class must be set (e.g., to BrandubhNet)")
-    if config.agent_class is None:
-        raise ValueError("config.agent_class must be set (e.g., to BrandubhAgent)")
-    if config.move_encoder_class is None:
-        raise ValueError("config.move_encoder_class must be set (e.g., to MoveEncoder)")
-    
+    # Validate the game name and the network config
+    config.game_spec
+    config.network.validate()
+
+    # Write the resolved configuration next to the checkpoints, so that a run's settings can be read
+    # back later. A resumed run with other settings keeps the earlier file and adds a dated one.
+    os.makedirs(config.checkpoint_dir, exist_ok=True)
+    config_path = os.path.join(config.checkpoint_dir, "run_config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            previous = json.load(f)
+        if previous != config.to_dict():
+            config_path = os.path.join(config.checkpoint_dir,
+                                       f"run_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            print(f"Settings differ from the saved run_config.json; writing them to {config_path}")
+    save_config(config, config_path)
+
     print("=" * 70)
-    print(f"{config.game_class.__name__} AlphaZero Training")
+    print(f"{config.game_class.__name__} AlphaZero Training" + (f" - {config.name}" if config.name else ""))
     print("=" * 70)
     
     # Training configuration
@@ -2272,10 +2044,10 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     
     # Network architecture
     print("\n--- Network Architecture ---")
-    print(f"Residual blocks: {config.num_res_blocks}")
-    print(f"Channels: {config.num_channels}")
-    print(f"Input: {config.history_length * 3 + 1} planes ({config.board_size}×{config.board_size}) - "
-          f"[attackers, defenders, king] x {config.history_length} time step(s) + current_player")
+    print(f"Network: {config.network.describe()}")
+    print(f"Blocks: {config.network.blocks}")
+    print(f"Input: {config.network.features.num_planes} planes ({config.board_size}×{config.board_size}): "
+          f"{', '.join(config.network.features.plane_names())}")
     print(f"Policy output: {config.policy_size} moves ({config.num_squares} squares × 4 directions × {config.board_size - 1} distances)")
     print("Value output: single scalar (win probability)")
     
@@ -2399,15 +2171,12 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     print()
     
     # Initialize network
-    network = config.network_class(num_res_blocks=config.num_res_blocks,
-                                   num_channels=config.num_channels,
-                                   value_head_hidden_size=config.value_head_hidden_size,
-                                   history_length=config.history_length).to(config.device)
-    
+    network = build_network(config.network, config.board_size).to(config.device)
+
     # Calculate and display network size
     total_params = sum(p.numel() for p in network.parameters())
     trainable_params = sum(p.numel() for p in network.parameters() if p.requires_grad)
-    print(f"Network initialized: {total_params:,} total parameters ({trainable_params:,} trainable)")
+    print(f"Network initialized: {describe_network(network)} ({trainable_params:,} trainable)")
     
     # Initialize optimizer with fused=True for faster CPU training
     # Note: fused AdamW is faster but only available on CPU/CUDA, not all devices
@@ -2451,26 +2220,23 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         # Load only weights, not optimizer state or training history
         print(f"Loading weights from {load_weights_from}")
         checkpoint = torch.load(load_weights_from, weights_only=False)
-        network.load_state_dict_compatible(checkpoint['model_state_dict'])
+        load_weights(network, checkpoint)
         print(f"Loaded weights from checkpoint (starting training from iteration 0)")
-    
+
     # Note: We do NOT compile the network here because:
     # 1. Compiled networks can't be pickled for multiprocessing
     # 2. We only need compilation speedup during training phase
     # We'll compile a separate copy for training only
-    
+
     # Initialize best network (for evaluation)
-    best_network = config.network_class(num_res_blocks=config.num_res_blocks,
-                                        num_channels=config.num_channels,
-                                        value_head_hidden_size=config.value_head_hidden_size,
-                                        history_length=config.history_length).to(config.device)
-    
+    best_network = build_network(config.network, config.board_size).to(config.device)
+
     # Load best network from best_model.pth if resuming and it exists, otherwise copy current network
     best_model_path = os.path.join(config.checkpoint_dir, 'best_model.pth')
     if resume_from is not None and os.path.exists(best_model_path):
         print(f"Loading best network from {best_model_path}")
         checkpoint = torch.load(best_model_path, map_location=config.device, weights_only=False)
-        best_network.load_state_dict_compatible(checkpoint['model_state_dict'])
+        load_weights(best_network, checkpoint)
     else:
         # Starting fresh, loading weights only, or no best model exists yet
         # Clean state dict to remove _orig_mod. prefix from compiled network
@@ -2479,7 +2245,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             print("Initialized best network with loaded weights")
     
     # Initialize replay buffer (each position is stored once and stands for its 8 symmetries)
-    state_shape = (config.history_length * 3 + 1, config.board_size, config.board_size)
+    state_shape = (config.network.features.num_planes, config.board_size, config.board_size)
     replay_buffer = ReplayBuffer(config.replay_buffer_size, state_shape, config.policy_size,
                                  8 if config.use_data_augmentation else 1)
     
@@ -2557,13 +2323,17 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         training_history = {
             'metadata': {
                 'start_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'run_name': config.name,
                 'game_type': config.game_class.__name__,
                 'board_size': config.board_size,
                 'network_architecture': {
-                    'type': config.network_class.__name__,
-                    'num_res_blocks': config.num_res_blocks,
-                    'num_channels': config.num_channels,
-                    'policy_size': config.board_size * config.board_size * 4 * (config.board_size - 1),
+                    'type': type(network).__name__,
+                    'description': config.network.describe(),
+                    'num_res_blocks': config.network.num_blocks,
+                    'num_channels': config.network.channels,
+                    'policy_size': config.policy_size,
+                    'num_parameters': total_params,
+                    'config': config.network.to_dict(),
                 },
                 'game_rules': {
                     'king_capture_pieces': config.king_capture_pieces,
@@ -2962,15 +2732,9 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
 
 
 # =============================================================================
-# MAIN (DEPRECATED - use train_brandubh.py or create a similar game-specific script)
+# MAIN
 # =============================================================================
 
-# The __main__ block has been moved to train_brandubh.py to make this module reusable
-# for different board sizes and game variants. To train Brandubh:
-#   python train_brandubh.py [OPTIONS]
-#
-# For other game variants, create a similar script that:
-#   1. Imports TrainingConfig and train from this module
-#   2. Imports your game class, network class, agent class
-#   3. Configures the TrainingConfig with game-specific settings
-#   4. Calls train(config, resume_from=...)
+# Runs are started with a JSON config:
+#   python run_training.py configs/brandubh/baseline.json [--set section.key=value ...]
+# See run_training.py, run_config.py and the configs/ directory.

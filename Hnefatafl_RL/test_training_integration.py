@@ -1,57 +1,38 @@
 """
-Test that the training integration works correctly for Hnefatafl.
-This verifies that the encoder detection logic in train.py will work.
+Test that the game registry (games.py) gives every variant the right move encoder, board size and
+legacy network class. The training workers and the tools look variants up there.
 """
 
-import importlib
+from games import GAMES, game_spec, game_spec_for_board
 
-def test_encoder_detection():
-    """Test that the encoder is correctly detected from network module name."""
-    
+
+def test_game_registry():
+    """Every variant must map to its own encoder, board size and legacy network class."""
     print("=" * 70)
-    print("Testing Encoder Detection for All Game Variants")
+    print("Testing the game registry for all variants")
     print("=" * 70)
-    print()
-    
-    # Test cases: (network_module_name, expected_encoder_class_name)
-    test_cases = [
-        ("network", "MoveEncoder"),           # Brandubh
-        ("network_tablut", "TablutMoveEncoder"),  # Tablut
-        ("network_hnefatafl", "HnefataflMoveEncoder"),  # Hnefatafl
-    ]
-    
-    for network_module, expected_encoder in test_cases:
-        print(f"Testing: {network_module}")
-        print("-" * 70)
-        
-        # Import the module
-        network_mod = importlib.import_module(network_module)
-        print(f"  Module imported: {network_mod}")
-        
-        # Apply the detection logic from train.py
-        if 'hnefatafl' in network_module.lower():
-            encoder_class_name = 'HnefataflMoveEncoder'
-        elif 'tablut' in network_module.lower():
-            encoder_class_name = 'TablutMoveEncoder'
-        else:
-            encoder_class_name = 'MoveEncoder'
-        
-        print(f"  Detection logic selected: {encoder_class_name}")
-        print(f"  Expected encoder: {expected_encoder}")
-        
-        # Get the encoder class
-        MoveEncoderClass = getattr(network_mod, encoder_class_name)
-        print(f"  Retrieved class: {MoveEncoderClass}")
-        
-        # Verify
-        assert encoder_class_name == expected_encoder, \
-            f"Expected {expected_encoder}, got {encoder_class_name}"
-        print(f"  ✓ Correct encoder detected!")
-        print()
-    
-    print("=" * 70)
+    expected = {
+        "brandubh": ("MoveEncoder", 7, "BrandubhNet"),
+        "tablut": ("TablutMoveEncoder", 9, "TablutNet"),
+        "hnefatafl": ("HnefataflMoveEncoder", 11, "HnefataflNet"),
+    }
+    assert set(GAMES) == set(expected)
+    for name, (encoder_name, board_size, network_name) in expected.items():
+        spec = game_spec(name)
+        assert spec.board_size == board_size
+        assert spec.move_encoder_class.__name__ == encoder_name
+        assert spec.legacy_network_class.__name__ == network_name
+        assert spec.game_class().board.shape == (board_size, board_size)
+        assert game_spec_for_board(board_size) is spec
+        assert spec.policy_size == board_size * board_size * 4 * (board_size - 1)
+        print(f"  {name}: {board_size}x{board_size}, {encoder_name}, {network_name} ✓")
+    try:
+        game_spec("chess")
+        assert False, "unknown game accepted"
+    except ValueError:
+        pass
     print("All tests passed! ✓")
-    print("=" * 70)
+
 
 if __name__ == "__main__":
-    test_encoder_detection()
+    test_game_registry()

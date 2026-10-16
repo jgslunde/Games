@@ -46,6 +46,7 @@ from hnefatafl import Hnefatafl
 from network import BrandubhNet, MoveEncoder, StateHistory
 from network_tablut import TablutNet, TablutMoveEncoder
 from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
+from tafl_network import build_network, describe_network, load_weights, network_config_from_checkpoint
 from mcts import MCTS
 
 # Game class, network class and move encoder of each variant, by board size
@@ -144,16 +145,16 @@ class TaflGUI:
         # The network's value targets were discounted per move, so the search discounts the same way
         search_discount = config.get('search_discount', 1.0)
         if checkpoint:
-            self.network = network_class(
-                num_res_blocks=config.get('num_res_blocks', 4),
-                num_channels=config.get('num_channels', 64),
-                value_head_hidden_size=config.get('value_head_hidden_size', 64),
-                history_length=self.history_length)
-            self.network.load_state_dict_compatible(data['model_state_dict'])
+            # The architecture and input planes are stored in the checkpoint (older checkpoints
+            # give the fixed classes)
+            net_config = network_config_from_checkpoint(data, self.board_size)
+            self.network = build_network(net_config, self.board_size)
+            load_weights(self.network, data)
             self.network.eval()
+            self.history_length = net_config.features.history_length
             search = dict(num_simulations=self.simulations, c_puct=self.c_puct,
                           fpu_reduction=self.fpu_reduction, move_encoder_class=self.encoder,
-                          history_length=self.history_length, search_discount=search_discount)
+                          feature_spec=net_config.features, search_discount=search_discount)
             self.analysis_mcts = MCTS(self.network, **search)
             self.ai_mcts = MCTS(self.network, add_dirichlet_noise=dirichlet_noise,
                                 dirichlet_alpha=config.get('dirichlet_alpha', 0.3),
@@ -199,9 +200,7 @@ class TaflGUI:
               f"{g.throne_is_hostile}; "
               + (f"draw after {self.max_moves} moves" if self.max_moves else "no move limit"))
         if self.network is not None:
-            print(f"Network: {checkpoint} ({config.get('num_res_blocks', 4)} blocks x "
-                  f"{config.get('num_channels', 64)} channels, "
-                  f"history length {self.history_length})")
+            print(f"Network: {checkpoint} ({describe_network(self.network)})")
             print(f"AI search: {self.simulations} simulations, c_puct {self.c_puct}, FPU reduction "
                   f"{self.fpu_reduction}, discount {search_discount}, Dirichlet noise "
                   f"{'on' if dirichlet_noise else 'off'}; temperature {temperature} "

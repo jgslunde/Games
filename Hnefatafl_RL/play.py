@@ -27,10 +27,14 @@ import numpy as np
 from brandubh import Brandubh
 from tablut import Tablut
 from hnefatafl import Hnefatafl
-from network import BrandubhNet
-from network_tablut import TablutNet
-from network_hnefatafl import HnefataflNet
 from agent import Agent
+from tafl_network import load_network, describe_network
+
+
+def checkpoint_search_discount(checkpoint: dict) -> float:
+    """The MCTS discount a checkpoint's network was trained with (1.0 if it does not say)."""
+    config = checkpoint.get('config', {})
+    return config.get('search_discount', 1.0) if isinstance(config, dict) else 1.0
 
 
 def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1_plays_attacker, 
@@ -53,17 +57,9 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
         np.random.seed()
 
         # Create game environment
-        if game_name == 'brandubh':
-            game_cls = Brandubh
-            network_cls = BrandubhNet
-        elif game_name == 'tablut':
-            game_cls = Tablut
-            network_cls = TablutNet
-        elif game_name == 'hnefatafl':
-            game_cls = Hnefatafl
-            network_cls = HnefataflNet
-        else:
-            raise ValueError(f"Unknown game: {game_name}")
+        from games import game_spec
+        spec = game_spec(game_name)
+        game_cls, board_size = spec.game_class, spec.board_size
         
         game_state = game_cls(
             king_capture_pieces=king_capture_pieces,
@@ -72,60 +68,15 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
             throne_enabled=throne_enabled
         )
         
-        # Load models
+        # Load the networks; their architecture and input planes come from the checkpoints, so two
+        # different architectures can play each other
         device = torch.device('cpu')
+        network1, checkpoint1 = load_network(checkpoint1_path, board_size=board_size)
+        network2, checkpoint2 = load_network(checkpoint2_path, board_size=board_size)
+        search_discount1 = checkpoint_search_discount(checkpoint1)
+        search_discount2 = checkpoint_search_discount(checkpoint2)
         
-        # Load checkpoints
-        checkpoint1 = torch.load(checkpoint1_path, map_location=device, weights_only=False)
-        checkpoint2 = torch.load(checkpoint2_path, map_location=device, weights_only=False)
-        
-        # Extract architecture config from checkpoints
-        if 'config' in checkpoint1:
-            config1 = checkpoint1['config']
-            num_res_blocks1 = config1.get('num_res_blocks', 4)
-            num_channels1 = config1.get('num_channels', 64)
-            history_length1 = config1.get('history_length', 1)
-            value_head_hidden_size1 = config1.get('value_head_hidden_size', 64)
-            search_discount1 = config1.get('search_discount', 1.0)
-        else:
-            num_res_blocks1 = checkpoint1.get('num_res_blocks', 4)
-            num_channels1 = checkpoint1.get('num_channels', 64)
-            history_length1 = checkpoint1.get('history_length', 1)
-            value_head_hidden_size1 = checkpoint1.get('value_head_hidden_size', 64)
-            search_discount1 = 1.0
-        
-        if 'config' in checkpoint2:
-            config2 = checkpoint2['config']
-            num_res_blocks2 = config2.get('num_res_blocks', 4)
-            num_channels2 = config2.get('num_channels', 64)
-            history_length2 = config2.get('history_length', 1)
-            value_head_hidden_size2 = config2.get('value_head_hidden_size', 64)
-            search_discount2 = config2.get('search_discount', 1.0)
-        else:
-            num_res_blocks2 = checkpoint2.get('num_res_blocks', 4)
-            num_channels2 = checkpoint2.get('num_channels', 64)
-            history_length2 = checkpoint2.get('history_length', 1)
-            value_head_hidden_size2 = checkpoint2.get('value_head_hidden_size', 64)
-            search_discount2 = 1.0
-        
-        # Create networks with correct architecture
-        network1 = network_cls(num_res_blocks=num_res_blocks1, num_channels=num_channels1,
-                               history_length=history_length1,
-                               value_head_hidden_size=value_head_hidden_size1).to(device)
-        network2 = network_cls(num_res_blocks=num_res_blocks2, num_channels=num_channels2,
-                               history_length=history_length2,
-                               value_head_hidden_size=value_head_hidden_size2).to(device)
-
-        # Load state dicts - handle different checkpoint formats
-        state_dict1 = checkpoint1.get('network_state_dict') or checkpoint1.get('model_state_dict') or checkpoint1
-        state_dict2 = checkpoint2.get('network_state_dict') or checkpoint2.get('model_state_dict') or checkpoint2
-        network1.load_state_dict_compatible(state_dict1)
-        network2.load_state_dict_compatible(state_dict2)
-        
-        network1.eval()
-        network2.eval()
-        
-        # Create agents with separate C_PUCT and FPU values
+        # Create agents with separate C_PUCT and FPU values (the input planes follow the network)
         agent1 = Agent(network1, num_simulations=simulations, device=device,
                       c_puct=c_puct1, fpu_reduction=fpu_reduction1,
                       add_dirichlet_noise=dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
@@ -207,60 +158,26 @@ def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, g
         was trained with (1.0 if the checkpoint does not say)
     """
     try:
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-        search_discount = checkpoint.get('config', {}).get('search_discount', 1.0)
+        board_size = getattr(game_class, 'BOARD_SIZE', None)
+        if board_size is None and game_class is not None:
+            board_size = game_class().board.shape[0]
+        network, checkpoint = load_network(checkpoint_path, board_size=board_size)
+        search_discount = checkpoint_search_discount(checkpoint)
+        config = checkpoint.get('config', {}) if isinstance(checkpoint.get('config'), dict) else {}
 
-        # Extract config from checkpoint
-        if 'config' in checkpoint:
-            config = checkpoint['config']
-            num_res_blocks = config.get('num_res_blocks', 4)
-            num_channels = config.get('num_channels', 64)
-            board_size = config.get('board_size', 7)  # Extract board size from config
-            history_length = config.get('history_length', 1)
-            value_head_hidden_size = config.get('value_head_hidden_size', 64)
-            
-            # Extract game rules from checkpoint (can be overridden)
-            if force_rules is None:
-                rules = {
-                    'king_capture_pieces': config.get('king_capture_pieces', 2),
-                    'king_can_capture': config.get('king_can_capture', True),
-                    'throne_is_hostile': config.get('throne_is_hostile', False),
-                    'throne_enabled': config.get('throne_enabled', True),
-                }
-            else:
-                rules = force_rules
+        # Game rules from the checkpoint (can be overridden); defaults for very old checkpoints
+        if force_rules is not None:
+            rules = force_rules
         else:
-            # Default values
-            num_res_blocks = 4
-            num_channels = 64
-            board_size = 7  # Default to Brandubh
-            history_length = 1
-            value_head_hidden_size = 64
-            rules = force_rules if force_rules else {
-                'king_capture_pieces': 2,
-                'king_can_capture': True,
-                'throne_is_hostile': False,
-                'throne_enabled': True,
+            rules = {
+                'king_capture_pieces': config.get('king_capture_pieces', 2),
+                'king_can_capture': config.get('king_can_capture', True),
+                'throne_is_hostile': config.get('throne_is_hostile', False),
+                'throne_enabled': config.get('throne_enabled', True),
             }
-        
-        # Determine network type based on game_class or board_size
-        if game_class == Tablut or board_size == 9:
-            network_class = TablutNet
-        elif game_class == Hnefatafl or board_size == 11:
-            network_class = HnefataflNet
-        else:
-            network_class = BrandubhNet
-        network = network_class(num_res_blocks=num_res_blocks, num_channels=num_channels,
-                                history_length=history_length,
-                                value_head_hidden_size=value_head_hidden_size)
-
-        state_dict = checkpoint.get('network_state_dict') or checkpoint.get('model_state_dict') or checkpoint
-        network.load_state_dict_compatible(state_dict)
-        network.eval()
 
         print(f"Loaded network from {checkpoint_path}")
-        print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels, "
-              f"history_length={history_length}")
+        print(f"  Architecture: {describe_network(network)}")
         print(f"  Search discount: {search_discount}")
 
         return network, rules, search_discount

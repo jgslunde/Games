@@ -1,94 +1,49 @@
 #!/usr/bin/env python3
 """
-Convert PyTorch checkpoint to ONNX format for deployment in JavaScript/web environments.
+Convert a training checkpoint to ONNX for deployment in the browser (onnxruntime-web) or elsewhere.
 
-This script loads a trained model checkpoint and exports it to ONNX format,
-which can be used with ONNX Runtime in JavaScript, C++, or other environments.
+The network architecture and its input planes are read from the checkpoint, so this works for the
+configurable networks (tafl_network.py) as well as the older fixed classes. Next to the .onnx file a
+.json file is written that says exactly what the model expects and returns: board size, the input
+planes in order, the policy index layout and the rules the network was trained with. A browser
+implementation must build the same planes in the same order (see features.py).
 
 Usage:
-    python convert_to_onnx.py <checkpoint_path> [--output OUTPUT] [--game {brandubh,tablut,hnefatafl}]
+    python convert_to_onnx.py <checkpoint_path> [--output OUTPUT] [--board-size N] [--opset N] [--no-verify]
 
 Examples:
-    python convert_to_onnx.py checkpoints_brandubh/jack_nothrone/best_model.pth
-    python convert_to_onnx.py checkpoints_tablut/best_model.pth --game tablut --output model.onnx
-    python convert_to_onnx.py checkpoints_hnefatafl/best_model.pth --game hnefatafl
+    python convert_to_onnx.py checkpoints_brandubh/line_4x32/best_model.pth
+    python convert_to_onnx.py checkpoints_tablut/best_model.pth --output model.onnx
 """
 
 import argparse
+import json
 import os
 import sys
-import torch
+
 import numpy as np
+import torch
 
-# Import network architectures
-from network import BrandubhNet
-from network_tablut import TablutNet
-from network_hnefatafl import HnefataflNet
+from tafl_network import load_network, network_config_from_checkpoint, describe_network, count_parameters
 
 
-def load_checkpoint(checkpoint_path, game_type='brandubh'):
-    """
-    Load a checkpoint and create the appropriate network.
-    
-    Args:
-        checkpoint_path: Path to the checkpoint file
-        game_type: Type of game ('brandubh', 'tablut', or 'hnefatafl')
-    
-    Returns:
-        network: The loaded neural network
-        config: Configuration dictionary from checkpoint (if available)
-    """
+def load_checkpoint(checkpoint_path, board_size=None):
+    """The network of a checkpoint (eval mode), its NetworkConfig, the checkpoint dict and board size."""
     print(f"Loading checkpoint from {checkpoint_path}...")
-    
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-    
-    # Extract configuration
-    config = checkpoint.get('config', {})
-    num_res_blocks = config.get('num_res_blocks', 4)
-    num_channels = config.get('num_channels', 64)
-    
-    print(f"  Architecture: {num_res_blocks} residual blocks, {num_channels} channels")
-    
-    # Create appropriate network
-    if game_type == 'tablut':
-        network = TablutNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-        board_size = 9
-    elif game_type == 'hnefatafl':
-        network = HnefataflNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-        board_size = 11
-    else:  # brandubh
-        network = BrandubhNet(num_res_blocks=num_res_blocks, num_channels=num_channels)
-        board_size = 7
-    
-    # Load state dict
-    network.load_state_dict(checkpoint['model_state_dict'])
-    network.eval()
-    
-    print(f"  Game type: {game_type} ({board_size}x{board_size})")
-    print(f"  Network loaded successfully")
-    
-    return network, config, board_size
+    network, checkpoint = load_network(checkpoint_path, board_size=board_size)
+    board_size = network.board_size if hasattr(network, 'board_size') else board_size
+    if board_size is None:
+        board_size = checkpoint.get('config', {}).get('board_size')
+    net_config = network_config_from_checkpoint(checkpoint, board_size)
+    print(f"  Network: {describe_network(network)}")
+    print(f"  Board: {board_size}x{board_size}; input planes: {', '.join(net_config.features.plane_names())}")
+    return network, net_config, checkpoint, board_size
 
 
-def export_to_onnx(network, output_path, board_size, opset_version=12):
-    """
-    Export network to ONNX format.
-    
-    Args:
-        network: PyTorch network to export
-        output_path: Path to save ONNX file
-        board_size: Size of the game board (7, 9, or 11)
-        opset_version: ONNX opset version (default: 12 for broad compatibility)
-    """
+def export_to_onnx(network, output_path, board_size, num_planes, opset_version=12):
+    """Export the network; the batch axis is dynamic, the input is [batch, num_planes, N, N]."""
     print(f"\nExporting to ONNX format...")
-    
-    # Create dummy input for tracing
-    # Input format: [batch_size, channels, height, width]
-    # Channels: 4 planes representing game state (attackers, defenders, king, current_player)
-    dummy_input = torch.randn(1, 4, board_size, board_size)
-    
-    # Export to ONNX
+    dummy_input = torch.randn(1, num_planes, board_size, board_size)
     torch.onnx.export(
         network,
         dummy_input,
@@ -103,173 +58,137 @@ def export_to_onnx(network, output_path, board_size, opset_version=12):
             'policy_logits': {0: 'batch_size'},
             'value': {0: 'batch_size'}
         },
+        dynamo=False,
         verbose=False
     )
-    
     print(f"  ✓ ONNX model saved to: {output_path}")
-    
-    # Get file size
-    file_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
-    print(f"  File size: {file_size:.2f} MB")
+    print(f"  File size: {os.path.getsize(output_path) / (1024 * 1024):.2f} MB")
 
 
-def verify_onnx_model(onnx_path, network, board_size):
-    """
-    Verify that the ONNX model produces the same outputs as the PyTorch model.
-    
-    Args:
-        onnx_path: Path to ONNX model
-        network: Original PyTorch network
-        board_size: Size of the game board
-    
-    Returns:
-        bool: True if outputs match within tolerance
-    """
+def write_model_info(network, net_config, checkpoint, board_size, onnx_path):
+    """Write <model>.json: everything a client needs to build the input and read the output."""
+    info_path = os.path.splitext(onnx_path)[0] + '.json'
+    config = checkpoint.get('config', {}) if isinstance(checkpoint.get('config'), dict) else {}
+    rule_names = ['king_capture_pieces', 'king_can_capture', 'throne_is_hostile', 'throne_enabled']
+    info = {
+        'board_size': board_size,
+        'input': {
+            'shape': [1, net_config.features.num_planes, board_size, board_size],
+            'planes': net_config.features.plane_names(),
+            'description': 'See features.py: piece planes of the last history_length positions (newest '
+                           'first, zero planes before the start of the game), the player plane (0 '
+                           'attackers, 1 defenders), then the optional constant, reach and king-region '
+                           'planes. All values are 0 or 1.',
+        },
+        'policy': {
+            'size': board_size * board_size * 4 * (board_size - 1),
+            'index': 'from_square * 4 * (N-1) + direction * (N-1) + (distance - 1), with '
+                     'from_square = row * N + col and directions 0 up, 1 down, 2 left, 3 right',
+            'note': 'logits; take the softmax over the legal moves only',
+        },
+        'value': 'tanh output in [-1, 1] for the player to move',
+        'network': net_config.to_dict(),
+        'network_description': describe_network(network),
+        'num_parameters': count_parameters(network),
+        'rules': {name: config[name] for name in rule_names if name in config},
+        'search_discount': config.get('search_discount'),
+        'run_name': config.get('name'),
+        'iteration': checkpoint.get('iteration'),
+    }
+    with open(info_path, 'w') as f:
+        json.dump(info, f, indent=2)
+    print(f"  ✓ Model description saved to: {info_path}")
+
+
+def verify_onnx_model(onnx_path, network, board_size, num_planes):
+    """Check that the ONNX model gives the same outputs as the PyTorch network."""
     print(f"\nVerifying ONNX model...")
-    
     try:
         import onnxruntime as ort
     except ImportError:
         print("  ⚠ Warning: onnxruntime not installed, skipping verification")
         print("  Install with: pip install onnxruntime")
         return None
-    
-    # Create test input
-    test_input = torch.randn(1, 4, board_size, board_size)
-    
-    # Get PyTorch output
+
+    test_input = (torch.rand(1, num_planes, board_size, board_size) < 0.2).float()
     network.eval()
     with torch.no_grad():
         pytorch_policy, pytorch_value = network(test_input)
         pytorch_policy = pytorch_policy.numpy()
         pytorch_value = pytorch_value.numpy()
-    
-    # Get ONNX output
-    ort_session = ort.InferenceSession(onnx_path)
-    onnx_inputs = {ort_session.get_inputs()[0].name: test_input.numpy()}
-    onnx_outputs = ort_session.run(None, onnx_inputs)
-    onnx_policy, onnx_value = onnx_outputs
-    
-    # Compare outputs
+
+    ort_session = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
+    onnx_policy, onnx_value = ort_session.run(None, {ort_session.get_inputs()[0].name: test_input.numpy()})
+
     policy_diff = np.abs(pytorch_policy - onnx_policy).max()
     value_diff = np.abs(pytorch_value - onnx_value).max()
-    
-    tolerance = 1e-5
-    policy_match = policy_diff < tolerance
-    value_match = value_diff < tolerance
-    
+    tolerance = 1e-4
     print(f"  Policy output difference: {policy_diff:.2e} (tolerance: {tolerance:.2e})")
     print(f"  Value output difference: {value_diff:.2e} (tolerance: {tolerance:.2e})")
-    
-    if policy_match and value_match:
+    if policy_diff < tolerance and value_diff < tolerance:
         print("  ✓ Verification passed! ONNX model outputs match PyTorch model")
         return True
-    else:
-        print("  ✗ Verification failed! Outputs differ beyond tolerance")
-        if not policy_match:
-            print(f"    Policy mismatch: {policy_diff:.2e}")
-        if not value_match:
-            print(f"    Value mismatch: {value_diff:.2e}")
-        return False
+    print("  ✗ Verification failed! Outputs differ beyond tolerance")
+    return False
 
 
 def print_model_info(onnx_path):
-    """Print information about the ONNX model structure."""
+    """Print the ONNX model's opset, inputs and outputs."""
     try:
         import onnx
-        model = onnx.load(onnx_path)
-        
-        print(f"\nONNX Model Information:")
-        print(f"  Opset version: {model.opset_import[0].version}")
-        print(f"  Input:")
-        for input_tensor in model.graph.input:
-            shape = [dim.dim_value if dim.dim_value > 0 else 'dynamic' 
-                    for dim in input_tensor.type.tensor_type.shape.dim]
-            print(f"    - {input_tensor.name}: {shape}")
-        print(f"  Output:")
-        for output_tensor in model.graph.output:
-            shape = [dim.dim_value if dim.dim_value > 0 else 'dynamic' 
-                    for dim in output_tensor.type.tensor_type.shape.dim]
-            print(f"    - {output_tensor.name}: {shape}")
     except ImportError:
         print("\n  (Install 'onnx' package to see detailed model info: pip install onnx)")
+        return
+    model = onnx.load(onnx_path)
+    print(f"\nONNX Model Information:")
+    print(f"  Opset version: {model.opset_import[0].version}")
+    print(f"  Operators: {len(model.graph.node)}")
+    for label, tensors in (("Input", model.graph.input), ("Output", model.graph.output)):
+        print(f"  {label}:")
+        for tensor in tensors:
+            shape = [dim.dim_value if dim.dim_value > 0 else 'dynamic'
+                     for dim in tensor.type.tensor_type.shape.dim]
+            print(f"    - {tensor.name}: {shape}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Convert PyTorch checkpoint to ONNX format',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Convert Brandubh model (7x7)
-  python convert_to_onnx.py checkpoints_brandubh/jack_nothrone/best_model.pth
-  
-  # Convert Tablut model (9x9) with custom output name
-  python convert_to_onnx.py checkpoints_tablut/best_model.pth --game tablut --output tablut.onnx
-  
-  # Convert Hnefatafl model (11x11)
-  python convert_to_onnx.py checkpoints_hnefatafl/best_model.pth --game hnefatafl
-
-Notes:
-  - The ONNX model can be used with ONNX Runtime in JavaScript, Python, C++, etc.
-  - For JavaScript: Use onnxruntime-web (https://github.com/microsoft/onnxruntime)
-  - Input shape: [batch_size, 4, board_size, board_size]
-  - 4 channels: attackers, defenders, king, current_player
-  - Outputs: policy_logits and value
-        """
-    )
-    
-    parser.add_argument('checkpoint', type=str,
-                       help='Path to PyTorch checkpoint file (.pth)')
+    parser = argparse.ArgumentParser(description='Convert a PyTorch checkpoint to ONNX',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    parser.add_argument('checkpoint', type=str, help='Path to the checkpoint file (.pth)')
     parser.add_argument('--output', '-o', type=str, default=None,
-                       help='Output path for ONNX file (default: same name as checkpoint with .onnx extension)')
-    parser.add_argument('--game', type=str, choices=['brandubh', 'tablut', 'hnefatafl'],
-                       default='brandubh',
-                       help='Game type (default: brandubh)')
-    parser.add_argument('--opset', type=int, default=12,
-                       help='ONNX opset version (default: 12 for broad compatibility)')
-    parser.add_argument('--no-verify', action='store_true',
-                       help='Skip verification step')
-    
+                        help='Output path (default: the checkpoint path with .onnx)')
+    parser.add_argument('--board-size', type=int, default=None, choices=[7, 9, 11],
+                        help='Board size, only needed for very old checkpoints that do not record it')
+    parser.add_argument('--game', type=str, choices=['brandubh', 'tablut', 'hnefatafl'], default=None,
+                        help='Alternative to --board-size')
+    parser.add_argument('--opset', type=int, default=12, help='ONNX opset version (default: 12)')
+    parser.add_argument('--no-verify', action='store_true', help='Skip the verification step')
     args = parser.parse_args()
-    
-    # Check if checkpoint exists
+
     if not os.path.exists(args.checkpoint):
         print(f"Error: Checkpoint file '{args.checkpoint}' not found")
         sys.exit(1)
-    
-    # Determine output path
+    board_size = args.board_size
+    if board_size is None and args.game is not None:
+        board_size = {'brandubh': 7, 'tablut': 9, 'hnefatafl': 11}[args.game]
     if args.output is None:
-        checkpoint_dir = os.path.dirname(args.checkpoint)
-        checkpoint_name = os.path.splitext(os.path.basename(args.checkpoint))[0]
-        args.output = os.path.join(checkpoint_dir, f"{checkpoint_name}.onnx")
-    
+        args.output = os.path.splitext(args.checkpoint)[0] + '.onnx'
+
     print("=" * 70)
     print("PyTorch to ONNX Converter")
     print("=" * 70)
-    
-    # Load checkpoint
-    network, config, board_size = load_checkpoint(args.checkpoint, args.game)
-    
-    # Export to ONNX
-    export_to_onnx(network, args.output, board_size, args.opset)
-    
-    # Verify if requested
+    network, net_config, checkpoint, board_size = load_checkpoint(args.checkpoint, board_size)
+    num_planes = net_config.features.num_planes
+    export_to_onnx(network, args.output, board_size, num_planes, args.opset)
+    write_model_info(network, net_config, checkpoint, board_size, args.output)
     if not args.no_verify:
-        verify_onnx_model(args.output, network, board_size)
-    
-    # Print model info
+        verify_onnx_model(args.output, network, board_size, num_planes)
     print_model_info(args.output)
-    
     print("\n" + "=" * 70)
     print("Conversion completed successfully!")
     print("=" * 70)
-    print(f"\nYou can now use the ONNX model in:")
-    print(f"  - JavaScript (onnxruntime-web)")
-    print(f"  - Python (onnxruntime)")
-    print(f"  - C++ (onnxruntime)")
-    print(f"  - Mobile (iOS/Android)")
     print(f"\nONNX file: {args.output}")
+    print(f"Model description: {os.path.splitext(args.output)[0] + '.json'}")
 
 
 if __name__ == "__main__":

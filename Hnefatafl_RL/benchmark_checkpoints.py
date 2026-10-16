@@ -48,38 +48,19 @@ def benchmark_checkpoint(checkpoint_path, network_class, board_size, num_iterati
         dict with timing statistics
     """
     try:
-        # Load checkpoint with weights_only=False to allow numpy objects
-        # (PyTorch 2.6+ defaults to weights_only=True for security)
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        
-        # Handle different checkpoint formats
-        if 'network_state_dict' in checkpoint:
-            state_dict = checkpoint['network_state_dict']
-        elif 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-        else:
-            # Maybe the checkpoint is just the state dict itself
-            state_dict = checkpoint
-        
-        # Get network configuration from checkpoint
-        if 'config' in checkpoint:
-            config = checkpoint['config']
-            num_channels = config.get('num_channels', 64)
-            num_res_blocks = config.get('num_res_blocks', 4)
-        else:
-            num_channels = checkpoint.get('num_channels', 64)
-            num_res_blocks = checkpoint.get('num_res_blocks', 4)
-        
-        # Create network
-        network = network_class(num_res_blocks=num_res_blocks, num_channels=num_channels).to(device)
-        network.load_state_dict(state_dict)
-        network.eval()
-        
+        # The network architecture (and its input planes) is read from the checkpoint; this also
+        # loads checkpoints of the older fixed classes
+        from tafl_network import load_network, network_config_from_checkpoint
+        network, checkpoint = load_network(checkpoint_path, board_size=board_size, device=device)
+        net_config = network_config_from_checkpoint(checkpoint, board_size)
+        num_channels = net_config.channels
+        num_res_blocks = net_config.num_blocks
+
         # Count parameters
         num_params = count_parameters(network)
-        
+
         # Create dummy input (batch size 1)
-        dummy_input = torch.randn(1, 4, board_size, board_size, device=device)
+        dummy_input = torch.randn(1, net_config.features.num_planes, board_size, board_size, device=device)
         
         # Warmup runs
         with torch.no_grad():

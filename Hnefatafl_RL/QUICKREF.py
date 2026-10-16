@@ -206,3 +206,24 @@ REPLAY_BUFFER_SIZE = 100000
 # → This is normal for Tafl games
 # → Consider adding draw penalty in training
 # → Implement 3-fold repetition detection
+
+
+# =============================================================================
+# CONFIGURABLE NETWORKS AND JSON RUN CONFIGS (see NETWORK_ARCHITECTURES.md)
+# =============================================================================
+#
+# Train from a config file (the resolved settings are written to <checkpoint_dir>/run_config.json):
+#   python run_training.py configs/brandubh/line_4x32.json --set system.num_workers=16
+#
+# Build a network from a config and load one from any checkpoint (new or old format):
+#   from network_config import NetworkConfig
+#   from tafl_network import build_network, load_network
+#   net = build_network(NetworkConfig(channels=48, blocks=["line"] * 6, global_pool="every_other"), 9)
+#   net, checkpoint = load_network("checkpoints_tablut/line_6x48_gpool/best_model.pth")
+#
+# The input planes a network expects (history, constant, reach and king-region planes):
+#   from features import build_features
+#   x = build_features(game, net.feature_spec)        # (planes, N, N) float32, values 0/1
+#
+# Agent and MCTS take the planes from the network:
+#   agent = Agent(net, num_simulations=200)           # feature_spec = net.feature_spec
