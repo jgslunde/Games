@@ -28,6 +28,7 @@
     "global_pool": "every_other",
     "global_pool_channels": 16,
     "tie_blocks": false,
+    "attention_heads": 4,
     "policy_head": "conv",
     "policy_dense_channels": 2,
     "policy_bilinear_dim": 32,

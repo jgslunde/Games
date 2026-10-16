@@ -118,9 +118,56 @@ class LineBlock(nn.Module):
         return F.relu(x + self.up(h))
 
 
+class AttentionBlock(nn.Module):
+    """
+    Transformer block over the N*N squares: multi-head self-attention, then a feed-forward layer
+    (twice the width), each with layer norm before it and a residual add after it. Every square can
+    look at every other square in one step, which neither the 3x3 nor the line kernels allow.
+
+    Attention by itself ignores where squares are. Each head therefore adds a learned bias that
+    depends only on the offset (row difference, column difference) between the two squares, the
+    same everywhere on the board, as a convolution kernel is. Written out by hand (no
+    scaled_dot_product_attention) so that it exports to ONNX opset 12.
+    """
+
+    def __init__(self, channels: int, board_size: int, heads: int = 4):
+        super().__init__()
+        self.heads, self.head_dim = heads, channels // heads
+        n = board_size
+        self.norm1 = nn.LayerNorm(channels)
+        self.qkv = nn.Linear(channels, 3 * channels)
+        self.out = nn.Linear(channels, channels)
+        self.norm2 = nn.LayerNorm(channels)
+        self.feed_forward = nn.Sequential(nn.Linear(channels, 2 * channels), nn.ReLU(),
+                                          nn.Linear(2 * channels, channels))
+        # offset_index[i, j]: index of the (row, column) offset from square i to square j in a
+        # (2N-1) x (2N-1) table of offsets
+        rows, cols = np.divmod(np.arange(n * n), n)
+        row_offset = rows[None, :] - rows[:, None] + n - 1
+        col_offset = cols[None, :] - cols[:, None] + n - 1
+        offset_index = row_offset * (2 * n - 1) + col_offset
+        self.register_buffer("offset_index", torch.from_numpy(offset_index))
+        self.position_bias = nn.Parameter(torch.zeros(heads, (2 * n - 1) ** 2))
+
+    def forward(self, x):
+        b, c, n, _ = x.shape
+        tokens = x.flatten(2).transpose(1, 2)  # (B, squares, C)
+        qkv = self.qkv(self.norm1(tokens)).reshape(b, n * n, 3, self.heads, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)  # each (B, heads, squares, head_dim)
+        scores = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)
+        scores = scores + self.position_bias[:, self.offset_index]  # (heads, squares, squares) bias
+        attended = (torch.softmax(scores, dim=-1) @ v).transpose(1, 2).reshape(b, n * n, c)
+        tokens = tokens + self.out(attended)
+        tokens = tokens + self.feed_forward(self.norm2(tokens))
+        return tokens.transpose(1, 2).reshape(b, c, n, n)
+
+
 def make_block(kind: str, config: NetworkConfig, board_size: int, global_pool_channels: int) -> nn.Module:
+    """One trunk block; attention blocks ignore global pooling (they see the whole board anyway)."""
     if kind == "res":
         return ResBlock(config.channels, config.squeeze_excitation, global_pool_channels)
+    if kind == "attention":
+        return AttentionBlock(config.channels, board_size, config.attention_heads)
     return LineBlock(config.channels, board_size, kind, config.bottleneck, global_pool_channels)
 
 

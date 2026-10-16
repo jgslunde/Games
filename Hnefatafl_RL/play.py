@@ -23,7 +23,9 @@ import sys
 import torch
 import multiprocessing as mp
 import numpy as np
+import setproctitle
 
+from run_training import PROCESS_TITLE
 from brandubh import Brandubh
 from tablut import Tablut
 from hnefatafl import Hnefatafl
@@ -606,7 +608,8 @@ def main():
                        help="Use command-line rules for any unspecified options (instead of checkpoint defaults)")
     
     args = parser.parse_args()
-    
+    setproctitle.setproctitle(PROCESS_TITLE)  # the name of this process and its workers in top/ps
+
     # Build forced rules dict if specified
     force_rules = None
     if args.force_rules or any([

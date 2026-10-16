@@ -18,7 +18,32 @@ The resolved config (file + overrides) is printed at the start and written to
 import argparse
 import sys
 
+import setproctitle
+
 from run_config import apply_overrides, describe, load_config
+
+# The name the training process and its (forked) self-play workers show in top and ps
+PROCESS_TITLE = "run_sims"
+
+
+class Tee:
+    """A text stream that writes to the terminal and appends to a log file (instead of piping the
+    output through `tee`, whose command line would show the log path in the process list)."""
+
+    def __init__(self, stream, log_file):
+        self.stream, self.log_file = stream, log_file
+
+    def write(self, text):
+        self.stream.write(text)
+        self.log_file.write(text)
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+        self.log_file.flush()
+
+    def __getattr__(self, name):  # fileno, isatty, encoding, ... of the terminal stream
+        return getattr(self.stream, name)
 
 
 def main():
@@ -37,7 +62,13 @@ def main():
     parser.add_argument("--load-weights", metavar="CHECKPOINT",
                         help="Start a new run from the weights of this checkpoint")
     parser.add_argument("--show", action="store_true", help="Print the resolved config and exit")
+    parser.add_argument("--log", metavar="FILE", help="Also append all output to this file")
     args = parser.parse_args()
+
+    setproctitle.setproctitle(PROCESS_TITLE)
+    if args.log:
+        log_file = open(args.log, "a", buffering=1)  # line-buffered, so the file stays current
+        sys.stdout, sys.stderr = Tee(sys.stdout, log_file), Tee(sys.stderr, log_file)
 
     if args.resume and args.load_weights:
         parser.error("use either --resume or --load-weights, not both")

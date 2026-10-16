@@ -19,6 +19,11 @@ A NetworkConfig describes one of the architectures in tafl_network.py:
                            "thick"  like "line" with 3 x 2N-1 and 2N-1 x 3 kernels (sees the
                                     neighbouring rows and columns too; about three times the cost
                                     of "line")
+                           "attention"  transformer block over the squares (self-attention with
+                                    a learned bias per square offset, then a feed-forward
+                                    layer): every square sees every square in one block, also
+                                    diagonally and far away. Ignores global_pool.
+    attention_heads      heads of the attention blocks (channels must be divisible by it)
     bottleneck           inner width of line/line3/thick blocks as a fraction of `channels`
     squeeze_excitation   squeeze-and-excitation in "res" blocks (the old BrandubhNet had it)
     global_pool          "none", "every_other" or "all": blocks that add a bias computed from
@@ -45,7 +50,7 @@ from typing import List, Union
 
 from features import FeatureSpec
 
-BLOCK_KINDS = ("res", "line", "line3", "thick")
+BLOCK_KINDS = ("res", "line", "line3", "thick", "attention")
 POLICY_HEADS = ("dense", "conv", "bilinear")
 VALUE_HEADS = ("dense", "pooled")
 GLOBAL_POOL_MODES = ("none", "every_other", "all")
@@ -62,6 +67,7 @@ class NetworkConfig:
     global_pool: str = "none"
     global_pool_channels: int = 16
     tie_blocks: bool = False
+    attention_heads: int = 4
     policy_head: str = "conv"
     policy_dense_channels: int = 2
     policy_bilinear_dim: int = 32
@@ -98,6 +104,9 @@ class NetworkConfig:
             raise ValueError(f"value_head must be one of {VALUE_HEADS}, got {self.value_head!r}")
         if self.tie_blocks and len(set(self.blocks)) > 1:
             raise ValueError("tie_blocks needs blocks of one kind only")
+        if "attention" in self.blocks and self.channels % self.attention_heads:
+            raise ValueError(f"channels ({self.channels}) must be divisible by attention_heads "
+                             f"({self.attention_heads})")
         if self.arch == "legacy":
             legacy_ok = (all(b == "res" for b in self.blocks) and self.policy_head == "dense"
                          and self.value_head == "dense" and self.global_pool == "none"
