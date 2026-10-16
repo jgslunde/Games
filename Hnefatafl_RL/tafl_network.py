@@ -83,19 +83,27 @@ class ResBlock(nn.Module):
 class LineBlock(nn.Module):
     """
     Bottleneck block whose kernels span a whole row and a whole column:
-        1x1 conv down -> [3x3 conv (line3)] -> (1xN conv + Nx1 conv) -> 1x1 conv up -> residual add
-    "thick" uses 3xN and Nx3 kernels instead of 1xN and Nx1.
+        1x1 conv down -> [3x3 conv (line3)] -> (1x(2N-1) conv + (2N-1)x1 conv) -> 1x1 conv up
+        -> residual add
+    "thick" uses 3x(2N-1) and (2N-1)x3 kernels instead.
+
+    The line kernels are 2N-1 long and centred, so every square sees every other square of its
+    row and column, with one weight per offset (-(N-1) ... N-1). A kernel only N long would let a
+    square see just N//2 squares to each side: from a corner, only half of its edge line.
     """
 
     def __init__(self, channels: int, board_size: int, kind: str, bottleneck: float = 0.5,
                  global_pool_channels: int = 0):
         super().__init__()
         inner = max(4, int(round(channels * bottleneck)))
-        n, rows = board_size, 3 if kind == "thick" else 1
+        rows = 3 if kind == "thick" else 1
+        length = 2 * board_size - 1
         self.down = _conv_bn(channels, inner, 1, 0)
         self.local = _conv_bn(inner, inner, 3, 1) if kind == "line3" else None
-        self.row = nn.Conv2d(inner, inner, (rows, n), padding=(rows // 2, n // 2), bias=False)
-        self.col = nn.Conv2d(inner, inner, (n, rows), padding=(n // 2, rows // 2), bias=False)
+        self.row = nn.Conv2d(inner, inner, (rows, length), padding=(rows // 2, board_size - 1),
+                             bias=False)
+        self.col = nn.Conv2d(inner, inner, (length, rows), padding=(board_size - 1, rows // 2),
+                             bias=False)
         self.bn_line = nn.BatchNorm2d(inner)
         self.global_pool = GlobalPoolBias(inner, global_pool_channels) if global_pool_channels else None
         self.up = _conv_bn(inner, channels, 1, 0)

@@ -30,6 +30,7 @@ from dataclasses import dataclass, asdict
 from typing import List, Optional
 
 import numpy as np
+import scipy.ndimage
 
 # Piece codes, the same in all game variants
 EMPTY, ATTACKER, DEFENDER, KING = 0, 1, 2, 3
@@ -82,35 +83,20 @@ class FeatureSpec:
 # Plane computations
 # ---------------------------------------------------------------------------------------------
 
-def _shift(a: np.ndarray, dr: int, dc: int) -> np.ndarray:
-    """out[r + dr, c + dc] = a[r, c]; squares shifted in from outside the board are 0."""
-    n = a.shape[0]
-    out = np.zeros_like(a)
-    out[max(dr, 0):n + min(dr, 0), max(dc, 0):n + min(dc, 0)] = \
-        a[max(-dr, 0):n + min(-dr, 0), max(-dc, 0):n + min(-dc, 0)]
-    return out
-
-
-DIRECTIONS = ((-1, 0), (1, 0), (0, -1), (0, 1))
-
-
-def _reachable(sources: np.ndarray, landable: np.ndarray, passable: np.ndarray) -> np.ndarray:
+def _nearest_piece_to_the_left(boards: np.ndarray) -> np.ndarray:
     """
-    Squares that some piece in `sources` can move to along a straight line: it may land on
-    `landable` squares and continue past `passable` squares (both exclude occupied squares).
+    For every square of each board in `boards` (shape (..., N, N)): the piece code of the nearest
+    occupied square to its left in the same row (EMPTY if there is none). That piece is the only
+    one that can slide onto the square from the left, because every square between them is empty.
     """
-    n = sources.shape[0]
-    reach = np.zeros_like(sources)
-    for dr, dc in DIRECTIONS:
-        # moving[x] = a source piece stands k steps behind x and every square between is passable
-        moving = sources
-        for _ in range(n - 1):
-            moving = _shift(moving, dr, dc)
-            reach |= moving & landable
-            moving = moving & passable
-            if not moving.any():
-                break
-    return reach
+    n = boards.shape[-1]
+    occupied_column = np.where(boards != EMPTY, np.arange(n), -1)
+    # Column of the last occupied square at or left of each square, then shifted one step right
+    # to give the last occupied square strictly left of it
+    last = np.maximum.accumulate(occupied_column, axis=-1)
+    left = np.concatenate([np.full(boards.shape[:-1] + (1,), -1), last[..., :-1]], axis=-1)
+    pieces = np.take_along_axis(boards, np.maximum(left, 0), axis=-1)
+    return np.where(left >= 0, pieces, EMPTY)
 
 
 def special_squares(game):
@@ -141,10 +127,17 @@ def reach_planes(game) -> np.ndarray:
     board = game.board
     empty = board == EMPTY
     corners, throne = special_squares(game)
+    # arriving[k] = the piece that can slide onto each square from one of the four sides: the
+    # left-to-right scan runs on the board seen from each side (one numpy pass for all four), and
+    # each result is turned back to the board's orientation
+    views = np.stack([board, board[:, ::-1], board.T, board.T[:, ::-1]])
+    nearest = _nearest_piece_to_the_left(views)
+    arriving = np.stack([nearest[0], nearest[1][:, ::-1], nearest[2].T, nearest[3][:, ::-1].T])
+    # The empty throne can be passed but only the king may land on it (or on a corner)
     piece_landable = empty & ~corners & ~throne
-    king_reach = _reachable(board == KING, empty, empty)
-    attacker_reach = _reachable(board == ATTACKER, piece_landable, empty)
-    defender_reach = _reachable(board == DEFENDER, piece_landable, empty) | king_reach
+    king_reach = empty & (arriving == KING).any(axis=0)
+    attacker_reach = piece_landable & (arriving == ATTACKER).any(axis=0)
+    defender_reach = (piece_landable & (arriving == DEFENDER).any(axis=0)) | king_reach
     return np.stack([attacker_reach, defender_reach, king_reach]).astype(np.float32)
 
 
@@ -155,18 +148,13 @@ def king_region_plane(game) -> np.ndarray:
     reach the edge.
     """
     board = game.board
-    region = board == KING
-    if not region.any():
-        return region.astype(np.float32)
-    open_squares = board != ATTACKER
-    while True:
-        grown = region.copy()
-        for dr, dc in DIRECTIONS:
-            grown |= _shift(region, dr, dc)
-        grown &= open_squares
-        if np.array_equal(grown, region):
-            return region.astype(np.float32)
-        region = grown
+    kings = np.argwhere(board == KING)
+    if len(kings) == 0:
+        return np.zeros(board.shape, dtype=np.float32)
+    # Number the connected areas of non-attacker squares (neighbours share a side), then keep the
+    # area that holds the king
+    areas, _ = scipy.ndimage.label(board != ATTACKER)
+    return (areas == areas[tuple(kings[0])]).astype(np.float32)
 
 
 def build_features(game, spec: FeatureSpec, history=None) -> np.ndarray:
