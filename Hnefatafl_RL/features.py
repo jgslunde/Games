@@ -1,5 +1,5 @@
 """
-Network input planes for the Tafl games (Brandubh, Tablut, Hnefatafl).
+Network input planes for the Tafl games (tafl.py).
 
 A FeatureSpec says which planes a network gets. The plane order is fixed:
 
@@ -9,7 +9,7 @@ A FeatureSpec says which planes a network gets. The plane order is fixed:
     [current player]                                           (0 = attackers, 1 = defenders)
     [ones, corners, throne]                                    if constant_planes
     [reach_attackers, reach_defenders, reach_king]             if mobility_planes
-    [king_region]                                              if region_plane
+    [defender_region]                                          if region_plane
 
 With history_length = 1 and nothing else, this is the classic 4-plane input of the older networks.
 Every plane holds only 0 and 1, so the replay buffer can store states as uint8.
@@ -21,8 +21,9 @@ on its own:
   cannot tell an off-board square from an empty one);
 - reach planes mark the squares each side can move to this turn (pseudo-legal moves, i.e. without
   the repetition rule), which is the first step of every capture, block and escape threat;
-- the king-region plane marks the squares connected to the king without crossing an attacker
-  (the Hnefatafl encirclement rule asks whether this region touches the edge).
+- the defender-region plane marks the squares connected to a defender or the king without
+  crossing an attacker (the encirclement rule asks whether this region touches the edge).
+The corner and throne planes are empty in rule sets without corner squares or throne.
 A browser implementation must build the same planes in the same order; see plane_names().
 """
 
@@ -61,7 +62,7 @@ class FeatureSpec:
         if self.mobility_planes:
             names += ["reach_attackers", "reach_defenders", "reach_king"]
         if self.region_plane:
-            names.append("king_region")
+            names.append("defender_region")
         return names
 
     @property
@@ -100,13 +101,13 @@ def _nearest_piece_to_the_left(boards: np.ndarray) -> np.ndarray:
 
 
 def special_squares(game):
-    """Boolean (corner, throne) masks of a game; the throne mask is empty when the throne is disabled."""
+    """Boolean (corner, throne) masks of a game; empty when its rules have no such squares."""
     n = game.board.shape[0]
     corners = np.zeros((n, n), dtype=bool)
     for r, c in game.corners:
         corners[r, c] = True
     throne = np.zeros((n, n), dtype=bool)
-    if game.throne_enabled:
+    if game.rules.throne:
         throne[game.throne] = True
     return corners, throne
 
@@ -122,7 +123,7 @@ def reach_planes(game) -> np.ndarray:
     [reach_attackers, reach_defenders, reach_king]: the squares each side can move to this turn,
     ignoring whose turn it is and the repetition rule. reach_defenders includes the king's moves.
     Pieces other than the king may pass over the empty throne but not land on it, and may not land
-    on a corner; the king may land anywhere empty. This equals the game classes' _get_piece_moves.
+    on a corner; the king may land anywhere empty. This equals the moves of Tafl.get_legal_moves.
     """
     board = game.board
     empty = board == EMPTY
@@ -141,35 +142,72 @@ def reach_planes(game) -> np.ndarray:
     return np.stack([attacker_reach, defender_reach, king_reach]).astype(np.float32)
 
 
-def king_region_plane(game) -> np.ndarray:
+def defender_region_plane(game) -> np.ndarray:
     """
-    Squares connected to the king through squares that hold no attacker (the king's own square
-    included). All zero when the king is off the board. Encirclement means this region does not
-    reach the edge.
+    Squares connected to a defender or the king through squares that hold no attacker (their own
+    squares included). The attackers have encircled the defenders exactly when this region does
+    not reach the edge.
     """
     board = game.board
-    kings = np.argwhere(board == KING)
-    if len(kings) == 0:
-        return np.zeros(board.shape, dtype=np.float32)
     # Number the connected areas of non-attacker squares (neighbours share a side), then keep the
-    # area that holds the king
+    # areas that hold a defender or the king (area 0 is the attackers' squares)
     areas, _ = scipy.ndimage.label(board != ATTACKER)
-    return (areas == areas[tuple(kings[0])]).astype(np.float32)
+    defender_areas = np.unique(areas[board >= DEFENDER])
+    return np.isin(areas, defender_areas[defender_areas > 0]).astype(np.float32)
 
 
-def build_features(game, spec: FeatureSpec, history=None) -> np.ndarray:
+class StateHistory:
+    """
+    The piece planes [attackers, defenders, king] of the last history_length positions, newest
+    first, for networks with history planes. Positions before the start of the game are zero planes.
+    """
+
+    def __init__(self, history_length: int, board_size: int):
+        self.history_length, self.board_size = history_length, board_size
+        self.history: List[np.ndarray] = []  # each (3, N, N), newest first
+
+    def push(self, piece_planes: np.ndarray):
+        """Add the piece planes of the newest position."""
+        self.history = [piece_planes.copy()] + self.history[:self.history_length - 1]
+
+    def get_state_with_history(self, current_player: int) -> np.ndarray:
+        """The piece planes of all history positions, then the player plane: (3T + 1, N, N)."""
+        n = self.board_size
+        state = np.zeros((3 * self.history_length + 1, n, n), dtype=np.float32)
+        for t, planes in enumerate(self.history):
+            state[3 * t:3 * t + 3] = planes
+        state[-1] = current_player
+        return state
+
+    def clone(self) -> "StateHistory":
+        new_history = StateHistory(self.history_length, self.board_size)
+        new_history.history = [planes.copy() for planes in self.history]
+        return new_history
+
+    @staticmethod
+    def from_game(game, history_length: int) -> "StateHistory":
+        """The history of a game, rebuilt from game.position_history (whose entries are
+        (board bytes, player to move), the current position last). This gives the same planes as
+        pushing every position during play."""
+        history = StateHistory(history_length, game.board.shape[0])
+        for board_bytes, _ in game.position_history[-history_length:]:  # oldest first; push prepends
+            board = np.frombuffer(board_bytes, dtype=game.board.dtype).reshape(game.board.shape)
+            history.push(np.stack([board == piece for piece in (ATTACKER, DEFENDER, KING)]).astype(np.float32))
+        return history
+
+
+def build_features(game, spec: FeatureSpec, history: Optional[StateHistory] = None) -> np.ndarray:
     """
     The network input of a position, shape (spec.num_planes, N, N), float32.
 
     Args:
-        game: the position (any Tafl game class)
+        game: the position (a tafl.Tafl game)
         spec: which planes to build
         history: a StateHistory whose newest entry is this position, for history_length > 1. If
                  None, the history is rebuilt from game.position_history.
     """
     if spec.history_length > 1:
         if history is None:
-            from network import StateHistory  # local import: network.py needs torch
             history = StateHistory.from_game(game, spec.history_length)
         planes = [history.get_state_with_history(game.current_player)]
     else:
@@ -179,5 +217,5 @@ def build_features(game, spec: FeatureSpec, history=None) -> np.ndarray:
     if spec.mobility_planes:
         planes.append(reach_planes(game))
     if spec.region_plane:
-        planes.append(king_region_plane(game)[None])
+        planes.append(defender_region_plane(game)[None])
     return np.concatenate(planes, axis=0) if len(planes) > 1 else planes[0]

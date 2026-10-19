@@ -1,15 +1,10 @@
 {
-  "name": "hnefatafl: 10 line blocks x 64, global-pool bias in every other block, conv policy, pooled value, constant planes",
+  "name": "copenhagen: 10 line blocks x 64, global-pool bias in every other block, conv policy, pooled value, constant planes",
   "game": {
-    "game": "hnefatafl",
-    "king_capture_pieces": 4,
-    "king_can_capture": true,
-    "throne_is_hostile": true,
-    "throne_enabled": true,
+    "ruleset": "copenhagen",
     "max_game_length": 300
   },
   "network": {
-    "arch": "tafl",
     "channels": 64,
     "blocks": [
       "line",
@@ -117,7 +112,7 @@
     "num_workers": null,
     "device": "cpu",
     "temp_dir": "/dev/shm/",
-    "checkpoint_dir": "checkpoints_hnefatafl/line_10x64_gpool",
+    "checkpoint_dir": "checkpoints/copenhagen/line_10x64_gpool",
     "save_frequency": 1,
     "log_frequency": 1,
     "verbose": true

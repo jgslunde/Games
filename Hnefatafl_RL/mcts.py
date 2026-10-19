@@ -1,5 +1,5 @@
 """
-Monte Carlo Tree Search for Brandubh with neural network evaluation.
+Monte Carlo Tree Search for the Tafl games (tafl.py) with neural network evaluation.
 Based on AlphaZero MCTS algorithm.
 
 Supports history planes: The network can receive T timesteps of history
@@ -14,9 +14,8 @@ from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 import math
 
-from brandubh import Brandubh
-from features import FeatureSpec, build_features
-from network import StateHistory
+from features import FeatureSpec, StateHistory, build_features
+from tafl import Tafl, move_index
 
 
 class MCTSNode:
@@ -30,7 +29,7 @@ class MCTSNode:
     - P(s,a): prior probability from neural network
     """
     
-    def __init__(self, game: Brandubh, parent=None, parent_action=None, prior: float = 0.0):
+    def __init__(self, game: Tafl, parent=None, parent_action=None, prior: float = 0.0):
         self.game = game
         self.parent = parent
         self.parent_action = parent_action
@@ -208,7 +207,7 @@ class MCTS:
     def __init__(self, network, num_simulations: int = 100, c_puct: float = 1.4, 
                  device: str = 'cpu', dirichlet_alpha: float = 0.3, 
                  dirichlet_epsilon: float = 0.25, add_dirichlet_noise: bool = False,
-                 move_encoder_class=None, fpu_reduction: float = -0.5,
+                 fpu_reduction: float = -0.5,
                  search_discount: float = 1.0, history_length: int = 1,
                  feature_spec: Optional[FeatureSpec] = None):
         """
@@ -222,8 +221,6 @@ class MCTS:
             dirichlet_alpha: concentration parameter for Dirichlet noise
             dirichlet_epsilon: weight of Dirichlet noise at root
             add_dirichlet_noise: whether to add exploration noise
-            move_encoder_class: MoveEncoder class for encoding/decoding moves
-                               (if None, the encoder of the game's board size is used)
             fpu_reduction: First Play Urgency reduction relative to parent's Q-value (default: -0.5)
                           Negative = pessimistic (unvisited nodes look worse than parent)
                           This follows Leela Chess Zero's implementation
@@ -246,7 +243,6 @@ class MCTS:
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
         self.add_dirichlet_noise = add_dirichlet_noise
-        self.move_encoder_class = move_encoder_class
         self.fpu_reduction = fpu_reduction
         self.search_discount = search_discount
         if feature_spec is None:
@@ -277,7 +273,7 @@ class MCTS:
         """Get timing statistics."""
         return self.timing_stats.copy()
     
-    def search(self, game: Brandubh, state_history: Optional[StateHistory] = None,
+    def search(self, game: Tafl, state_history: Optional[StateHistory] = None,
                time_limit: Optional[float] = None) -> Dict[Tuple, float]:
         """
         Run MCTS from the given game state.
@@ -380,7 +376,7 @@ class MCTS:
 
         return root.get_visit_distribution()
     
-    def _evaluate(self, game: Brandubh, legal_moves: List[Tuple],
+    def _evaluate(self, game: Tafl, legal_moves: List[Tuple],
                   state_history: Optional[StateHistory] = None) -> Tuple[np.ndarray, float]:
         """
         Evaluate a game state with the neural network.
@@ -396,12 +392,6 @@ class MCTS:
             policy_probs: probability distribution over legal_moves (same order)
             value: estimated value for current player
         """
-        # Get MoveEncoder class: the given one, else the encoder of this board size
-        if self.move_encoder_class is None:
-            from games import game_spec_for_board
-            self.move_encoder_class = game_spec_for_board(game.board.shape[0]).move_encoder_class
-        move_encoder = self.move_encoder_class
-
         # The network input. With history planes the history already ends with this position
         # (search() pushed it), so this gives the same layout as the training states.
         state = build_features(game, self.feature_spec,
@@ -419,7 +409,7 @@ class MCTS:
 
         # Softmax over the legal moves only. This equals a softmax over all moves with illegal moves
         # masked out, followed by picking the legal entries.
-        move_indices = [move_encoder.encode_move(move) for move in legal_moves]
+        move_indices = [move_index(move, game.size) for move in legal_moves]
         legal_logits = policy_logits[move_indices]
         legal_probs = self._softmax(legal_logits) if len(legal_moves) > 0 else legal_logits
 
@@ -453,7 +443,7 @@ class MCTS:
             child = node.children[action]
             child.prior = (1 - self.dirichlet_epsilon) * child.prior + self.dirichlet_epsilon * noise_value
     
-    def select_move(self, game: Brandubh, temperature: float = 1.0) -> Tuple[int, int, int, int]:
+    def select_move(self, game: Tafl, temperature: float = 1.0) -> Tuple[int, int, int, int]:
         """
         Select a move using MCTS.
         
@@ -496,7 +486,7 @@ class RandomRolloutMCTS:
     def __init__(self, num_simulations: int = 100):
         self.num_simulations = num_simulations
     
-    def search(self, game: Brandubh) -> Dict[Tuple, float]:
+    def search(self, game: Tafl) -> Dict[Tuple, float]:
         """Run MCTS with random rollouts."""
         root = MCTSNode(game.clone())
         
@@ -538,7 +528,7 @@ class RandomRolloutMCTS:
         
         return root.get_visit_distribution()
     
-    def _rollout(self, game: Brandubh) -> float:
+    def _rollout(self, game: Tafl) -> float:
         """Simulate random play until terminal state. Returns the result for the player to move in `game`."""
         player = game.current_player
         game = game.clone()
@@ -558,7 +548,7 @@ class RandomRolloutMCTS:
         else:
             return 0.0
     
-    def select_move(self, game: Brandubh, temperature: float = 0.0) -> Tuple[int, int, int, int]:
+    def select_move(self, game: Tafl, temperature: float = 0.0) -> Tuple[int, int, int, int]:
         """Select a move using random rollout MCTS."""
         visit_probs = self.search(game)
         
@@ -582,7 +572,7 @@ class RandomRolloutMCTS:
 if __name__ == "__main__":
     print("Testing MCTS with random rollouts...")
     
-    game = Brandubh()
+    game = Tafl("brandubh")
     mcts = RandomRolloutMCTS(num_simulations=50)
     
     print("Initial board:")

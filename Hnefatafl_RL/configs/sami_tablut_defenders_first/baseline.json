@@ -1,37 +1,29 @@
 {
-  "name": "tablut: 6 line blocks x 48, global-pool bias + reach planes from the move generator",
+  "name": "sami_tablut_defenders_first baseline: 6x48 plain blocks, dense heads (the old train_tablut.py defaults)",
   "game": {
-    "game": "tablut",
-    "king_capture_pieces": 2,
-    "king_can_capture": true,
-    "throne_is_hostile": false,
-    "throne_enabled": false,
+    "ruleset": "sami_tablut_defenders_first",
     "max_game_length": 200
   },
   "network": {
-    "arch": "tafl",
     "channels": 48,
     "blocks": [
-      "line",
-      "line",
-      "line",
-      "line",
-      "line",
-      "line"
+      "res",
+      "res",
+      "res",
+      "res",
+      "res",
+      "res"
     ],
-    "global_pool": "every_other",
-    "global_pool_channels": 16,
-    "bottleneck": 0.5,
-    "tie_blocks": false,
     "squeeze_excitation": false,
-    "policy_head": "conv",
-    "value_head": "pooled",
-    "value_hidden": 64,
-    "value_pool_channels": 16,
+    "global_pool": "none",
+    "policy_head": "dense",
+    "policy_dense_channels": 2,
+    "value_head": "dense",
+    "value_hidden": 128,
     "features": {
       "history_length": 1,
-      "constant_planes": true,
-      "mobility_planes": true,
+      "constant_planes": false,
+      "mobility_planes": false,
       "region_plane": false
     }
   },
@@ -110,7 +102,7 @@
     "num_workers": null,
     "device": "cpu",
     "temp_dir": "/dev/shm/",
-    "checkpoint_dir": "checkpoints_tablut/line_6x48_gpool_mobility",
+    "checkpoint_dir": "checkpoints/sami_tablut_defenders_first/baseline",
     "save_frequency": 1,
     "log_frequency": 1,
     "verbose": true

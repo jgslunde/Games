@@ -8,10 +8,12 @@ The ELO system is computed using a global optimization to best fit all match res
 Usage:
     python evaluate_elo.py <checkpoint_dir> [options]
 
+All games are played under the rule set and draw limit the checkpoints were trained with.
+
 Example:
-    python evaluate_elo.py checkpoints_brandubh/fatman_nothrone/ --num-games 20 --checkpoint-distance 5
-    python evaluate_elo.py checkpoints_tablut/jack_nothrone/ --game tablut --simulations 400
-    python evaluate_elo.py checkpoints_brandubh/jack_nothrone/ --num-games 10 --max-checkpoints 20
+    python evaluate_elo.py checkpoints/brandubh/line_4x32/ --num-games 20 --checkpoint-distance 5
+    python evaluate_elo.py checkpoints/copenhagen/line_10x64_gpool/ --simulations 400
+    python evaluate_elo.py checkpoints/brandubh/line_4x32/ --num-games 10 --max-checkpoints 20
 """
 
 import argparse
@@ -27,15 +29,9 @@ from scipy.optimize import minimize
 import multiprocessing as mp
 from functools import partial
 
-# Import game-specific modules
-from brandubh import Brandubh
-from tablut import Tablut
-from hnefatafl import Hnefatafl
-from network import MoveEncoder
-from network_tablut import TablutMoveEncoder
-from network_hnefatafl import HnefataflMoveEncoder
-from tafl_network import load_network
 from agent import Agent
+from tafl import Tafl, get_rules
+from tafl_network import load_network
 
 
 def extract_iteration_number(checkpoint_path: str) -> Optional[int]:
@@ -69,43 +65,29 @@ def extract_iteration_number(checkpoint_path: str) -> Optional[int]:
     return None
 
 
-def load_checkpoint(checkpoint_path: str, board_size: int, device: str = 'cpu'):
+def load_checkpoint(checkpoint_path: str, device: str = 'cpu'):
     """
     Load a neural network from checkpoint. The architecture (and the input planes it expects)
     is read from the checkpoint, so checkpoints of different architectures can be compared.
 
-    Args:
-        checkpoint_path: Path to checkpoint file
-        board_size: Board size of the game
-        device: Device to load on
-
     Returns:
         (network, search_discount): the loaded network, and the MCTS discount it was trained with
     """
-    try:
-        network, checkpoint = load_network(checkpoint_path, board_size=board_size, device=device)
-        config = checkpoint.get('config', {}) if isinstance(checkpoint.get('config'), dict) else {}
-        return network, config.get('search_discount', 1.0)
-
-    except Exception as e:
-        raise RuntimeError(f"Error loading checkpoint {checkpoint_path}: {e}")
+    network, checkpoint = load_network(checkpoint_path, device=device)
+    return network, checkpoint['config']['search_discount']
 
 
-def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, network1_path: str,
-                    network2_path: str, board_size: int, move_encoder_class, num_simulations: int,
-                    c_puct: float, device: str = 'cpu', temperature: float = 1.0, temperature_plies: int = 10,
-                    max_moves: int = 100) -> int:
+def play_single_game(agent1_is_attacker: bool, rules, network1_path: str, network2_path: str,
+                    num_simulations: int, c_puct: float, device: str = 'cpu', temperature: float = 1.0,
+                    temperature_plies: int = 10, max_moves: int = 100) -> int:
     """
     Play a single game between two checkpoints (worker function for multiprocessing).
 
     Args:
         agent1_is_attacker: Whether agent1 plays as attacker (FIRST argument for partial)
-        game_class: Game class to instantiate
-        game_rules: Dictionary of game rules
+        rules: the rule set (tafl.Rules)
         network1_path: Path to first checkpoint
         network2_path: Path to second checkpoint
-        board_size: Board size (the networks are built from their checkpoints)
-        move_encoder_class: Move encoder class
         num_simulations: MCTS simulations per move
         c_puct: MCTS exploration constant
         device: Device to use (cpu/cuda)
@@ -118,17 +100,15 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
         0 if agent1 wins, 1 if agent2 wins, 2 if draw
     """
     # Load networks; each agent searches with the discount its network was trained with and builds
-    # the input planes its network expects (Agent takes them from network.feature_spec or history_length)
-    network1, search_discount1 = load_checkpoint(network1_path, board_size, device)
-    network2, search_discount2 = load_checkpoint(network2_path, board_size, device)
+    # the input planes its network expects (Agent takes them from network.feature_spec)
+    network1, search_discount1 = load_checkpoint(network1_path, device)
+    network2, search_discount2 = load_checkpoint(network2_path, device)
 
     # Create agents
-    agent1 = Agent(network1, num_simulations=num_simulations, c_puct=c_puct,
-                  device=device, move_encoder_class=move_encoder_class,
-                  history_length=getattr(network1, 'history_length', 1), search_discount=search_discount1)
-    agent2 = Agent(network2, num_simulations=num_simulations, c_puct=c_puct,
-                  device=device, move_encoder_class=move_encoder_class,
-                  history_length=getattr(network2, 'history_length', 1), search_discount=search_discount2)
+    agent1 = Agent(network1, num_simulations=num_simulations, c_puct=c_puct, device=device,
+                   search_discount=search_discount1)
+    agent2 = Agent(network2, num_simulations=num_simulations, c_puct=c_puct, device=device,
+                   search_discount=search_discount2)
     
     # Set up agents based on colors
     if agent1_is_attacker:
@@ -137,7 +117,7 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
         agents = [agent2, agent1]  # agent2 as attacker, agent1 as defender
     
     # Play the game
-    game = game_class(**game_rules)
+    game = Tafl(rules)
     move_count = 0
     
     while not game.game_over:
@@ -169,10 +149,10 @@ def play_single_game(agent1_is_attacker: bool, game_class, game_rules: dict, net
         return 0 if game.winner == 1 else 1
 
 
-def play_match(checkpoint1_path: str, checkpoint2_path: str, game_class, game_rules: dict,
-              board_size: int, move_encoder_class, num_simulations: int, c_puct: float,
-              num_games: int = 10, num_workers: int = 1, device: str = 'cpu', temperature: float = 1.0,
-              temperature_plies: int = 10, max_moves: int = 100) -> Tuple[int, int, int]:
+def play_match(checkpoint1_path: str, checkpoint2_path: str, rules, num_simulations: int,
+              c_puct: float, num_games: int = 10, num_workers: int = 1, device: str = 'cpu',
+              temperature: float = 1.0, temperature_plies: int = 10,
+              max_moves: int = 100) -> Tuple[int, int, int]:
     """
     Play multiple games between two checkpoints, alternating colors.
     Uses multiprocessing to parallelize games.
@@ -180,10 +160,7 @@ def play_match(checkpoint1_path: str, checkpoint2_path: str, game_class, game_ru
     Args:
         checkpoint1_path: Path to first checkpoint
         checkpoint2_path: Path to second checkpoint
-        game_class: Game class to instantiate
-        game_rules: Dictionary of game rules
-        board_size: Board size of the game
-        move_encoder_class: Move encoder class
+        rules: the rule set (tafl.Rules)
         num_simulations: MCTS simulations per move
         c_puct: MCTS exploration constant
         num_games: Number of games to play (each agent plays num_games//2 as each color)
@@ -203,12 +180,9 @@ def play_match(checkpoint1_path: str, checkpoint2_path: str, game_class, game_ru
     # Create worker function with fixed parameters
     worker_func = partial(
         play_single_game,
-        game_class=game_class,
-        game_rules=game_rules,
+        rules=rules,
         network1_path=checkpoint1_path,
         network2_path=checkpoint2_path,
-        board_size=board_size,
-        move_encoder_class=move_encoder_class,
         num_simulations=num_simulations,
         c_puct=c_puct,
         device=device,
@@ -343,7 +317,7 @@ def save_results(checkpoint_dir: str,
     results = {
         'metadata': {
             'checkpoint_dir': checkpoint_dir,
-            'game': args.game,
+            'ruleset': args.ruleset,
             'num_games_per_match': args.num_games,
             'checkpoint_distance': args.checkpoint_distance,
             'simulations': args.simulations,
@@ -427,10 +401,7 @@ def main():
     parser.add_argument("checkpoint_dir", type=str,
                        help="Directory containing checkpoint files")
     
-    # Game settings
-    parser.add_argument("--game", type=str, default="brandubh",
-                       choices=["brandubh", "tablut", "hnefatafl"],
-                       help="Game variant (default: brandubh)")
+    # Search settings
     parser.add_argument("--simulations", type=int, default=200,
                        help="MCTS simulations per move (default: 200)")
     parser.add_argument("--c-puct", type=float, default=1.4,
@@ -462,17 +433,10 @@ def main():
                             "colours are identical (default: 1.0)")
     parser.add_argument("--temperature-plies", type=int, default=10,
                        help="Number of opening plies played with --temperature (default: 10)")
-    parser.add_argument("--max-moves", type=int, default=100,
-                       help="A game is a draw once more than this many plies have been played (default: 100)")
+    parser.add_argument("--max-moves", type=int, default=None,
+                       help="A game is a draw once more than this many plies have been played "
+                            "(default: the draw limit of the training run)")
 
-    # Game rules (optional overrides)
-    parser.add_argument("--king-capture-pieces", type=int, default=None, choices=[2, 3, 4],
-                       help="Number of pieces to capture king (default: from checkpoint)")
-    parser.add_argument("--throne-enabled", action="store_true", dest="throne_enabled", default=None,
-                       help="Throne is enabled (default: from checkpoint)")
-    parser.add_argument("--throne-disabled", action="store_false", dest="throne_enabled",
-                       help="Throne is disabled (default: from checkpoint)")
-    
     # System settings
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
                        help="Device to run on (default: cpu)")
@@ -485,20 +449,6 @@ def main():
     if not os.path.isdir(args.checkpoint_dir):
         print(f"Error: Directory not found: {args.checkpoint_dir}")
         return
-    
-    # Select game configuration
-    if args.game == "tablut":
-        game_class = Tablut
-        move_encoder_class = TablutMoveEncoder
-        board_size = 9
-    elif args.game == "hnefatafl":
-        game_class = Hnefatafl
-        move_encoder_class = HnefataflMoveEncoder
-        board_size = 11
-    else:  # brandubh
-        game_class = Brandubh
-        move_encoder_class = MoveEncoder
-        board_size = 7
     
     # Find all checkpoint files
     checkpoint_pattern = os.path.join(args.checkpoint_dir, args.pattern)
@@ -530,33 +480,22 @@ def main():
     checkpoints = all_checkpoints
     num_checkpoints = len(checkpoints)
 
-    # Game rules: the training rules stored in the first checkpoint, with command-line overrides.
-    # Rules missing from the checkpoint use the game class defaults.
-    rule_names = ['king_capture_pieces', 'king_can_capture', 'throne_is_hostile', 'throne_enabled']
-    training_rules = []
-    for cp in checkpoints:
-        config = torch.load(cp, map_location='cpu', weights_only=False).get('config', {})
-        training_rules.append({name: config[name] for name in rule_names if name in config})
-    game_rules = dict(training_rules[0])
-    other_rules = [cp for cp, rules in zip(checkpoints, training_rules) if rules != game_rules]
-    if other_rules:
-        print(f"WARNING: {len(other_rules)} checkpoints were trained with other rules than "
-              f"{checkpoints[0]} ({game_rules}), e.g. {other_rules[0]}. "
-              "All games use one set of rules (see below).")
-    if args.king_capture_pieces is not None:
-        game_rules['king_capture_pieces'] = args.king_capture_pieces
-    if args.throne_enabled is not None:
-        game_rules['throne_enabled'] = args.throne_enabled
+    # Rules and draw limit: those of the training run (all checkpoints of a run share them)
+    config = torch.load(checkpoints[0], map_location='cpu', weights_only=False)['config']
+    rules = get_rules(config['rules'])
+    args.ruleset = rules.name  # stored with the results
+    if args.max_moves is None:
+        args.max_moves = config['max_game_length']
 
     print("=" * 80)
-    print(f"ELO Evaluation - {args.game.capitalize()} ({board_size}x{board_size})")
+    print(f"ELO Evaluation - {rules.name} ({rules.board_size}x{rules.board_size})")
     print("=" * 80)
     print(f"Checkpoint directory:  {args.checkpoint_dir}")
     print(f"Number of checkpoints: {num_checkpoints}")
     print(f"Games per match:       {args.num_games}")
     print(f"Checkpoint distance:   {args.checkpoint_distance}")
     print(f"MCTS simulations:      {args.simulations}")
-    print(f"Game rules:            {game_rules}")
+    print(f"Rule set:              {rules.name}")
     print(f"Opening temperature:   {args.temperature} for {args.temperature_plies} plies")
     print(f"Draw after:            {args.max_moves} plies")
     print(f"Parallel workers:      {args.num_workers}")
@@ -629,10 +568,7 @@ def main():
             wins1, wins2, draws = play_match(
                 checkpoint1_path=checkpoint1,
                 checkpoint2_path=checkpoint2,
-                game_class=game_class,
-                game_rules=game_rules,
-                board_size=board_size,
-                move_encoder_class=move_encoder_class,
+                rules=rules,
                 num_simulations=args.simulations,
                 c_puct=args.c_puct,
                 num_games=args.num_games,

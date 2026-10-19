@@ -1,40 +1,29 @@
 """
-Generic agent wrapper for playing Tafl games (Brandubh, Tablut, etc.) using MCTS with neural network.
+Agents that play the Tafl games (tafl.py): MCTS with a neural network, random rollouts or random
+moves, and play_game to let two of them play one game.
 """
 
 import torch
 import numpy as np
 from typing import Tuple, Optional, Any
 
-
-try:
-    from mcts import MCTS, RandomRolloutMCTS
-except ImportError:
-    # Allow module to be imported even if mcts is not available
-    MCTS = None
-    RandomRolloutMCTS = None
+from mcts import MCTS, RandomRolloutMCTS
+from tafl import Tafl
 
 
 class Agent:
-    """
-    Generic agent that uses MCTS with neural network to play Tafl games.
-    Works with any game (Brandubh, Tablut, etc.) and network architecture.
-    """
-    
-    def __init__(self, network: Optional[Any] = None, network_class: Optional[type] = None,
-                 move_encoder_class: Optional[type] = None,
-                 num_simulations: int = 100, 
-                 c_puct: float = 1.4, device: str = 'cpu', 
-                 add_dirichlet_noise: bool = False, dirichlet_alpha: float = 0.3, 
+    """Plays with MCTS guided by a neural network."""
+
+    def __init__(self, network: Any, num_simulations: int = 100,
+                 c_puct: float = 1.4, device: str = 'cpu',
+                 add_dirichlet_noise: bool = False, dirichlet_alpha: float = 0.3,
                  dirichlet_epsilon: float = 0.25, fpu_reduction: float = -0.5,
                  history_length: int = 1, search_discount: float = 1.0, feature_spec=None):
         """
         Initialize agent.
 
         Args:
-            network: trained network instance (if None and network_class provided, creates untrained network)
-            network_class: class to instantiate if network is None (e.g., BrandubhNet, TablutNet)
-            move_encoder_class: MoveEncoder class for encoding/decoding moves (e.g., MoveEncoder, TablutMoveEncoder)
+            network: the network (a TaflNet, possibly compiled)
             num_simulations: number of MCTS simulations per move
             c_puct: exploration constant
             device: 'cpu' or 'cuda'
@@ -50,17 +39,14 @@ class Agent:
                           taken from network.feature_spec when the network has one, else from
                           history_length.
         """
-        if network is None and network_class is not None:
-            network = network_class()
         if feature_spec is None:
             feature_spec = getattr(network, 'feature_spec', None)
 
         self.network = network
         self.mcts = MCTS(network, num_simulations, c_puct, device,
                         dirichlet_alpha, dirichlet_epsilon, add_dirichlet_noise,
-                        move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction,
-                        search_discount=search_discount, history_length=history_length,
-                        feature_spec=feature_spec)
+                        fpu_reduction=fpu_reduction, search_discount=search_discount,
+                        history_length=history_length, feature_spec=feature_spec)
         self.feature_spec = self.mcts.feature_spec
         self.history_length = self.feature_spec.history_length
         self.device = device
@@ -163,30 +149,28 @@ class MCTSAgent:
         return self.mcts.select_move(game, temperature)
 
 
-def play_game(agent1, agent2, game_class, display: bool = True,
+def play_game(agent1, agent2, rules, display: bool = True,
               temperature: float = 0.0, temperature_mode: str = "fixed",
               temperature_threshold: int = 0, temperature_decay_moves: int = 0,
-              rules: dict = None, max_moves: int = 500) -> int:
+              max_moves: int = 500) -> int:
     """
     Play a game between two agents.
 
     Args:
         agent1: agent playing as attackers
         agent2: agent playing as defenders
-        game_class: game class to instantiate (e.g., Brandubh, Tablut)
+        rules: the rule set (a tafl.Rules object or the name of one)
         display: whether to print the game
         temperature: sampling temperature for move selection (0 = deterministic)
         temperature_mode: "fixed" (drop at threshold), "king" (drop when king leaves), or "decay" (linear)
         temperature_threshold: move number after which temperature drops to 0 (for "fixed" mode)
         temperature_decay_moves: number of moves for linear decay (for "decay" mode)
-        rules: keyword arguments for game_class (king_capture_pieces, king_can_capture,
-               throne_is_hostile, throne_enabled); None uses the game class defaults
         max_moves: the game is a draw once more than this many plies have been played
 
     Returns:
         winner: 0 for attackers, 1 for defenders, None for draw
     """
-    game = game_class(**(rules or {}))
+    game = Tafl(rules)
     agents = [agent1, agent2]
     move_count = 0
     
@@ -208,8 +192,7 @@ def play_game(agent1, agent2, game_class, display: bool = True,
         if temperature_mode == "king":
             # Drop temperature after king leaves throne
             if not king_left_throne:
-                # Check if king is still on throne
-                # KING = 3 in all Tafl variants (Brandubh, Tablut, Hnefatafl)
+                # Check if king is still on throne (KING = 3)
                 king_on_throne = (game.board[game.throne] == 3)
                 if not king_on_throne:
                     king_left_throne = True
@@ -268,108 +251,6 @@ def play_game(agent1, agent2, game_class, display: bool = True,
     return game.winner
 
 
-def evaluate_agents(agent1, agent2, game_class, num_games: int = 10) -> dict:
-    """
-    Evaluate two agents against each other.
-    
-    Args:
-        agent1: first agent
-        agent2: second agent
-        game_class: game class to instantiate (e.g., Brandubh, Tablut)
-        num_games: number of games to play
-    
-    Returns:
-        dict with statistics
-    """
-    agent1_wins = 0
-    agent2_wins = 0
-    draws = 0
-    agent1_attacker_wins = 0
-    agent2_attacker_wins = 0
-    
-    print(f"Playing {num_games} games...")
-    
-    for i in range(num_games):
-        # Alternate who plays attackers
-        if i % 2 == 0:
-            winner = play_game(agent1, agent2, game_class, display=False)
-            if winner is None:
-                draws += 1
-            elif winner == 0:
-                agent1_wins += 1
-                agent1_attacker_wins += 1
-            else:
-                agent2_wins += 1
-        else:
-            winner = play_game(agent2, agent1, game_class, display=False)
-            if winner is None:
-                draws += 1
-            elif winner == 0:
-                agent2_wins += 1
-                agent2_attacker_wins += 1
-            else:
-                agent1_wins += 1
-        
-        if (i + 1) % 5 == 0:
-            print(f"Completed {i + 1}/{num_games} games...")
-    
-    print("\n" + "=" * 50)
-    print("Evaluation Results:")
-    print("=" * 50)
-    print(f"Agent 1 wins: {agent1_wins}/{num_games} ({100*agent1_wins/num_games:.1f}%)")
-    print(f"Agent 2 wins: {agent2_wins}/{num_games} ({100*agent2_wins/num_games:.1f}%)")
-    print(f"Draws: {draws}/{num_games} ({100*draws/num_games:.1f}%)")
-    print(f"Agent 1 as attacker: {agent1_attacker_wins}/{num_games//2} wins")
-    print(f"Agent 2 as attacker: {agent2_attacker_wins}/{num_games//2} wins")
-    print("=" * 50)
-    
-    return {
-        'agent1_wins': agent1_wins,
-        'agent2_wins': agent2_wins,
-        'draws': draws,
-        'agent1_attacker_wins': agent1_attacker_wins,
-        'agent2_attacker_wins': agent2_attacker_wins,
-    }
-
-
-# Backward compatibility: Create aliases with game-specific names
-BrandubhAgent = Agent
-TablutAgent = Agent
-
-
 if __name__ == "__main__":
-    print("Generic Tafl Agent Module")
-    print("=" * 50)
-    
-    # Try to import Brandubh for testing
-    try:
-        from brandubh import Brandubh
-        from network import BrandubhNet, MoveEncoder
-        
-        print("\nTesting with Brandubh (7x7)...")
-        print("Creating agents...")
-        
-        # Create agents
-        random_agent = RandomAgent()
-        print("✓ Random agent created")
-        
-        mcts_agent = MCTSAgent(num_simulations=10)
-        print("✓ MCTS agent created (10 simulations)")
-        
-        # Note: Neural network agent requires PyTorch to be installed
-        try:
-            nn_agent = Agent(network_class=BrandubhNet, move_encoder_class=MoveEncoder, num_simulations=10)
-            print("✓ Neural network agent created (10 simulations)")
-            
-            print("\nTesting neural network agent vs random...")
-            play_game(nn_agent, random_agent, Brandubh, display=True)
-            
-        except Exception as e:
-            print(f"✗ Could not create neural network agent: {e}")
-            print("\nTesting MCTS agent vs random instead...")
-            play_game(mcts_agent, random_agent, Brandubh, display=True)
-            
-    except ImportError:
-        print("\nBrandubh not available. Skipping tests.")
-        print("To test with a specific game, import it and call:")
-        print("  play_game(agent1, agent2, GameClass, display=True)")
+    # Demo: random-rollout MCTS (attackers) against random moves (defenders) under Brandubh 2
+    play_game(MCTSAgent(num_simulations=50), RandomAgent(), "brandubh", display=True)

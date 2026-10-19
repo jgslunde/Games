@@ -4,12 +4,14 @@ Start a training run from a JSON config file.
 
 Usage:
     python run_training.py configs/brandubh/baseline.json
-    python run_training.py configs/tablut/line_6x48_gpool.json --set system.num_workers=16
+    python run_training.py configs/copenhagen/line_10x64_gpool.json --set system.num_workers=16
     python run_training.py configs/brandubh/baseline.json --set self_play.num_iterations=50 \
-        --set network.channels=48 --checkpoint-dir checkpoints_brandubh/test
-    python run_training.py configs/brandubh/baseline.json --resume checkpoints/.../checkpoint_iter_40.pth
+        --set network.channels=48 --checkpoint-dir checkpoints/brandubh/test
+    python run_training.py configs/brandubh/baseline.json --resume checkpoints/brandubh/baseline/checkpoint_iter_40.pth
     python run_training.py configs/brandubh/baseline.json --show      # print the resolved config only
 
+Configs live in configs/<rule set>/<run>.json and write to checkpoints/<rule set>/<run>/, so the
+directory of every network says which rules it was trained with (see RULESETS.md).
 The config file format is described in run_config.py; the network section in network_config.py.
 The resolved config (file + overrides) is printed at the start and written to
 <checkpoint_dir>/run_config.json, and every checkpoint also stores it.

@@ -14,8 +14,8 @@ All plots are saved in the same directory as the input file.
 
 Usage: python plot.py <path_to_output.txt> [path_to_output2.txt] [...]
 
-Example: python plot.py checkpoints_v05_fatman_asym_atkboost2_nodraw/output.txt
-Example: python plot.py checkpoints_brandubh/jack_nothrone/output.txt checkpoints_brandubh/jack_nothrone/output2.txt
+Example: python plot.py checkpoints/brandubh/line_4x32/output.txt
+Example: python plot.py checkpoints/brandubh/line_4x32/output.txt checkpoints/brandubh/baseline/output.txt
 """
 
 import sys

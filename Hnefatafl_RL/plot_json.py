@@ -13,8 +13,8 @@ All plots are saved in the same directory as the input file.
 
 Usage: python plot_json.py <path_to_training_history.json> [path_to_training_history2.json] [...]
 
-Example: python plot_json.py checkpoints_brandubh/jack_nothrone/training_history.json
-Example: python plot_json.py checkpoints_brandubh/jack_nothrone/training_history.json checkpoints_brandubh/jack_nothrone_v2/training_history.json
+Example: python plot_json.py checkpoints/brandubh/line_4x32/training_history.json
+Example: python plot_json.py checkpoints/brandubh/line_4x32/training_history.json checkpoints/brandubh/baseline/training_history.json
 """
 
 import sys

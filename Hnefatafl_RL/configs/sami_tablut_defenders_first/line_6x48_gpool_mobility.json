@@ -1,21 +1,12 @@
 {
-  "name": "hnefatafl: line_10x64_gpool + reach planes + king-region plane",
+  "name": "sami_tablut_defenders_first: 6 line blocks x 48, global-pool bias + reach planes from the move generator",
   "game": {
-    "game": "hnefatafl",
-    "king_capture_pieces": 4,
-    "king_can_capture": true,
-    "throne_is_hostile": true,
-    "throne_enabled": true,
-    "max_game_length": 300
+    "ruleset": "sami_tablut_defenders_first",
+    "max_game_length": 200
   },
   "network": {
-    "arch": "tafl",
-    "channels": 64,
+    "channels": 48,
     "blocks": [
-      "line",
-      "line",
-      "line",
-      "line",
       "line",
       "line",
       "line",
@@ -23,45 +14,42 @@
       "line",
       "line"
     ],
-    "bottleneck": 0.5,
-    "squeeze_excitation": false,
     "global_pool": "every_other",
     "global_pool_channels": 16,
+    "bottleneck": 0.5,
     "tie_blocks": false,
-    "attention_heads": 4,
+    "squeeze_excitation": false,
     "policy_head": "conv",
-    "policy_dense_channels": 2,
-    "policy_bilinear_dim": 32,
     "value_head": "pooled",
-    "value_hidden": 128,
+    "value_hidden": 64,
     "value_pool_channels": 16,
     "features": {
       "history_length": 1,
       "constant_planes": true,
       "mobility_planes": true,
-      "region_plane": true
+      "region_plane": false
     }
   },
   "self_play": {
-    "num_iterations": 400,
-    "num_games_per_iteration": 256,
+    "num_iterations": 1000,
+    "num_games_per_iteration": 512,
     "num_mcts_sims_attacker": 400,
     "num_mcts_sims_defender": 400,
     "c_puct": 2.0,
     "fpu_reduction": 0.0,
-    "search_discount": 0.995,
+    "search_discount": 0.99,
     "temperature": 1.0,
     "temperature_mode": "decay",
     "temperature_threshold": 10,
-    "temperature_decay_moves": 40,
+    "temperature_decay_moves": 30,
     "add_dirichlet_noise": true,
-    "dirichlet_alpha": 0.1,
+    "dirichlet_alpha": 0.15,
     "dirichlet_epsilon": 0.35,
     "use_random_opening_moves": true,
     "use_dynamic_sim_balancing": true,
     "dynamic_sim_adjustment_rate": 0.2,
     "dynamic_sim_min_win_rate": 0.2,
-    "reward_discount": 0.995,
+    "reward_discount": 0.99,
     "track_unique_states": true
   },
   "training": {
@@ -94,13 +82,13 @@
     "draw_penalty_defender": 0.0
   },
   "replay_buffer": {
-    "replay_buffer_size": 12000000,
+    "replay_buffer_size": 10000000,
     "min_buffer_size": 400000,
     "use_data_augmentation": true
   },
   "evaluation": {
     "eval_games": 128,
-    "eval_win_rate": 0.6,
+    "eval_win_rate": 0.7,
     "eval_frequency": 4,
     "eval_mcts_sims_attacker": 400,
     "eval_mcts_sims_defender": 400,
@@ -117,7 +105,7 @@
     "num_workers": null,
     "device": "cpu",
     "temp_dir": "/dev/shm/",
-    "checkpoint_dir": "checkpoints_hnefatafl/line_10x64_gpool_mobility_region",
+    "checkpoint_dir": "checkpoints/sami_tablut_defenders_first/line_6x48_gpool_mobility",
     "save_frequency": 1,
     "log_frequency": 1,
     "verbose": true

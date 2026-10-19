@@ -11,8 +11,8 @@ Implements the complete AlphaZero training pipeline:
 - Model evaluation and checkpointing
 - Data augmentation (symmetries)
 
-The game variant (games.py) and the network architecture (network_config.py, tafl_network.py)
-are both chosen by the TrainingConfig, so no game-specific training script is needed.
+The rule set (tafl.py) and the network architecture (network_config.py, tafl_network.py) are both
+chosen by the TrainingConfig, so no game-specific training script is needed.
 """
 
 import os
@@ -40,11 +40,11 @@ except ImportError:
 import torch.nn as nn
 
 from agent import Agent
-from features import build_features
-from games import game_spec
+from features import StateHistory, build_features
 from network_config import NetworkConfig
 from run_config import TrainingConfig, save_config  # TrainingConfig lives in run_config.py (JSON form there)
-from tafl_network import build_network, load_weights, describe_network
+from tafl import Tafl, move_index
+from tafl_network import TaflNet, load_weights, describe_network
 
 
 # =============================================================================
@@ -342,7 +342,7 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, value: float, board_si
     num_directions = 4
     policy_moves_per_square = num_directions * max_distance
     
-    # Explicit mapping for 90 degree clockwise rotation based on MoveEncoder definitions
+    # Explicit mapping for 90 degree clockwise rotation based on the policy index (tafl.move_index)
     # 0 (Up)    -> 3 (Right)
     # 3 (Right) -> 1 (Down)
     # 1 (Down)  -> 2 (Left)
@@ -467,10 +467,9 @@ def _play_self_play_game_worker_wrapper(args):
     return _play_self_play_game_worker(*args)
 
 
-def _play_self_play_game_worker(network_path, network_config, game_name,
+def _play_self_play_game_worker(network_path, network_config, rules,
                                 num_sims_attacker, num_sims_defender, c_puct, temperature, temperature_mode,
                                 temperature_threshold, temperature_decay_moves, game_idx,
-                                king_capture_pieces, king_can_capture, throne_is_hostile, throne_enabled,
                                 add_dirichlet_noise, dirichlet_alpha, dirichlet_epsilon, fpu_reduction, temp_dir=None,
                                 track_unique_states=False, use_random_opening_moves=False, max_game_length=500,
                                 search_discount=1.0):
@@ -481,7 +480,7 @@ def _play_self_play_game_worker(network_path, network_config, game_name,
     Args:
         network_path: Path to saved network weights file
         network_config: NetworkConfig.to_dict() of the network (architecture and input planes)
-        game_name: Game variant name (see games.py); gives the game class, board size and move encoder
+        rules: the rule set (tafl.Rules)
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
@@ -490,10 +489,6 @@ def _play_self_play_game_worker(network_path, network_config, game_name,
         temperature_threshold: Move number for temperature drop (for "fixed" mode)
         temperature_decay_moves: Number of moves for linear decay (for "decay" mode)
         game_idx: Game index for seeding
-        king_capture_pieces: Number of pieces to capture king
-        king_can_capture: Whether king can capture
-        throne_is_hostile: Whether throne is hostile for captures
-        throne_enabled: Whether throne exists and blocks movement
         add_dirichlet_noise: Whether to add Dirichlet noise for exploration
         dirichlet_alpha: Concentration parameter for Dirichlet noise
         dirichlet_epsilon: Weight of Dirichlet noise (0-1)
@@ -542,16 +537,15 @@ def _play_self_play_game_worker(network_path, network_config, game_name,
                                         f'torchinductor_{socket.gethostname()}_{os.getpid()}')
         os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
         
-        # Game variant, network architecture and input planes from the config
-        spec = game_spec(game_name)
-        GameClass, MoveEncoderClass, board_size = spec.game_class, spec.move_encoder_class, spec.board_size
+        # Network architecture and input planes from the config
+        board_size = rules.board_size
         net_config = NetworkConfig.from_dict(network_config)
         feature_spec = net_config.features
 
         from mcts import MCTS
 
         # Reconstruct network on CPU and load from file
-        network = build_network(net_config, board_size)
+        network = TaflNet(net_config, board_size)
         checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
         load_weights(network, checkpoint)
         network.to('cpu')
@@ -562,27 +556,18 @@ def _play_self_play_game_worker(network_path, network_config, game_name,
         network = network.optimize_for_inference(use_compile=True, compile_mode='default')
 
         # Create MCTS instances for each player (with different simulation counts)
-        # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
         mcts_attacker = MCTS(network, num_simulations=num_sims_attacker, c_puct=c_puct, device='cpu',
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
-                            dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
-                            fpu_reduction=fpu_reduction, search_discount=search_discount,
-                            feature_spec=feature_spec)
+                            dirichlet_epsilon=dirichlet_epsilon, fpu_reduction=fpu_reduction,
+                            search_discount=search_discount, feature_spec=feature_spec)
         mcts_defender = MCTS(network, num_simulations=num_sims_defender, c_puct=c_puct, device='cpu',
                             add_dirichlet_noise=add_dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
-                            dirichlet_epsilon=dirichlet_epsilon, move_encoder_class=MoveEncoderClass,
-                            fpu_reduction=fpu_reduction, search_discount=search_discount,
-                            feature_spec=feature_spec)
+                            dirichlet_epsilon=dirichlet_epsilon, fpu_reduction=fpu_reduction,
+                            search_discount=search_discount, feature_spec=feature_spec)
         mcts_attacker.reset_timing_stats()
         mcts_defender.reset_timing_stats()
-        
-        # Play game with configured rules
-        game = GameClass(
-            king_capture_pieces=king_capture_pieces,
-            king_can_capture=king_can_capture,
-            throne_is_hostile=throne_is_hostile,
-            throne_enabled=throne_enabled
-        )
+
+        game = Tafl(rules)
         states = []
         policies = []
         players = []
@@ -593,9 +578,7 @@ def _play_self_play_game_worker(network_path, network_config, game_name,
         state_hashes = [] if track_unique_states else None
         
         # Initialize state history for history planes support
-        # Import StateHistory from network module
         if feature_spec.history_length > 1:
-            from network import StateHistory
             state_history = StateHistory(history_length=feature_spec.history_length, board_size=board_size)
             state_history.push(game.get_piece_planes())
         else:
@@ -672,7 +655,7 @@ def _play_self_play_game_worker(network_path, network_config, game_name,
                 # Create policy with 100% on winning move
                 policy_size = board_size * board_size * 4 * (board_size - 1)
                 policy = np.zeros(policy_size, dtype=np.float32)
-                winning_move_idx = MoveEncoderClass.encode_move(mate_in_1_move)
+                winning_move_idx = move_index(mate_in_1_move, board_size)
                 policy[winning_move_idx] = 1.0
                 
                 # Create visit_probs for move selection (100% on winning move)
@@ -686,7 +669,7 @@ def _play_self_play_game_worker(network_path, network_config, game_name,
                 policy_size = board_size * board_size * 4 * (board_size - 1)
                 policy = np.zeros(policy_size, dtype=np.float32)
                 for move, prob in visit_probs.items():
-                    idx = MoveEncoderClass.encode_move(move)
+                    idx = move_index(move, board_size)
                     policy[idx] = prob
             
             # Store experience
@@ -727,11 +710,12 @@ def _play_self_play_game_worker(network_path, network_config, game_name,
             if move_count > max_game_length:
                 break
         
-        # Determine draw reason (only move limit can cause draws - repetitions are illegal moves)
+        # Draw reason: the move limit, or a repetition in rule sets where a repetition is a draw
         draw_reason = None
         if not game.game_over and move_count > max_game_length:
-            # Hit move limit without natural game end
             draw_reason = 'move_limit'
+        elif game.game_over and game.winner is None:
+            draw_reason = 'repetition'
         
         # Combine timing stats from both MCTS instances
         timing_attacker = mcts_attacker.get_timing_stats()
@@ -856,13 +840,11 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
     try:
         # Worker arguments for up to 2 * num_games_per_iteration games (only the first N finished are used)
         network_config = config.network.to_dict()
-        worker_args = [(temp_network_path, network_config, config.game,
+        worker_args = [(temp_network_path, network_config, config.rules,
                         num_sims_attacker, num_sims_defender,
                         config.c_puct, config.temperature, config.temperature_mode,
                         config.temperature_threshold, config.temperature_decay_moves,
-                        game_idx, config.king_capture_pieces, config.king_can_capture,
-                        config.throne_is_hostile, config.throne_enabled,
-                        config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
+                        game_idx, config.add_dirichlet_noise, config.dirichlet_alpha, config.dirichlet_epsilon,
                         config.fpu_reduction, config.temp_dir, config.track_unique_states,
                         config.use_random_opening_moves, config.max_game_length, config.search_discount)
                        for game_idx in range(2 * config.num_games_per_iteration)]
@@ -1342,9 +1324,9 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
 # EVALUATION
 # =============================================================================
 
-def _evaluate_vs_random_worker(network_path, network_config, game_name,
+def _evaluate_vs_random_worker(network_path, network_config, rules,
                                 num_sims_attacker, num_sims_defender, c_puct, nn_plays_attacker, game_idx,
-                                fpu_reduction=-0.5, rules=None, max_moves=500, search_discount=1.0):
+                                fpu_reduction=-0.5, max_moves=500, search_discount=1.0):
     """
     Worker function for parallel evaluation against random player.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1352,14 +1334,13 @@ def _evaluate_vs_random_worker(network_path, network_config, game_name,
     Args:
         network_path: Path to saved network weights file
         network_config: NetworkConfig.to_dict() of the network
-        game_name: Game variant name (see games.py)
+        rules: the rule set (tafl.Rules, the same as in self-play)
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
         nn_plays_attacker: Whether NN plays as attacker
         game_idx: Game index (unused, for pool.map)
         fpu_reduction: First Play Urgency reduction relative to parent Q-value (for evaluation)
-        rules: Game-rule keyword arguments for the game class (same rules as self-play)
         max_moves: Plies after which the game is a draw (same limit as self-play)
         search_discount: MCTS backup discount per move (same as self-play)
 
@@ -1385,15 +1366,13 @@ def _evaluate_vs_random_worker(network_path, network_config, game_name,
                                     f'torchinductor_{socket.gethostname()}_{os.getpid()}')
     os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
-    # Game variant, network architecture and input planes from the config
-    spec = game_spec(game_name)
-    GameClass, MoveEncoderClass, board_size = spec.game_class, spec.move_encoder_class, spec.board_size
+    # Network architecture and input planes from the config
     net_config = NetworkConfig.from_dict(network_config)
 
     from agent import Agent, RandomAgent, play_game
 
     # Reconstruct network on CPU and load from file
-    network = build_network(net_config, board_size)
+    network = TaflNet(net_config, rules.board_size)
     checkpoint = torch.load(network_path, map_location='cpu', weights_only=False)
     load_weights(network, checkpoint)
     network.to('cpu')
@@ -1407,16 +1386,14 @@ def _evaluate_vs_random_worker(network_path, network_config, game_name,
     num_simulations = num_sims_attacker if nn_plays_attacker else num_sims_defender
 
     # Create agents on CPU
-    # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
-    nn_agent = Agent(network, num_simulations=num_simulations,
-                     c_puct=c_puct, device='cpu', move_encoder_class=MoveEncoderClass,
+    nn_agent = Agent(network, num_simulations=num_simulations, c_puct=c_puct, device='cpu',
                      fpu_reduction=fpu_reduction, feature_spec=net_config.features,
                      search_discount=search_discount)
     random_agent = RandomAgent()
-    
+
     # Play game
     if nn_plays_attacker:
-        winner = play_game(nn_agent, random_agent, GameClass, display=False, rules=rules, max_moves=max_moves)
+        winner = play_game(nn_agent, random_agent, rules, display=False, max_moves=max_moves)
         if winner == 0:
             return 1.0  # NN wins
         elif winner is None:
@@ -1424,7 +1401,7 @@ def _evaluate_vs_random_worker(network_path, network_config, game_name,
         else:
             return 0.0  # NN loses
     else:
-        winner = play_game(random_agent, nn_agent, GameClass, display=False, rules=rules, max_moves=max_moves)
+        winner = play_game(random_agent, nn_agent, rules, display=False, max_moves=max_moves)
         if winner == 1:
             return 1.0  # NN wins
         elif winner is None:
@@ -1492,9 +1469,6 @@ def evaluate_vs_random(network: nn.Module, config: TrainingConfig,
         cleanup_temp_file = False
     
     # Evaluation games use the same rules and draw limit as self-play
-    game_rules = dict(king_capture_pieces=config.king_capture_pieces, king_can_capture=config.king_can_capture,
-                      throne_is_hostile=config.throne_is_hostile, throne_enabled=config.throne_enabled)
-
     try:
         # Create worker functions with partial for attacker and defender games
         network_config = config.network.to_dict()
@@ -1502,13 +1476,12 @@ def evaluate_vs_random(network: nn.Module, config: TrainingConfig,
             _evaluate_vs_random_worker,
             temp_network_path,
             network_config,
-            config.game,
+            config.rules,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.eval_c_puct,
             True,  # nn_plays_attacker
             fpu_reduction=config.eval_fpu_reduction,
-            rules=game_rules,
             max_moves=config.max_game_length,
             search_discount=config.search_discount
         )
@@ -1517,13 +1490,12 @@ def evaluate_vs_random(network: nn.Module, config: TrainingConfig,
             _evaluate_vs_random_worker,
             temp_network_path,
             network_config,
-            config.game,
+            config.rules,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.eval_c_puct,
             False,  # nn_plays_attacker
             fpu_reduction=config.eval_fpu_reduction,
-            rules=game_rules,
             max_moves=config.max_game_length,
             search_discount=config.search_discount
         )
@@ -1592,10 +1564,10 @@ def evaluate_vs_random(network: nn.Module, config: TrainingConfig,
 
 
 def _evaluate_networks_worker(new_network_path, old_network_path,
-                             network_config, game_name, num_sims_attacker, num_sims_defender, c_puct,
+                             network_config, rules, num_sims_attacker, num_sims_defender, c_puct,
                              new_plays_attacker,
                              game_idx, temperature, temperature_mode, temperature_threshold, temperature_decay_moves, fpu_reduction, temp_dir=None,
-                             rules=None, max_moves=500, search_discount=1.0):
+                             max_moves=500, search_discount=1.0):
     """
     Worker function for parallel network evaluation.
     Must be at module level for multiprocessing. Imports inside to avoid pickling issues.
@@ -1604,7 +1576,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         new_network_path: Path to saved new network weights file
         old_network_path: Path to saved old network weights file
         network_config: NetworkConfig.to_dict() of both networks
-        game_name: Game variant name (see games.py)
+        rules: the rule set (tafl.Rules, the same as in self-play)
         num_sims_attacker: MCTS simulations per move for attacker
         num_sims_defender: MCTS simulations per move for defender
         c_puct: MCTS exploration constant
@@ -1615,7 +1587,6 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         temperature_threshold: Move number for temperature drop (for "fixed" mode)
         temperature_decay_moves: Number of moves for linear decay (for "decay" mode)
         fpu_reduction: First Play Urgency reduction relative to parent Q-value (for evaluation)
-        rules: Game-rule keyword arguments for the game class (same rules as self-play)
         max_moves: Plies after which the game is a draw (same limit as self-play)
         search_discount: MCTS backup discount per move (same as self-play)
 
@@ -1651,15 +1622,13 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                                     f'torchinductor_{socket.gethostname()}_{os.getpid()}')
     os.environ['TORCHINDUCTOR_CACHE_DIR'] = worker_cache_dir
     
-    # Game variant, network architecture and input planes from the config
-    spec = game_spec(game_name)
-    GameClass, MoveEncoderClass, board_size = spec.game_class, spec.move_encoder_class, spec.board_size
+    # Network architecture and input planes from the config
     net_config = NetworkConfig.from_dict(network_config)
 
     from agent import Agent, play_game
 
     # Reconstruct networks on CPU and load from files
-    new_network = build_network(net_config, board_size)
+    new_network = TaflNet(net_config, rules.board_size)
     checkpoint = torch.load(new_network_path, map_location='cpu', weights_only=False)
     load_weights(new_network, checkpoint)
     new_network.to('cpu')
@@ -1669,7 +1638,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
     # Each worker has its own cache directory, so no contention
     new_network = new_network.optimize_for_inference(use_compile=True, compile_mode='default')
 
-    old_network = build_network(net_config, board_size)
+    old_network = TaflNet(net_config, rules.board_size)
     checkpoint = torch.load(old_network_path, map_location='cpu', weights_only=False)
     load_weights(old_network, checkpoint)
     old_network.to('cpu')
@@ -1685,23 +1654,19 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
 
     # Create agents on CPU, without Dirichlet noise: the match measures the real players, and the
     # evaluation temperature already varies the openings.
-    # Pass MoveEncoderClass to ensure correct encoder is used (especially after torch.compile)
-    new_agent = Agent(new_network, num_simulations=new_sims,
-                      c_puct=c_puct, device='cpu',
-                      move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction,
-                      feature_spec=net_config.features, search_discount=search_discount)
-    old_agent = Agent(old_network, num_simulations=old_sims,
-                      c_puct=c_puct, device='cpu',
-                      move_encoder_class=MoveEncoderClass, fpu_reduction=fpu_reduction,
-                      feature_spec=net_config.features, search_discount=search_discount)
-    
+    new_agent = Agent(new_network, num_simulations=new_sims, c_puct=c_puct, device='cpu',
+                      fpu_reduction=fpu_reduction, feature_spec=net_config.features,
+                      search_discount=search_discount)
+    old_agent = Agent(old_network, num_simulations=old_sims, c_puct=c_puct, device='cpu',
+                      fpu_reduction=fpu_reduction, feature_spec=net_config.features,
+                      search_discount=search_discount)
+
     # Play game
     if new_plays_attacker:
-        winner = play_game(new_agent, old_agent, GameClass, display=False,
+        winner = play_game(new_agent, old_agent, rules, display=False,
                           temperature=temperature, temperature_mode=temperature_mode,
                           temperature_threshold=temperature_threshold,
-                          temperature_decay_moves=temperature_decay_moves,
-                          rules=rules, max_moves=max_moves)
+                          temperature_decay_moves=temperature_decay_moves, max_moves=max_moves)
         if winner == 0:
             return 1.0  # New network wins
         elif winner is None:
@@ -1709,11 +1674,10 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         else:
             return 0.0  # New network loses
     else:
-        winner = play_game(old_agent, new_agent, GameClass, display=False,
+        winner = play_game(old_agent, new_agent, rules, display=False,
                           temperature=temperature, temperature_mode=temperature_mode,
                           temperature_threshold=temperature_threshold,
-                          temperature_decay_moves=temperature_decay_moves,
-                          rules=rules, max_moves=max_moves)
+                          temperature_decay_moves=temperature_decay_moves, max_moves=max_moves)
         if winner == 1:
             return 1.0  # New network wins
         elif winner is None:
@@ -1785,16 +1749,13 @@ def evaluate_networks(new_network: nn.Module, old_network: nn.Module,
         remainder = config.eval_games % 2
 
         # Evaluation games use the same rules and draw limit as self-play
-        game_rules = dict(king_capture_pieces=config.king_capture_pieces, king_can_capture=config.king_can_capture,
-                          throne_is_hostile=config.throne_is_hostile, throne_enabled=config.throne_enabled)
-
         network_config = config.network.to_dict()
         worker_func_new_attacker = partial(
             _evaluate_networks_worker,
             temp_new_path,
             temp_old_path,
             network_config,
-            config.game,
+            config.rules,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.eval_c_puct,
@@ -1807,7 +1768,6 @@ def evaluate_networks(new_network: nn.Module, old_network: nn.Module,
             temperature_decay_moves=config.eval_temperature_decay_moves,
             fpu_reduction=config.eval_fpu_reduction,
             temp_dir=config.temp_dir,
-            rules=game_rules,
             max_moves=config.max_game_length,
             search_discount=config.search_discount
         )
@@ -1817,7 +1777,7 @@ def evaluate_networks(new_network: nn.Module, old_network: nn.Module,
             temp_new_path,
             temp_old_path,
             network_config,
-            config.game,
+            config.rules,
             config.eval_mcts_sims_attacker,
             config.eval_mcts_sims_defender,
             config.eval_c_puct,
@@ -1830,11 +1790,10 @@ def evaluate_networks(new_network: nn.Module, old_network: nn.Module,
             temperature_decay_moves=config.eval_temperature_decay_moves,
             fpu_reduction=config.eval_fpu_reduction,
             temp_dir=config.temp_dir,
-            rules=game_rules,
             max_moves=config.max_game_length,
             search_discount=config.search_discount
         )
-        
+
         # Play games in parallel. Both colours are submitted before waiting, so all workers stay
         # busy instead of running the two halves one after the other.
         if config.num_workers > 1:
@@ -1998,8 +1957,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     if config.temp_dir is not None:
         print(f"Using custom temp directory: {temp_dir_path}")
     
-    # Validate the game name and the network config
-    config.game_spec
+    # Validate the network config (from_dict already checked the rule set name)
     config.network.validate()
 
     # Write the resolved configuration next to the checkpoints, so that a run's settings can be read
@@ -2016,7 +1974,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     save_config(config, config_path)
 
     print("=" * 70)
-    print(f"{config.game_class.__name__} AlphaZero Training" + (f" - {config.name}" if config.name else ""))
+    print(f"Tafl AlphaZero Training ({config.ruleset})" + (f" - {config.name}" if config.name else ""))
     print("=" * 70)
     
     # Training configuration
@@ -2028,19 +1986,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     
     # Game rules
     print("\n--- Game Rules ---")
-    print(f"King capture pieces: {config.king_capture_pieces}")
-    capture_desc = {
-        2: "(standard custodian - 2 opposite attackers)",
-        3: "(3 out of 4 sides surrounded)",
-        4: "(all 4 sides surrounded)"
-    }
-    print(f"  {capture_desc.get(config.king_capture_pieces, '')}")
-    print(f"King can capture: {config.king_can_capture}")
-    print(f"Throne enabled: {config.throne_enabled}")
-    if config.throne_enabled:
-        print(f"Throne is hostile: {config.throne_is_hostile}")
-    else:
-        print(f"  (Throne disabled - center square acts as normal square)")
+    print(config.rules.describe())
+    print(f"Draw after {config.max_game_length} plies")
     
     # Network architecture
     print("\n--- Network Architecture ---")
@@ -2171,7 +2118,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     print()
     
     # Initialize network
-    network = build_network(config.network, config.board_size).to(config.device)
+    network = TaflNet(config.network, config.board_size).to(config.device)
 
     # Calculate and display network size
     total_params = sum(p.numel() for p in network.parameters())
@@ -2229,7 +2176,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
     # We'll compile a separate copy for training only
 
     # Initialize best network (for evaluation)
-    best_network = build_network(config.network, config.board_size).to(config.device)
+    best_network = TaflNet(config.network, config.board_size).to(config.device)
 
     # Load best network from best_model.pth if resuming and it exists, otherwise copy current network
     best_model_path = os.path.join(config.checkpoint_dir, 'best_model.pth')
@@ -2324,7 +2271,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             'metadata': {
                 'start_date': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'run_name': config.name,
-                'game_type': config.game_class.__name__,
+                'ruleset': config.ruleset,
                 'board_size': config.board_size,
                 'network_architecture': {
                     'type': type(network).__name__,
@@ -2335,12 +2282,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                     'num_parameters': total_params,
                     'config': config.network.to_dict(),
                 },
-                'game_rules': {
-                    'king_capture_pieces': config.king_capture_pieces,
-                    'king_can_capture': config.king_can_capture,
-                    'throne_is_hostile': config.throne_is_hostile,
-                    'throne_enabled': config.throne_enabled,
-                },
+                'rules': config.rules.to_dict(),
                 'mcts_params': {
                     'selfplay_simulations_attacker': config.num_mcts_sims_attacker,
                     'selfplay_simulations_defender': config.num_mcts_sims_defender,

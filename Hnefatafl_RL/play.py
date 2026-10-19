@@ -2,16 +2,16 @@
 Play Tafl games between two AI agents loaded from checkpoints.
 Displays the game state and move history.
 
-Supports Brandubh (7x7), Tablut (9x9), and Hnefatafl (11x11) variants.
+The games are played under the rule set the first checkpoint was trained with (--ruleset names
+another set of tafl.RULESETS on the same board).
 
 Usage:
     python play.py <checkpoint1> <checkpoint2> [options]
-    
+
 Example:
-    python play.py checkpoints/best_model.pth checkpoints/checkpoint_iter_5.pth
-    python play.py model1.pth model2.pth --game tablut --simulations 200
-    python play.py model1.pth model2.pth --game hnefatafl --simulations 200
-    python play.py model1.pth model2.pth --king-capture-pieces 4 --throne-is-hostile
+    python play.py checkpoints/brandubh/baseline/best_model.pth checkpoints/brandubh/baseline/checkpoint_iter_5.pth
+    python play.py model1.pth model2.pth --simulations 200
+    python play.py model1.pth model2.pth --ruleset fetlar
     python play.py model1.pth model2.pth --num-games 10 --swap-colors  # 20 games total
     python play.py model1.pth model2.pth --num-games 50 --num-workers 16  # Parallel games
     python play.py model1.pth model2.pth --time-per-move 1.0  # 1 second per move
@@ -26,22 +26,13 @@ import numpy as np
 import setproctitle
 
 from run_training import PROCESS_TITLE
-from brandubh import Brandubh
-from tablut import Tablut
-from hnefatafl import Hnefatafl
 from agent import Agent
+from tafl import Tafl, get_rules
 from tafl_network import load_network, describe_network
 
 
-def checkpoint_search_discount(checkpoint: dict) -> float:
-    """The MCTS discount a checkpoint's network was trained with (1.0 if it does not say)."""
-    config = checkpoint.get('config', {})
-    return config.get('search_discount', 1.0) if isinstance(config, dict) else 1.0
-
-
-def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1_plays_attacker, 
-                              game_name, simulations, king_capture_pieces, king_can_capture,
-                              throne_is_hostile, throne_enabled, time_per_move, temperature,
+def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1_plays_attacker,
+                              rules, simulations, time_per_move, temperature,
                               c_puct1, c_puct2, fpu_reduction1, fpu_reduction2, temperature_threshold,
                               max_moves, dirichlet_noise, dirichlet_alpha):
     """
@@ -58,35 +49,24 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
         # has drawn a random number, and would then play identical games
         np.random.seed()
 
-        # Create game environment
-        from games import game_spec
-        spec = game_spec(game_name)
-        game_cls, board_size = spec.game_class, spec.board_size
-        
-        game_state = game_cls(
-            king_capture_pieces=king_capture_pieces,
-            king_can_capture=king_can_capture,
-            throne_is_hostile=throne_is_hostile,
-            throne_enabled=throne_enabled
-        )
-        
+        game_state = Tafl(rules)
+
         # Load the networks; their architecture and input planes come from the checkpoints, so two
         # different architectures can play each other
         device = torch.device('cpu')
-        network1, checkpoint1 = load_network(checkpoint1_path, board_size=board_size)
-        network2, checkpoint2 = load_network(checkpoint2_path, board_size=board_size)
-        search_discount1 = checkpoint_search_discount(checkpoint1)
-        search_discount2 = checkpoint_search_discount(checkpoint2)
-        
-        # Create agents with separate C_PUCT and FPU values (the input planes follow the network)
+        network1, checkpoint1 = load_network(checkpoint1_path)
+        network2, checkpoint2 = load_network(checkpoint2_path)
+
+        # Create agents with separate C_PUCT and FPU values (the input planes follow the network).
+        # Each agent searches with the discount its network was trained with.
         agent1 = Agent(network1, num_simulations=simulations, device=device,
                       c_puct=c_puct1, fpu_reduction=fpu_reduction1,
                       add_dirichlet_noise=dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
-                      history_length=getattr(network1, 'history_length', 1), search_discount=search_discount1)
+                      search_discount=checkpoint1['config']['search_discount'])
         agent2 = Agent(network2, num_simulations=simulations, device=device,
                       c_puct=c_puct2, fpu_reduction=fpu_reduction2,
                       add_dirichlet_noise=dirichlet_noise, dirichlet_alpha=dirichlet_alpha,
-                      history_length=getattr(network2, 'history_length', 1), search_discount=search_discount2)
+                      search_discount=checkpoint2['config']['search_discount'])
 
         # Play game
         move_count = 0
@@ -146,50 +126,28 @@ def play_single_game_worker(game_idx, checkpoint1_path, checkpoint2_path, agent1
         return (None, 'error', -1)
 
 
-def load_checkpoint_with_rules(checkpoint_path: str, force_rules: dict = None, game_class=None):
+def load_checkpoint_with_rules(checkpoint_path: str):
     """
-    Load neural network from checkpoint and extract rules.
-    
-    Args:
-        checkpoint_path: Path to checkpoint file
-        force_rules: Optional dict of rules to force (overrides checkpoint)
-        game_class: Game class (Brandubh, Tablut, or Hnefatafl) - determines network type
-    
+    Load a network from a training checkpoint, with the rules and settings it was trained with.
+
     Returns:
-        (network, rules_dict, search_discount) tuple; search_discount is the MCTS discount the network
-        was trained with (1.0 if the checkpoint does not say)
+        (network, rules, search_discount, max_game_length): rules is a tafl.Rules, search_discount the
+        MCTS discount and max_game_length the draw limit of the training run
     """
     try:
-        board_size = getattr(game_class, 'BOARD_SIZE', None)
-        if board_size is None and game_class is not None:
-            board_size = game_class().board.shape[0]
-        network, checkpoint = load_network(checkpoint_path, board_size=board_size)
-        search_discount = checkpoint_search_discount(checkpoint)
-        config = checkpoint.get('config', {}) if isinstance(checkpoint.get('config'), dict) else {}
-
-        # Game rules from the checkpoint (can be overridden); defaults for very old checkpoints
-        if force_rules is not None:
-            rules = force_rules
-        else:
-            rules = {
-                'king_capture_pieces': config.get('king_capture_pieces', 2),
-                'king_can_capture': config.get('king_can_capture', True),
-                'throne_is_hostile': config.get('throne_is_hostile', False),
-                'throne_enabled': config.get('throne_enabled', True),
-            }
-
-        print(f"Loaded network from {checkpoint_path}")
-        print(f"  Architecture: {describe_network(network)}")
-        print(f"  Search discount: {search_discount}")
-
-        return network, rules, search_discount
-        
+        network, checkpoint = load_network(checkpoint_path)
     except Exception as e:
         print(f"Error loading checkpoint {checkpoint_path}: {e}")
         sys.exit(1)
+    config = checkpoint['config']
+    rules = get_rules(config['rules'])
+    print(f"Loaded network from {checkpoint_path}")
+    print(f"  Architecture: {describe_network(network)}")
+    print(f"  Rule set: {rules.name}; search discount: {config['search_discount']}")
+    return network, rules, config['search_discount'], config['max_game_length']
 
 
-def play_game_between_agents(agent1, agent2, game_class, rules, display=True, temperature=0.0, time_per_move=None,
+def play_game_between_agents(agent1, agent2, rules, display=True, temperature=0.0, time_per_move=None,
                              temperature_threshold=999, max_moves=100):
     """
     Play a game between two AI agents.
@@ -197,8 +155,7 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
     Args:
         agent1: Agent playing as attacker
         agent2: Agent playing as defender
-        game_class: Game class (Brandubh or Tablut)
-        rules: Dictionary of game rules
+        rules: the rule set (tafl.Rules)
         display: Whether to print the board state
         temperature: Temperature for move selection (0=deterministic)
         time_per_move: Optional time limit per move in seconds (if None, uses simulations)
@@ -209,17 +166,14 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
         winner: 0 for Attackers, 1 for Defenders, None for draw
         num_moves: Number of moves in the game
     """
-    game = game_class(**rules)
+    game = Tafl(rules)
     move_count = 0
-    
+
     if display:
         print("=" * 50)
-        print(f"Starting new game of {game_class.__name__}")
+        print("Starting new game")
         print("=" * 50)
-        print(f"Rules: King capture pieces={rules['king_capture_pieces']}, "
-              f"King can capture={rules['king_can_capture']}, "
-              f"Throne hostile={rules['throne_is_hostile']}, "
-              f"Throne enabled={rules['throne_enabled']}")
+        print(rules.describe())
         if time_per_move is not None:
             print(f"Time per move: {time_per_move} seconds")
         print("\nInitial board:")
@@ -281,9 +235,9 @@ def play_game_between_agents(agent1, agent2, game_class, rules, display=True, te
     return game.winner, move_count
 
 
-def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alternate_colors=True, 
+def play_multiple_games(agent1, agent2, rules, num_games=10, alternate_colors=True,
                         display=False, temperature=0.0, time_per_move=None, num_workers=1,
-                        checkpoint1_path=None, checkpoint2_path=None, game_name=None, simulations=None,
+                        checkpoint1_path=None, checkpoint2_path=None, simulations=None,
                         c_puct1=1.4, c_puct2=1.4, fpu_reduction1=-0.5, fpu_reduction2=-0.5, temperature_threshold=999,
                         max_moves=100, dirichlet_noise=False, dirichlet_alpha=0.3):
     """
@@ -292,8 +246,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
     Args:
         agent1: First agent
         agent2: Second agent
-        game_class: Game class to use
-        rules: Dictionary of game rules
+        rules: the rule set (tafl.Rules)
         num_games: Number of games to play
         alternate_colors: If True, agents alternate colors each game. 
                          If False, each pairing is played twice (once per color)
@@ -303,7 +256,6 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
         num_workers: Number of parallel workers (if > 1, uses multiprocessing)
         checkpoint1_path: Path to checkpoint1 (required for multiprocessing)
         checkpoint2_path: Path to checkpoint2 (required for multiprocessing)
-        game_name: Name of game variant (required for multiprocessing)
         simulations: Number of MCTS simulations (required for multiprocessing)
         max_moves: The game is a draw once more than this many plies have been played
         dirichlet_noise, dirichlet_alpha: Root noise for the agents built in worker processes
@@ -332,18 +284,11 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
     
     # Use multiprocessing if num_workers > 1
     if num_workers > 1:
-        if checkpoint1_path is None or checkpoint2_path is None or game_name is None or simulations is None:
-            raise ValueError("For multiprocessing, checkpoint paths, game_name, and simulations must be provided")
-        
+        if checkpoint1_path is None or checkpoint2_path is None or simulations is None:
+            raise ValueError("For multiprocessing, checkpoint paths and simulations must be provided")
+
         print(f"Using {num_workers} parallel workers...")
 
-        
-        # Extract rule parameters (only the ones that exist in game classes)
-        king_capture_pieces = rules.get('king_capture_pieces', 2)
-        king_can_capture = rules.get('king_can_capture', True)
-        throne_is_hostile = rules.get('throne_is_hostile', False)
-        throne_enabled = rules.get('throne_enabled', True)
-        
         # Create list of game configurations
         game_configs = []
         for i in range(games_to_play):
@@ -354,8 +299,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
             
             game_configs.append((
                 i, checkpoint1_path, checkpoint2_path, agent1_plays_attacker,
-                game_name, simulations, king_capture_pieces, king_can_capture,
-                throne_is_hostile, throne_enabled, time_per_move, temperature,
+                rules, simulations, time_per_move, temperature,
                 c_puct1, c_puct2, fpu_reduction1, fpu_reduction2, temperature_threshold,
                 max_moves, dirichlet_noise, dirichlet_alpha
             ))
@@ -411,7 +355,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                     # Agent1 as attacker, Agent2 as defender
                     agent1_attacker_games += 1
                     agent2_defender_games += 1
-                    winner, moves = play_game_between_agents(agent1, agent2, game_class, rules,
+                    winner, moves = play_game_between_agents(agent1, agent2, rules,
                                                              display=display, temperature=temperature,
                                                              time_per_move=time_per_move, temperature_threshold=temperature_threshold,
                                                              max_moves=max_moves)
@@ -423,7 +367,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                     # Agent2 as attacker, Agent1 as defender
                     agent2_attacker_games += 1
                     agent1_defender_games += 1
-                    winner, moves = play_game_between_agents(agent2, agent1, game_class, rules,
+                    winner, moves = play_game_between_agents(agent2, agent1, rules,
                                                              display=display, temperature=temperature,
                                                              time_per_move=time_per_move, temperature_threshold=temperature_threshold,
                                                              max_moves=max_moves)
@@ -438,7 +382,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                     # Agent1 as attacker, Agent2 as defender
                     agent1_attacker_games += 1
                     agent2_defender_games += 1
-                    winner, moves = play_game_between_agents(agent1, agent2, game_class, rules,
+                    winner, moves = play_game_between_agents(agent1, agent2, rules,
                                                              display=display, temperature=temperature,
                                                              time_per_move=time_per_move, temperature_threshold=temperature_threshold,
                                                              max_moves=max_moves)
@@ -450,7 +394,7 @@ def play_multiple_games(agent1, agent2, game_class, rules, num_games=10, alterna
                     # Agent2 as attacker, Agent1 as defender
                     agent2_attacker_games += 1
                     agent1_defender_games += 1
-                    winner, moves = play_game_between_agents(agent2, agent1, game_class, rules,
+                    winner, moves = play_game_between_agents(agent2, agent1, rules,
                                                              display=display, temperature=temperature,
                                                              time_per_move=time_per_move, temperature_threshold=temperature_threshold,
                                                              max_moves=max_moves)
@@ -548,8 +492,8 @@ def main():
                        help="Path to first checkpoint (.pth file) - plays as attacker")
     parser.add_argument("checkpoint2", type=str,
                        help="Path to second checkpoint (.pth file) - plays as defender")
-    parser.add_argument("--game", type=str, default="brandubh", choices=["brandubh", "tablut", "hnefatafl"],
-                       help="Game variant: brandubh (7x7), tablut (9x9), or hnefatafl (11x11) (default: brandubh)")
+    parser.add_argument("--ruleset", type=str, default=None,
+                       help="Play under this rule set of tafl.RULESETS (default: that of checkpoint 1)")
     parser.add_argument("--simulations", type=int, default=100,
                        help="Number of MCTS simulations per move (default: 100)")
     parser.add_argument("--c-puct", type=float, default=1.4,
@@ -578,102 +522,32 @@ def main():
                        help="Number of parallel workers for playing multiple games (default: 1, sequential)")
     parser.add_argument("--time-per-move", type=float, default=None,
                        help="Time limit per move in seconds (overrides --simulations if specified)")
-    parser.add_argument("--max-moves", type=int, default=100,
+    parser.add_argument("--max-moves", type=int, default=None,
                        help="A game is a draw once more than this many plies have been played "
-                            "(default: 100, the Brandubh training default)")
+                            "(default: the draw limit of checkpoint 1's training run)")
     parser.add_argument("--display", action="store_true",
                        help="Display board state during play (default: shown for single game, hidden for multiple games)")
     parser.add_argument("--swap-colors", action="store_true",
                        help="Play each game twice with colors swapped. With --num-games N, "
                             "plays 2N games total (N pairings × 2 colors). "
                             "Default behavior alternates colors between games.")
-    
-    # Game rule arguments (optional - will use checkpoint config by default)
-    parser.add_argument("--king-capture-pieces", type=int, default=None, choices=[2, 3, 4],
-                       help="Number of pieces required to capture king: 2, 3, or 4. "
-                            "If not specified, uses rules from checkpoint.")
-    parser.add_argument("--king-can-capture", action="store_true", dest="king_can_capture_flag", default=None,
-                       help="King CAN help capture enemy pieces (overrides checkpoint)")
-    parser.add_argument("--king-cannot-capture", action="store_false", dest="king_can_capture_flag",
-                       help="King CANNOT help capture enemy pieces (overrides checkpoint)")
-    parser.add_argument("--throne-is-hostile", action="store_true", dest="throne_is_hostile_flag", default=None,
-                       help="Throne IS hostile for captures (overrides checkpoint)")
-    parser.add_argument("--throne-not-hostile", action="store_false", dest="throne_is_hostile_flag",
-                       help="Throne is NOT hostile for captures (overrides checkpoint)")
-    parser.add_argument("--throne-enabled", action="store_true", dest="throne_enabled_flag", default=None,
-                       help="Throne IS enabled - blocks movement (overrides checkpoint)")
-    parser.add_argument("--throne-disabled", action="store_false", dest="throne_enabled_flag",
-                       help="Throne is DISABLED - center is normal square (overrides checkpoint)")
-    parser.add_argument("--force-rules", action="store_true",
-                       help="Use command-line rules for any unspecified options (instead of checkpoint defaults)")
-    
+
     args = parser.parse_args()
     setproctitle.setproctitle(PROCESS_TITLE)  # the name of this process and its workers in top/ps
 
-    # Build forced rules dict if specified
-    force_rules = None
-    if args.force_rules or any([
-        args.king_capture_pieces is not None,
-        args.king_can_capture_flag is not None,
-        args.throne_is_hostile_flag is not None,
-        args.throne_enabled_flag is not None
-    ]):
-        # Start with defaults when forcing rules
-        if args.force_rules:
-            force_rules = {
-                'king_capture_pieces': 2,
-                'king_can_capture': True,
-                'throne_is_hostile': False,
-                'throne_enabled': True,
-            }
-        else:
-            force_rules = {}
-        
-        # Override with any explicitly specified values
-        if args.king_capture_pieces is not None:
-            force_rules['king_capture_pieces'] = args.king_capture_pieces
-        if args.king_can_capture_flag is not None:
-            force_rules['king_can_capture'] = args.king_can_capture_flag
-        if args.throne_is_hostile_flag is not None:
-            force_rules['throne_is_hostile'] = args.throne_is_hostile_flag
-        if args.throne_enabled_flag is not None:
-            force_rules['throne_enabled'] = args.throne_enabled_flag
-    
-    # Select game class first (needed for network loading)
-    if args.game.lower() == 'tablut':
-        game_class = Tablut
-    elif args.game.lower() == 'hnefatafl':
-        game_class = Hnefatafl
-    else:
-        game_class = Brandubh
-    
-    # Load checkpoints with correct network type
     print("Loading checkpoints...\n")
-    network1, rules1, search_discount1 = load_checkpoint_with_rules(args.checkpoint1, force_rules, game_class)
-    network2, rules2, search_discount2 = load_checkpoint_with_rules(args.checkpoint2, force_rules, game_class)
-    
-    # Use rules from first checkpoint (or forced rules if specified)
-    rules = rules1
-    
-    if not force_rules and rules1 != rules2:
-        print("\nWarning: Checkpoints have different game rules!")
-        print(f"Checkpoint 1 rules: {rules1}")
-        print(f"Checkpoint 2 rules: {rules2}")
-        print("Using rules from checkpoint 1. Use --force-rules to override.")
-    
-    print(f"\nUsing rules: {rules}")
-    
-    # Determine move encoder class based on game type
-    if game_class == Tablut:
-        from network_tablut import TablutMoveEncoder
-        move_encoder_class = TablutMoveEncoder
-    elif game_class == Hnefatafl:
-        from network_hnefatafl import HnefataflMoveEncoder
-        move_encoder_class = HnefataflMoveEncoder
-    else:
-        from network import MoveEncoder
-        move_encoder_class = MoveEncoder
-    
+    network1, rules1, search_discount1, max_game_length = load_checkpoint_with_rules(args.checkpoint1)
+    network2, rules2, search_discount2, _ = load_checkpoint_with_rules(args.checkpoint2)
+    if rules1 != rules2 and args.ruleset is None:
+        print(f"\nWarning: the checkpoints were trained under different rules ({rules1.name} and "
+              f"{rules2.name}); playing under those of checkpoint 1. Use --ruleset to choose.")
+    rules = get_rules(args.ruleset) if args.ruleset is not None else rules1
+    if rules.board_size != network1.board_size or rules.board_size != network2.board_size:
+        sys.exit(f"Rule set {rules.name} is played on a different board than the networks")
+    if args.max_moves is None:
+        args.max_moves = max_game_length
+    print(f"\n{rules.describe()}")
+
     # Determine C_PUCT and FPU values for each agent
     c_puct1 = args.c_puct1 if args.c_puct1 is not None else args.c_puct
     c_puct2 = args.c_puct2 if args.c_puct2 is not None else args.c_puct
@@ -684,7 +558,7 @@ def main():
     print("\n" + "=" * 50)
     print("Game Parameters:")
     print("=" * 50)
-    print(f"Game variant: {args.game}")
+    print(f"Rule set: {rules.name}; draw after {args.max_moves} plies")
     print(f"Number of simulations: {args.simulations}")
     if args.time_per_move is not None:
         print(f"Time per move: {args.time_per_move}s (overrides simulations)")
@@ -711,23 +585,21 @@ def main():
     # with the discount its network was trained with.
     agent1 = Agent(network1, num_simulations=args.simulations, c_puct=c_puct1, device='cpu',
                    add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha,
-                   move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction1,
-                   history_length=getattr(network1, 'history_length', 1), search_discount=search_discount1)
+                   fpu_reduction=fpu_reduction1, search_discount=search_discount1)
     agent2 = Agent(network2, num_simulations=args.simulations, c_puct=c_puct2, device='cpu',
                    add_dirichlet_noise=args.dirichlet_noise, dirichlet_alpha=args.dirichlet_alpha,
-                   move_encoder_class=move_encoder_class, fpu_reduction=fpu_reduction2,
-                   history_length=getattr(network2, 'history_length', 1), search_discount=search_discount2)
+                   fpu_reduction=fpu_reduction2, search_discount=search_discount2)
 
     # Play games
     if args.num_games == 1 and not args.swap_colors:
         # Single game - display by default (unless --display explicitly set to override)
         display = args.display if args.display else True
-        play_game_between_agents(agent1, agent2, game_class, rules, display=display,
+        play_game_between_agents(agent1, agent2, rules, display=display,
                                 temperature=args.temperature, time_per_move=args.time_per_move,
                                 temperature_threshold=args.temperature_threshold, max_moves=args.max_moves)
     else:
         # Multiple games - hide display by default (unless --display explicitly set)
-        play_multiple_games(agent1, agent2, game_class, rules, 
+        play_multiple_games(agent1, agent2, rules,
                           num_games=args.num_games, 
                           alternate_colors=not args.swap_colors,
                           display=args.display,
@@ -736,7 +608,6 @@ def main():
                           num_workers=args.num_workers,
                           checkpoint1_path=args.checkpoint1,
                           checkpoint2_path=args.checkpoint2,
-                          game_name=args.game,
                           simulations=args.simulations,
                           c_puct1=c_puct1,
                           c_puct2=c_puct2,

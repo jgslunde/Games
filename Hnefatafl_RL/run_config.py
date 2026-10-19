@@ -7,7 +7,9 @@ as run_config.json when training starts, so a run's settings can always be read 
 
     {
       "name": "...",                       free text, shown in the log
-      "game": {"game": "brandubh", "king_capture_pieces": 2, ...},
+      "game": {"ruleset": "copenhagen", "max_game_length": 300},
+                                           a named rule set of tafl.RULESETS (it fixes the board,
+                                           the starting position and every rule)
       "network": {...}                     a NetworkConfig (network_config.py), or the path of a
                                            JSON file holding one, relative to this file
       "self_play": {...}, "training": {...}, "replay_buffer": {...},
@@ -24,8 +26,8 @@ import multiprocessing as mp
 import os
 from typing import Dict, List, Optional
 
-from games import game_spec
 from network_config import NetworkConfig
+from tafl import RULESETS, Rules, policy_size
 
 
 class TrainingConfig:
@@ -34,11 +36,7 @@ class TrainingConfig:
     name = ""                         # Free-text label of the run
 
     # Game
-    game = "brandubh"                 # "brandubh", "tablut" or "hnefatafl" (see games.py)
-    king_capture_pieces = 2           # Pieces required to capture king (2, 3, or 4)
-    king_can_capture = True           # Whether king can help capture enemy pieces
-    throne_is_hostile = False         # Whether throne counts as hostile square for captures
-    throne_enabled = True             # Whether throne exists and blocks non-king movement
+    ruleset = "brandubh"              # A rule set name of tafl.RULESETS
     max_game_length = 500             # Maximum plies before declaring a draw
 
     # Self-play
@@ -123,22 +121,14 @@ class TrainingConfig:
         if self.num_workers is None:
             self.num_workers = mp.cpu_count()
 
-    # --- derived from the game name --------------------------------------------------------
+    # --- derived from the rule set ----------------------------------------------------------
     @property
-    def game_spec(self):
-        return game_spec(self.game)
-
-    @property
-    def game_class(self):
-        return self.game_spec.game_class
-
-    @property
-    def move_encoder_class(self):
-        return self.game_spec.move_encoder_class
+    def rules(self) -> Rules:
+        return RULESETS[self.ruleset]
 
     @property
     def board_size(self) -> int:
-        return self.game_spec.board_size
+        return self.rules.board_size
 
     @property
     def num_squares(self) -> int:
@@ -147,12 +137,7 @@ class TrainingConfig:
     @property
     def policy_size(self) -> int:
         """num_squares * 4 directions * (board_size - 1) distances"""
-        return self.num_squares * 4 * (self.board_size - 1)
-
-    @property
-    def game_rules(self) -> dict:
-        return dict(king_capture_pieces=self.king_capture_pieces, king_can_capture=self.king_can_capture,
-                    throne_is_hostile=self.throne_is_hostile, throne_enabled=self.throne_enabled)
+        return policy_size(self.board_size)
 
     # --- JSON form ---------------------------------------------------------------------------
     def to_dict(self) -> dict:
@@ -168,8 +153,7 @@ class TrainingConfig:
 
 # The JSON sections and the TrainingConfig attributes in each
 SECTIONS: Dict[str, List[str]] = {
-    "game": ["game", "king_capture_pieces", "king_can_capture", "throne_is_hostile", "throne_enabled",
-             "max_game_length"],
+    "game": ["ruleset", "max_game_length"],
     "self_play": ["num_iterations", "num_games_per_iteration", "num_mcts_sims_attacker",
                   "num_mcts_sims_defender", "c_puct", "fpu_reduction", "search_discount", "temperature",
                   "temperature_mode", "temperature_threshold", "temperature_decay_moves",
@@ -204,20 +188,15 @@ def to_dict(config: TrainingConfig) -> dict:
 
 def to_flat_dict(config: TrainingConfig) -> dict:
     """
-    Every setting as one flat dict (as stored in checkpoints): the sectioned fields, the network
-    config under 'network', and the old network keys (num_res_blocks, num_channels, ...) so that
-    older tools can still read it.
+    Every setting as one flat dict (as stored in checkpoints): the sectioned fields, the board size,
+    the complete rules under 'rules' (so a checkpoint keeps its rules even if a named rule set is
+    changed later) and the network config under 'network'.
     """
-    flat = {"name": config.name, "board_size": config.board_size}
+    flat = {"name": config.name, "board_size": config.board_size, "rules": config.rules.to_dict()}
     for fields in SECTIONS.values():
         for field in fields:
             flat[field] = copy.deepcopy(getattr(config, field))
-    net = config.network
-    flat["network"] = net.to_dict()
-    flat["num_res_blocks"] = net.num_blocks
-    flat["num_channels"] = net.channels
-    flat["value_head_hidden_size"] = net.value_hidden
-    flat["history_length"] = net.features.history_length
+    flat["network"] = config.network.to_dict()
     return flat
 
 
@@ -245,7 +224,8 @@ def from_dict(data: dict, base: Optional[TrainingConfig] = None) -> TrainingConf
         config.network = network if isinstance(network, NetworkConfig) else NetworkConfig.from_dict(network)
     if config.num_workers is None:
         config.num_workers = mp.cpu_count()
-    game_spec(config.game)  # validate the game name
+    if config.ruleset not in RULESETS:
+        raise ValueError(f"Unknown rule set '{config.ruleset}'; choose one of {sorted(RULESETS)}")
     return config
 
 

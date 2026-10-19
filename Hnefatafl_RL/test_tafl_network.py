@@ -12,22 +12,21 @@ import tempfile
 import numpy as np
 import torch
 
-from brandubh import Brandubh
-from features import FeatureSpec, build_features, constant_planes, king_region_plane, reach_planes
-from games import GAMES, game_spec
-from hnefatafl import Hnefatafl
-from network import MoveEncoder
+from dataclasses import replace
+
+from features import FeatureSpec, build_features, constant_planes, defender_region_plane, reach_planes
 from network_config import NetworkConfig
 from run_config import TrainingConfig, apply_overrides, from_dict, load_config
-from tafl_network import (BilinearPolicyHead, ConvPolicyHead, TaflNet, build_network, count_parameters,
-                          load_network, load_weights, move_index_tables, network_config_from_checkpoint)
+from tafl import ATTACKER, DEFENDER, KING, RULESETS, Tafl, move_index, policy_size
+from tafl_network import (BilinearPolicyHead, ConvPolicyHead, TaflNet, count_parameters, load_network,
+                          load_weights, move_index_tables)
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 
 
-def random_position(game_class, rng, rules=None, max_plies=40):
+def random_position(rules, rng, max_plies=40):
     """A position reached by random play (or the start position)."""
-    game = game_class(**(rules or {}))
+    game = Tafl(rules)
     for _ in range(rng.integers(0, max_plies + 1)):
         moves = game.get_legal_moves()
         if game.game_over or not moves:
@@ -37,63 +36,64 @@ def random_position(game_class, rng, rules=None, max_plies=40):
 
 
 def test_reach_planes_match_move_generator():
-    """The vectorised reach planes must equal the game's own move generator for both sides, with
-    and without the throne, and the king-region plane must agree with the encirclement check."""
+    """The vectorised reach planes must equal the game's own move generator for both sides, in
+    every rule set (corners or not, throne or not), and the defender-region plane must equal the
+    encirclement check."""
     rng = np.random.default_rng(0)
-    for spec in GAMES.values():
-        n = spec.board_size
-        for throne_enabled in (False, True):
-            for _ in range(30):
-                game = random_position(spec.game_class, rng, dict(throne_enabled=throne_enabled),
-                                       max_plies=150)
-                expected = np.zeros((3, n, n), dtype=np.float32)
-                for r in range(n):
-                    for c in range(n):
-                        piece = game.board[r, c]
-                        if piece == 0:
-                            continue
-                        for _, _, tr, tc in game._get_piece_moves(r, c):
-                            expected[0 if piece == 1 else 1, tr, tc] = 1
-                            if piece == 3:
-                                expected[2, tr, tc] = 1
-                assert np.array_equal(reach_planes(game), expected), f"reach planes differ ({spec.name})"
+    rule_sets = list(RULESETS.values()) + [replace(RULESETS["brandubh"], throne=False)]
+    for rules in rule_sets:
+        n = rules.board_size
+        for _ in range(20):
+            game = random_position(rules, rng, max_plies=150)
+            expected = np.zeros((3, n, n), dtype=np.float32)
+            for player in (0, 1):
+                # The moves of each side, without the repetition rule
+                side = game.clone()
+                side.current_player, side._legal_moves_key = player, None
+                side.position_history = [side._position_key()]
+                for fr, fc, tr, tc in side.get_legal_moves():
+                    expected[player, tr, tc] = 1
+                    if game.board[fr, fc] == KING:
+                        expected[2, tr, tc] = 1
+            assert np.array_equal(reach_planes(game), expected), f"reach planes differ ({rules.name})"
     for _ in range(30):
-        game = random_position(Hnefatafl, rng, max_plies=80)
-        region = king_region_plane(game)
-        if not (game.board == 3).any():
-            assert not region.any()
-            continue
+        game = random_position("copenhagen", rng, max_plies=80)
+        region = defender_region_plane(game)
         touches_edge = region[0].any() or region[-1].any() or region[:, 0].any() or region[:, -1].any()
-        assert touches_edge == (not game._is_king_encircled()), "region plane disagrees with encirclement"
-        assert region[game.board == 3].all() and not region[game.board == 1].any()
-    # A hand-made ring of attackers: the region is the inside of the ring
-    game = Hnefatafl()
+        assert touches_edge != game._defenders_encircled(), "region plane disagrees with encirclement"
+        assert region[game.board >= DEFENDER].all() and not region[game.board == ATTACKER].any()
+    # A hand-made ring of attackers around the lone king: the region is the inside of the ring,
+    # until a defender stands outside it
+    game = Tafl("copenhagen")
     game.board[:] = 0
-    game.board[5, 5] = 3
+    game.board[5, 5] = KING
     for r, c in [(3, 5), (7, 5), (5, 3), (5, 7), (4, 4), (4, 6), (6, 4), (6, 6)]:
-        game.board[r, c] = 1
-    region = king_region_plane(game)
-    assert region.sum() == 5 and game._is_king_encircled()
-    print("  reach planes equal the move generator; king-region plane equals the encirclement flood fill")
+        game.board[r, c] = ATTACKER
+    assert defender_region_plane(game).sum() == 5 and game._defenders_encircled()
+    game.board[0, 2] = DEFENDER
+    assert defender_region_plane(game).sum() == 121 - 8 and not game._defenders_encircled()  # both areas
+    print("  reach planes equal the move generator; defender-region plane equals the encirclement test")
     return True
 
 
 def test_feature_layout():
     """Plane names, counts and contents of every feature option."""
-    game = Brandubh(throne_enabled=True)
+    game = Tafl("brandubh")
     full = FeatureSpec(history_length=2, constant_planes=True, mobility_planes=True, region_plane=True)
     names = full.plane_names()
     assert names == ["attackers_t0", "defenders_t0", "king_t0", "attackers_t1", "defenders_t1", "king_t1",
                      "player", "ones", "corners", "throne", "reach_attackers", "reach_defenders",
-                     "reach_king", "king_region"]
+                     "reach_king", "defender_region"]
     state = build_features(game, full)
     assert state.shape == (14, 7, 7) and state.dtype == np.float32
     assert np.array_equal(state[:3], game.get_state()[:3]) and not state[3:6].any()  # no earlier position
     assert np.array_equal(state[6], game.get_state()[3])
     assert state[7].all() and state[8].sum() == 4 and state[8, 0, 0] == 1 and state[9].sum() == 1 and state[9, 3, 3] == 1
-    assert np.array_equal(state[10:13], reach_planes(game)) and np.array_equal(state[13], king_region_plane(game))
+    assert np.array_equal(state[10:13], reach_planes(game)) and np.array_equal(state[13], defender_region_plane(game))
     assert set(np.unique(state)) <= {0.0, 1.0}
-    assert not constant_planes(Brandubh(throne_enabled=False))[2].any(), "disabled throne must give an empty plane"
+    no_throne = Tafl(replace(RULESETS["brandubh"], throne=False))
+    assert not constant_planes(no_throne)[2].any(), "no throne must give an empty throne plane"
+    assert not constant_planes(Tafl("sami_tablut"))[1].any(), "edge goal must give an empty corner plane"
     # The default spec gives the classic 4 planes
     assert np.array_equal(build_features(game, FeatureSpec()), game.get_state())
     print("  feature planes: names, order and contents as documented")
@@ -101,29 +101,27 @@ def test_feature_layout():
 
 
 def test_policy_head_index_order():
-    """Both new policy heads must put move (from, direction, distance) where MoveEncoder puts it."""
-    for name, spec in GAMES.items():
-        n = spec.board_size
-        encoder = spec.move_encoder_class
+    """Both policy heads must put move (from, direction, distance) where tafl.move_index puts it."""
+    for ruleset in ("brandubh", "sami_tablut", "copenhagen"):
+        game = Tafl(ruleset)
+        n = game.size
         head = ConvPolicyHead(8, n)
         with torch.no_grad():
             head.conv.weight.zero_()
             head.conv.bias.copy_(torch.arange(4 * (n - 1), dtype=torch.float32))
         logits = head(torch.zeros(1, 8, n, n))[0]
         to_square, on_board = move_index_tables(n)
-        game = spec.game_class(throne_enabled=False)
         for move in game.get_legal_moves():
-            idx = encoder.encode_move(move)
+            idx = move_index(move, n)
             direction, distance = (idx % (4 * (n - 1))) // (n - 1), idx % (n - 1) + 1
             assert logits[idx].item() == direction * (n - 1) + distance - 1
             assert on_board[idx] and to_square[idx] == move[2] * n + move[3]
-            assert encoder.decode_move(idx) == move
-        assert on_board.sum() == sum(1 for i in range(len(on_board)) if on_board[i])
+            assert idx // (4 * (n - 1)) == move[0] * n + move[1]
         bilinear = BilinearPolicyHead(8, n, dim=4)
         logits = bilinear(torch.randn(2, 8, n, n))
-        assert logits.shape == (2, n * n * 4 * (n - 1))
+        assert logits.shape == (2, policy_size(n))
         assert (logits[:, ~torch.from_numpy(on_board)] == -1e4).all() and torch.isfinite(logits).all()
-    print("  conv and bilinear policy heads use the MoveEncoder index order")
+    print("  conv and bilinear policy heads use the policy index order")
     return True
 
 
@@ -188,21 +186,20 @@ def test_architectures_forward_and_onnx():
         import onnxruntime as ort
     except ImportError:
         ort = None
-    for spec in GAMES.values():
-        n = spec.board_size
+    for n in (7, 9, 11):
         for arch in ARCHITECTURES:
             config = NetworkConfig.from_dict(arch)
-            network = build_network(config, n)
+            network = TaflNet(config, n)
             planes = config.features.num_planes
             x = (torch.rand(4, planes, n, n) < 0.2).float()
             network.train()
             policy, value = network(x)
-            assert policy.shape == (4, spec.policy_size) and value.shape == (4, 1)
+            assert policy.shape == (4, policy_size(n)) and value.shape == (4, 1)
             (policy.logsumexp(1).mean() + value.mean()).backward()
             network.eval()
             with torch.no_grad():
                 policy1, value1 = network(x[:1])
-            assert policy1.shape == (1, spec.policy_size) and -1 <= value1.item() <= 1
+            assert policy1.shape == (1, policy_size(n)) and -1 <= value1.item() <= 1
             assert count_parameters(network) > 0
             if config.tie_blocks:
                 assert len(network.blocks) == 1 and len(network.block_order) == 3
@@ -224,9 +221,9 @@ def test_architectures_forward_and_onnx():
 
 
 def test_checkpoint_loading_and_stem_adaptation():
-    """Networks must come back from checkpoints (new and legacy format), and weights must transfer
-    to a network with more input planes: the shared planes keep their weights."""
-    from network import BrandubhNet
+    """Networks must come back from checkpoints, and weights must transfer to a network with more
+    input planes: the shared planes keep their weights. Deprecated checkpoints (no network config)
+    must be refused with a clear error."""
     with tempfile.TemporaryDirectory() as tmp:
         config = NetworkConfig(channels=16, blocks=["line"] * 2, features=FeatureSpec(constant_planes=True))
         network = TaflNet(config, 9).eval()
@@ -245,56 +242,51 @@ def test_checkpoint_loading_and_stem_adaptation():
         x_big = torch.cat([x, torch.zeros(1, 3, 9, 9)], dim=1)
         with torch.no_grad():
             assert torch.allclose(bigger(x_big)[0], network(x)[0], atol=1e-6)
-        # Legacy checkpoint (old flat config, old class)
-        legacy = BrandubhNet(num_res_blocks=1, num_channels=8).eval()
-        legacy_path = os.path.join(tmp, "legacy.pth")
-        torch.save({"model_state_dict": legacy.state_dict(),
-                    "config": {"num_res_blocks": 1, "num_channels": 8, "board_size": 7,
-                               "value_head_hidden_size": 64, "history_length": 1}}, legacy_path)
-        loaded, checkpoint = load_network(legacy_path)
-        assert isinstance(loaded, BrandubhNet)
-        assert network_config_from_checkpoint(checkpoint).arch == "legacy"
-        x7 = (torch.rand(1, 4, 7, 7) < 0.2).float()
-        with torch.no_grad():
-            assert torch.equal(loaded(x7)[1], legacy(x7)[1])
-        # A legacy checkpoint without a board size is recognised by its policy head
-        torch.save({"model_state_dict": legacy.state_dict()}, legacy_path)
-        assert isinstance(load_network(legacy_path)[0], BrandubhNet)
-    print("  checkpoints load (new and legacy); weights transfer to networks with more input planes")
+        # A deprecated checkpoint (old flat config without a network config)
+        old_path = os.path.join(tmp, "old.pth")
+        torch.save({"model_state_dict": network.state_dict(), "config": {"num_channels": 16}}, old_path)
+        try:
+            load_network(old_path)
+            assert False, "a checkpoint without network config was loaded"
+        except ValueError as e:
+            assert "deprecated" in str(e)
+    print("  checkpoints load; weights transfer to networks with more input planes; old ones refused")
     return True
 
 
 def test_run_configs():
     """All shipped configs must load, round-trip through their JSON form, accept overrides and
-    reject unknown keys. Within a game the experiments may differ from the baseline only in the
-    network (so a comparison measures the network), and the search must discount like the value
-    targets."""
+    reject unknown keys. Each lives in configs/<rule set>/, plays that named rule set and writes to
+    checkpoints/<rule set>/<run>. Within a rule set the experiments may differ from the baseline
+    only in the network (so a comparison measures the network), and the search must discount like
+    the value targets."""
     found = 0
-    for game in ("brandubh", "tablut", "hnefatafl"):
-        with open(os.path.join(CONFIG_DIR, game, "baseline.json")) as f:
+    for ruleset in sorted(os.listdir(CONFIG_DIR)):
+        assert ruleset in RULESETS, f"configs/{ruleset} is not a rule set"
+        with open(os.path.join(CONFIG_DIR, ruleset, "baseline.json")) as f:
             baseline_data = json.load(f)
-        for name in sorted(os.listdir(os.path.join(CONFIG_DIR, game))):
-            path = os.path.join(CONFIG_DIR, game, name)
+        for name in sorted(os.listdir(os.path.join(CONFIG_DIR, ruleset))):
+            path = os.path.join(CONFIG_DIR, ruleset, name)
             config = load_config(path)
             found += 1
-            assert config.game == game and config.board_size == game_spec(game).board_size
+            assert config.ruleset == ruleset and config.rules is RULESETS[ruleset]
+            assert config.checkpoint_dir == f"checkpoints/{ruleset}/{name[:-5]}", f"{name}: checkpoint_dir"
             assert from_dict(config.to_dict()).to_dict() == config.to_dict(), f"round trip changed {name}"
-            assert config.to_flat_dict()["num_channels"] == config.network.channels
+            assert config.to_flat_dict()["rules"] == RULESETS[ruleset].to_dict()
             assert config.search_discount == config.reward_discount, f"{name}: discounts differ"
-            build_network(config.network, config.board_size)  # every network builds
+            TaflNet(config.network, config.board_size)  # every network builds
             with open(path) as f:
                 data = json.load(f)
             assert data["system"]["num_workers"] is None, f"{name}: num_workers must be null"
             for section in ("game", "self_play", "training", "replay_buffer", "evaluation"):
-                assert data[section] == baseline_data[section], f"{game}/{name}: {section} differs"
-    assert found == 12
+                assert data[section] == baseline_data[section], f"{ruleset}/{name}: {section} differs"
+    assert found == 13
     baseline = load_config(os.path.join(CONFIG_DIR, "brandubh", "baseline.json"))
     assert (baseline.num_mcts_sims_attacker, baseline.batch_size, baseline.network.value_hidden,
-            baseline.network.squeeze_excitation, baseline.throne_enabled) == \
-        (1000, 256, 256, True, False)
-    hnef = load_config(os.path.join(CONFIG_DIR, "hnefatafl", "baseline.json"))
-    assert (hnef.king_capture_pieces, hnef.value_loss_weight, hnef.network.channels,
-            hnef.network.num_blocks, hnef.reward_discount) == (4, 1.5, 64, 8, 0.995)
+            baseline.network.squeeze_excitation, baseline.rules.throne) == (1000, 256, 256, True, True)
+    hnef = load_config(os.path.join(CONFIG_DIR, "copenhagen", "baseline.json"))
+    assert (hnef.rules.king_capture, hnef.value_loss_weight, hnef.network.channels,
+            hnef.network.num_blocks, hnef.reward_discount) == ("strong", 1.5, 64, 8, 0.995)
     changed = apply_overrides(baseline, ["self_play.num_iterations=3", "network.channels=48",
                                          "network.features.history_length=4", 'network.blocks=["line","line"]',
                                          "num_workers=2", "name=test"])
@@ -347,9 +339,10 @@ def test_training_end_to_end():
             path = os.path.join(tmp, "checkpoint_iter_2.pth")
             loaded, checkpoint = load_network(path)
             assert checkpoint["network_config"] == config.network.to_dict()
-            assert checkpoint["config"]["king_capture_pieces"] == 2 and checkpoint["run_config"] == config.to_dict()
+            assert checkpoint["config"]["ruleset"] == "brandubh" and checkpoint["run_config"] == config.to_dict()
+            assert checkpoint["config"]["rules"] == RULESETS["brandubh"].to_dict()
             assert isinstance(loaded, TaflNet) and loaded.feature_spec.mobility_planes
-            game = Brandubh(throne_enabled=False)
+            game = Tafl("brandubh")
             x = torch.from_numpy(build_features(game, loaded.feature_spec))[None]
             with torch.no_grad():
                 assert torch.allclose(loaded(x)[0], network.eval()(x)[0])

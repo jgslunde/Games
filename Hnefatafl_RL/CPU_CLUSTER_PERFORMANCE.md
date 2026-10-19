@@ -11,6 +11,11 @@ and from the configs stored inside their checkpoints. A few benchmarks were re-r
 they are not the training hardware. None of the source files (logs, checkpoints, benchmark notes)
 are in git, so this document repeats everything that matters.
 
+These runs are deprecated: they used a non-standard rule set (no throne, king captured by two
+attackers everywhere; see RULESETS.md), and their directories now live in `deprecated_checkpoints/`
+(`checkpoints_brandubh/...` below means `deprecated_checkpoints/checkpoints_brandubh/...`). The
+current code cannot load them any more. The timings still describe the training pipeline.
+
 ---
 
 ## 0. Conventions

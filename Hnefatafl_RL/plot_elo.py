@@ -4,7 +4,7 @@ Plot ELO ratings from evaluation results.
 
 Usage:
     python plot_elo.py <results_json>
-    python plot_elo.py checkpoints_brandubh/fatman_nothrone/elo_evaluation_results.json
+    python plot_elo.py checkpoints/brandubh/line_4x32/elo_evaluation_results.json
 """
 
 import argparse
@@ -58,8 +58,8 @@ def plot_elo_progression(results_path: str):
     ax.set_xlabel(xlabel, fontsize=12, fontweight='bold')
     ax.set_ylabel('ELO Rating', fontsize=12, fontweight='bold')
     
-    game = data['metadata'].get('game', 'Unknown')
-    ax.set_title(f'ELO Rating Progression - {game.capitalize()}', 
+    ruleset = data['metadata'].get('ruleset', 'unknown rule set')
+    ax.set_title(f'ELO Rating Progression - {ruleset}',
                  fontsize=14, fontweight='bold')
     
     ax.grid(True, alpha=0.3)
@@ -156,8 +156,8 @@ def plot_match_matrix(results_path: str):
     ax.set_xlabel('Opponent Checkpoint Index', fontsize=12, fontweight='bold')
     ax.set_ylabel('Checkpoint Index', fontsize=12, fontweight='bold')
     
-    game = data['metadata'].get('game', 'Unknown')
-    ax.set_title(f'Match Results Matrix - {game.capitalize()}', 
+    ruleset = data['metadata'].get('ruleset', 'unknown rule set')
+    ax.set_title(f'Match Results Matrix - {ruleset}',
                  fontsize=14, fontweight='bold')
     
     # Set tick labels

@@ -1,15 +1,15 @@
 """
 Configurable AlphaZero-style network for all three Tafl board sizes, built from a NetworkConfig
 (see network_config.py for the options and what they are for), plus helpers that build or load a
-network from a checkpoint, including checkpoints of the older fixed classes.
+network from a checkpoint.
 
 Input:  (batch, FeatureSpec.num_planes, N, N), see features.py
-Output: policy logits (batch, N*N*4*(N-1)) in MoveEncoder index order
+Output: policy logits (batch, N*N*4*(N-1)) in policy index order (tafl.move_index)
         value (batch, 1) in [-1, 1] for the player to move
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 import torch
@@ -29,7 +29,7 @@ def _conv_bn(cin: int, cout: int, kernel, padding) -> nn.Sequential:
 # ---------------------------------------------------------------------------------------------
 
 class SqueezeExcitation(nn.Module):
-    """Per-channel gates from the board-wide mean (as in the old BrandubhNet)."""
+    """Per-channel gates from the board-wide mean (squeeze-and-excitation)."""
 
     def __init__(self, channels: int, reduction: int = 8):
         super().__init__()
@@ -178,8 +178,8 @@ def make_block(kind: str, config: NetworkConfig, board_size: int, global_pool_ch
 def move_index_tables(board_size: int) -> Tuple[np.ndarray, np.ndarray]:
     """
     For every policy index (from_square * 4(N-1) + direction * (N-1) + distance - 1): the index
-    of the landing square, and whether the move stays on the board. Directions as in MoveEncoder:
-    0 up, 1 down, 2 left, 3 right.
+    of the landing square, and whether the move stays on the board. Directions as in
+    tafl.move_index: 0 up, 1 down, 2 left, 3 right.
     """
     n = board_size
     to_square = np.zeros(n * n * 4 * (n - 1), dtype=np.int64)
@@ -212,7 +212,7 @@ class DensePolicyHead(nn.Module):
 
 
 class ConvPolicyHead(nn.Module):
-    """One logit plane per (direction, distance); flattened in MoveEncoder order."""
+    """One logit plane per (direction, distance); flattened in policy index order."""
 
     def __init__(self, channels: int, board_size: int):
         super().__init__()
@@ -224,7 +224,7 @@ class ConvPolicyHead(nn.Module):
 
 
 class BilinearPolicyHead(nn.Module):
-    """logit(from, to) = q_from . k_to / sqrt(d) + u_from + v_to, gathered into MoveEncoder order."""
+    """logit(from, to) = q_from . k_to / sqrt(d) + u_from + v_to, gathered into policy index order."""
 
     def __init__(self, channels: int, board_size: int, dim: int = 32):
         super().__init__()
@@ -288,8 +288,6 @@ class TaflNet(nn.Module):
 
     def __init__(self, config: NetworkConfig, board_size: int):
         super().__init__()
-        if config.arch != "tafl":
-            raise ValueError("TaflNet needs arch 'tafl' (use build_network for legacy configs)")
         self.config = config
         self.board_size = board_size
         self.feature_spec: FeatureSpec = config.features
@@ -369,107 +367,36 @@ class TaflNet(nn.Module):
 # Building and loading
 # ---------------------------------------------------------------------------------------------
 
-def build_network(config: NetworkConfig, board_size: int) -> nn.Module:
-    """A network for `config` on an NxN board (a legacy class instance when arch is 'legacy')."""
-    if config.arch == "legacy":
-        from games import game_spec_for_board
-        legacy_class = game_spec_for_board(board_size).legacy_network_class
-        return legacy_class(num_res_blocks=config.num_blocks, num_channels=config.channels,
-                            value_head_hidden_size=config.value_hidden,
-                            history_length=config.features.history_length)
-    return TaflNet(config, board_size)
-
-
 def count_parameters(network: nn.Module) -> int:
     return sum(p.numel() for p in network.parameters())
 
 
-def describe_network(network: nn.Module) -> str:
+def describe_network(network: TaflNet) -> str:
     """One line with the architecture and the parameter count."""
-    if isinstance(network, TaflNet):
-        label = network.config.describe()
-    else:
-        blocks = len(getattr(network, 'res_blocks', []))
-        label = (f"{blocks}x{getattr(network, 'num_channels', '?')} legacy {type(network).__name__}, "
-                 f"{getattr(network, 'input_channels', 4)} planes")
-    return f"{label}, {count_parameters(network):,} parameters"
+    return f"{network.config.describe()}, {count_parameters(network):,} parameters"
 
 
-def _board_size_from_state_dict(state_dict) -> Optional[int]:
-    """Board size from the policy output size of the old dense head, if present."""
-    weight = state_dict.get('fc_policy.weight')
-    if weight is None:
-        return None
-    for n in (7, 9, 11):
-        if weight.shape[0] == n * n * 4 * (n - 1):
-            return n
-    return None
-
-
-def legacy_network_config(config: dict, board_size: int, state_dict=None) -> NetworkConfig:
-    """
-    The NetworkConfig equivalent of an old checkpoint: sizes from its flat config dict, or, when
-    the state dict is given, from the weight shapes (which also covers checkpoints without a config).
-    """
-    sizes = {}
-    if state_dict is not None and 'conv_input.weight' in state_dict:
-        stem = state_dict['conv_input.weight']
-        sizes = dict(num_channels=stem.shape[0], history_length=(stem.shape[1] - 1) // 3,
-                     num_res_blocks=len({k.split('.')[1] for k in state_dict if k.startswith('res_blocks.')}))
-        if 'fc_value1.weight' in state_dict:
-            sizes['value_head_hidden_size'] = state_dict['fc_value1.weight'].shape[0]
-    get = lambda name, default: sizes.get(name, config.get(name, default))
-    return NetworkConfig(arch="legacy", channels=get('num_channels', 64),
-                         blocks=["res"] * get('num_res_blocks', 4),
-                         squeeze_excitation=(board_size == 7),  # BrandubhNet has SE blocks
-                         policy_head="dense", value_head="dense",
-                         value_hidden=get('value_head_hidden_size', 64),
-                         features=FeatureSpec(history_length=get('history_length', 1)))
-
-
-def checkpoint_board_size(checkpoint: dict) -> Optional[int]:
-    """The board size a checkpoint was trained for, if it can be told."""
-    config = checkpoint.get('config', {})
-    if isinstance(config, dict) and 'board_size' in config:
-        return config['board_size']
-    state_dict = checkpoint.get('model_state_dict') or checkpoint.get('network_state_dict') or checkpoint
-    return _board_size_from_state_dict(state_dict)
-
-
-def network_config_from_checkpoint(checkpoint: dict, board_size: Optional[int] = None) -> NetworkConfig:
-    """The NetworkConfig stored in a checkpoint, or the legacy equivalent for older checkpoints."""
+def load_weights(network: TaflNet, checkpoint: dict):
+    """Load a checkpoint's weights into `network`, adapting the input planes where they differ."""
+    state_dict = checkpoint.get('network_state_dict') or checkpoint['model_state_dict']
+    saved_names = None
     if 'network_config' in checkpoint:
-        return NetworkConfig.from_dict(checkpoint['network_config'])
-    board_size = board_size or checkpoint_board_size(checkpoint) or 7
-    config = checkpoint.get('config', checkpoint)
-    state_dict = checkpoint.get('model_state_dict') or checkpoint.get('network_state_dict') or checkpoint
-    return legacy_network_config(config if isinstance(config, dict) else {}, board_size, state_dict)
+        saved_names = NetworkConfig.from_dict(checkpoint['network_config']).features.plane_names()
+    network.load_state_dict_compatible(state_dict, saved_plane_names=saved_names)
 
 
-def load_weights(network: nn.Module, checkpoint: dict):
-    """Load a checkpoint's weights into `network`, adapting the input planes where needed."""
-    state_dict = checkpoint.get('network_state_dict') or checkpoint.get('model_state_dict') or checkpoint
-    if isinstance(network, TaflNet):
-        saved_names = None
-        if 'network_config' in checkpoint:
-            saved_names = NetworkConfig.from_dict(checkpoint['network_config']).features.plane_names()
-        network.load_state_dict_compatible(state_dict, saved_plane_names=saved_names)
-    else:
-        network.load_state_dict_compatible(state_dict)
-
-
-def load_network(checkpoint_path: str, board_size: Optional[int] = None, device: str = 'cpu'):
+def load_network(checkpoint_path: str, device: str = 'cpu'):
     """
-    Build the network a checkpoint was trained with and load its weights.
+    Build the network a training checkpoint was trained with and load its weights.
 
     Returns:
         (network in eval mode, the checkpoint dict)
     """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    board_size = board_size or checkpoint_board_size(checkpoint)
-    if board_size is None:
-        raise ValueError(f"{checkpoint_path} does not say which board it is for; pass board_size")
-    network = build_network(network_config_from_checkpoint(checkpoint, board_size), board_size)
+    if 'network_config' not in checkpoint:
+        raise ValueError(f"{checkpoint_path} has no network config; checkpoints from before the rule "
+                         f"sets (deprecated_checkpoints/) can no longer be loaded")
+    network = TaflNet(NetworkConfig.from_dict(checkpoint['network_config']), checkpoint['config']['board_size'])
     load_weights(network, checkpoint)
     network.to(device)
     network.eval()

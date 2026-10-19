@@ -23,8 +23,9 @@ nodes per move.
   per line network in PyTorch (section 4), so the speed advantage in self-play is now 1.2x to 1.8x.
   Playing strength is not measured yet; that is what the configs in section 5 are for.
 - Dilated kernels, 5x5 kernels, depthwise convolutions and squeeze-excitation were considered and
-  rejected for this setup (section 3). A pure transformer was rejected too, but an `attention`
-  block exists for hybrids: one Hnefatafl config replaces two of its ten line blocks with it.
+  rejected for this setup (section 3). A pure transformer was rejected for the browser, but an
+  `attention` block exists: one 11x11 config replaces two of its ten line blocks with it, and
+  `attention_8x64` is a pure transformer, as an experiment.
 
 ## 2. What the network has to compute
 
@@ -54,8 +55,8 @@ Two consequences:
 
 Encirclement is the one thing lines do not solve: whether a ring is closed is an iterative
 question. Rings are mostly straight walls, which line kernels see, but 11x11 wants depth more than
-width for this. The king-region plane (a flood fill done by the game engine, see section 4) hands
-the network the answer directly.
+width for this. The defender-region plane (a flood fill done by the game engine, see section 4)
+hands the network the answer directly.
 
 ## 3. Architecture choices
 
@@ -109,10 +110,12 @@ board size is the number of facts built on other facts, so add blocks before cha
 
 The reach and region planes hand the network its hardest facts. In training they are built in
 Python (`reach_planes` with numpy: the nearest piece in each direction of every square;
-`king_region_plane` with `scipy.ndimage.label`), checked against the move generator and the
+`defender_region_plane` with `scipy.ndimage.label`), checked against the move generator and the
 encirclement test in `test_tafl_network.py`. For scale: one network call of `line_10x64_gpool`
-takes 6.6 ms and generating the legal moves of a Hnefatafl position 0.9 ms (one core of owl31). A browser build must compute the same planes in the same order; the
-`.json` file written by `convert_to_onnx.py` lists them.
+takes 6.6 ms (one core of owl31), and generating the legal moves of an 11x11 position about
+0.1 ms with the engine in `tafl.py` (0.3 ms with the old game classes; owl33). A browser build must
+compute the same planes in the same order; the `.json` file written by `convert_to_onnx.py` lists
+them.
 
 ## 4. Measured inference cost
 
@@ -160,35 +163,37 @@ kernels cost about 1.5x. Half of their work multiplies the zero padding; a matri
 without padding was only 11 % faster in a test, not worth the extra code. The browser gains more
 than self-play, as before, but the browser numbers above need measuring again.
 
-## 5. The configs (`configs/<game>/<name>.json`)
+## 5. The configs (`configs/<rule set>/<name>.json`)
 
-Each board has a baseline and experiments that change only the `network` section, so a comparison
-measures the network alone (`test_tafl_network.py` checks this). The Brandubh and Tablut baselines
-reproduce the removed `train_<game>.py` defaults, except an evaluation temperature of 1.0 instead of
-0.65 (0.65 repeated the same few openings). The Hnefatafl baseline is new: the old script's
-settings had never been tuned (see the note below the table). Parameter counts are of the shipped
-configs.
+Every config plays one named rule set (`tafl.RULESETS`, listed in `RULESETS.md`): Brandubh 2 on
+7x7, Sami Tablut with the defenders moving first on 9x9, Copenhagen on 11x11. Each rule set has a
+baseline and experiments that change only the `network` section, so a comparison measures the
+network alone (`test_tafl_network.py` checks this). The 7x7 and 9x9 baselines reproduce the removed
+`train_<game>.py` defaults, except an evaluation temperature of 1.0 instead of 0.65 (0.65 repeated
+the same few openings). The 11x11 baseline is new: the old script's settings had never been tuned
+(see the note below the table). Parameter counts are of the shipped configs.
 
-| Game | Config | Network | Parameters | Hypothesis |
+| Rule set | Config | Network | Parameters | Hypothesis |
 |---|---|---|---|---|
-| brandubh | `baseline` | 6x32 res + SE, dense heads, 4 planes | 243,911 | the current network |
+| brandubh | `baseline` | 6x32 res + SE, dense heads, 4 planes | 243,911 | the network of the deprecated runs |
 | brandubh | `line_4x32` | 4 line blocks x 32, conv policy, pooled value, 7 planes | 39,995 | equal or better per node, 1.8x the nodes |
 | brandubh | `line_4x32_mobility` | as above + reach planes, 10 planes | 40,859 | faster learning; if large, 3 blocks are enough |
 | brandubh | `line3_4x32` | 4 line3 blocks x 32, 7 planes | 49,339 | tells whether diagonal shapes matter at 7x7 |
-| tablut | `baseline` | 6x48 res, dense heads, 4 planes | 685,079 | the current network |
-| tablut | `line_6x48_gpool` | 6 line blocks x 48, global pool, 7 planes | 149,003 | 1.3x faster at equal depth |
-| tablut | `line3_6x48_gpool` | 6 line3 blocks x 48, global pool, 7 planes | 180,395 | my guess for the eventual winner at 9x9 |
-| tablut | `line_6x48_gpool_mobility` | line_6x48_gpool + reach planes, 10 planes | 150,299 | the engine-computed planes |
-| hnefatafl | `baseline` | 8x64 res, dense heads, 4 planes | 1,786,367 | the reference: an old-style network with the same settings |
-| hnefatafl | `line_10x64_gpool` | 10 line blocks x 64, global pool, 7 planes | 509,323 | the main run; depth for encirclement, 1.2x faster than the baseline |
-| hnefatafl | `line_10x64_gpool_mobility_region` | line_10x64_gpool + reach planes + king-region plane, 11 planes | 511,627 | the encirclement question answered by the engine (+0.3 ms per node) |
-| hnefatafl | `line_10x64_gpool_attention` | line_10x64_gpool with blocks 4 and 8 as attention blocks, 7 planes | 485,075 | whole-board shapes learned instead of computed; 8.2 ms per call against 6.6 ms |
+| sami_tablut_defenders_first | `baseline` | 6x48 res, dense heads, 4 planes | 685,079 | the network of the deprecated runs |
+| sami_tablut_defenders_first | `line_6x48_gpool` | 6 line blocks x 48, global pool, 7 planes | 149,003 | 1.3x faster at equal depth |
+| sami_tablut_defenders_first | `line3_6x48_gpool` | 6 line3 blocks x 48, global pool, 7 planes | 180,395 | my guess for the eventual winner at 9x9 |
+| sami_tablut_defenders_first | `line_6x48_gpool_mobility` | line_6x48_gpool + reach planes, 10 planes | 150,299 | the engine-computed planes |
+| copenhagen | `baseline` | 8x64 res, dense heads, 4 planes | 1,786,367 | the reference: an old-style network with the same settings |
+| copenhagen | `line_10x64_gpool` | 10 line blocks x 64, global pool, 7 planes | 509,323 | the main run; depth for encirclement, 1.2x faster than the baseline |
+| copenhagen | `line_10x64_gpool_mobility_region` | line_10x64_gpool + reach planes + defender-region plane, 11 planes | 511,627 | the encirclement question answered by the engine (+0.3 ms per node) |
+| copenhagen | `line_10x64_gpool_attention` | line_10x64_gpool with blocks 4 and 8 as attention blocks, 7 planes | 485,075 | whole-board shapes learned instead of computed; 8.2 ms per call against 6.6 ms |
+| copenhagen | `attention_8x64` | 8 attention blocks x 64 (4 heads), bilinear policy, pooled value, 7 planes | 311,301 | experiment: a pure transformer as in Leela Chess Zero; 1.3x slower per call than `line_10x64_gpool` (owl33: 9.8 against 7.4 ms) |
 
 Not in the configs, but one `--set` away: `network.policy_head=bilinear`,
 `network.tie_blocks=true`, `network.features.history_length=4`, `network.blocks=["thick",...]`,
 and the cheaper `network.blocks` of 6 line blocks.
 
-Note on the Hnefatafl settings: the old `train_hnefatafl.py` defaults (still in the git history)
+Note on the 11x11 settings: the old `train_hnefatafl.py` defaults (still in the git history)
 were never tuned, and some would have crippled any network: value targets discounted by 0.98 per
 ply (0.98^150 = 0.05, so positions far from the end got targets near zero) while the search did not
 discount, a value-loss weight of 40, no simulation balancing, and a 40 M-sample replay buffer
@@ -205,15 +210,15 @@ about a third.
 ## 6. How to run and compare
 
 ```bash
+./run.sh copenhagen line_10x64_gpool                  # on a cluster node, inside screen
 python run_training.py configs/brandubh/line_4x32.json
-python run_training.py configs/tablut/line_6x48_gpool.json --num-workers 64
-python run_training.py configs/hnefatafl/baseline.json --set self_play.num_iterations=200
+python run_training.py configs/sami_tablut_defenders_first/line_6x48_gpool.json --num-workers 64
 python run_training.py configs/brandubh/baseline.json --show        # print the resolved config
-python run_training.py configs/brandubh/baseline.json --resume checkpoints_brandubh/baseline/checkpoint_iter_40.pth
+python run_training.py configs/brandubh/baseline.json --resume checkpoints/brandubh/baseline/checkpoint_iter_40.pth
 ```
 
 The resolved config is written to `<checkpoint_dir>/run_config.json` and stored in every
-checkpoint (`run_config`, `network_config`, and the flat `config` that older tools read).
+checkpoint (`run_config`, `network_config`, and the flat `config` with the complete rules).
 
 Comparing networks:
 
@@ -228,22 +233,23 @@ Comparing networks:
    sees from what the search finds.
 5. 11x11: depth (`line_10x64_gpool`) against width (`--set network.channels=96`) at equal cost.
 
-Timing a config natively: `python benchmark_network.py --game tablut --network-config configs/tablut/line_6x48_gpool.json`.
+Timing configs natively: `python benchmark_network.py configs/copenhagen/*.json`.
 
 ## 7. The browser side
 
 `python convert_to_onnx.py <checkpoint>` writes `model.onnx` and `model.json`. The JSON lists the
-board size, the input planes in order, the policy index formula and the rules the network was
-trained with. The planes are (see `features.py`):
+board size, the input planes in order, the policy index formula and the complete rule set the
+network was trained with (`rules`: the fields of `tafl.Rules`, setup included). The planes are (see
+`features.py`):
 
 ```
 [attackers, defenders, king] x history_length positions (newest first, zero before the game start)
 [player]                                            0 attackers, 1 defenders
-[ones, corners, throne]                             if constant_planes (throne plane empty when disabled)
+[ones, corners, throne]                             if constant_planes (empty without corners / throne)
 [reach_attackers, reach_defenders, reach_king]      if mobility_planes (destination squares of the
                                                      pseudo-legal moves; defenders include the king)
-[king_region]                                       if region_plane (flood fill from the king through
-                                                     non-attacker squares)
+[defender_region]                                   if region_plane (flood fill from the defenders and
+                                                     the king through non-attacker squares)
 ```
 
 The policy output keeps the old index: `from_square * 4(N-1) + direction * (N-1) + distance - 1`,
@@ -253,13 +259,14 @@ directions 0 up, 1 down, 2 left, 3 right; take the softmax over the legal moves 
 
 | File | Role |
 |---|---|
+| `tafl.py` | the game engine (`Tafl`), the rule sets (`Rules`, `RULESETS`) and the policy index (`move_index`) |
 | `network_config.py` | `NetworkConfig`: the architecture options, validation, JSON form (no torch) |
-| `features.py` | `FeatureSpec` and the input planes; `build_features` is used by self-play, search and training |
-| `tafl_network.py` | the blocks, heads, `TaflNet`, and `build_network` / `load_network` / `load_weights` for checkpoints of any format |
-| `games.py` | registry: game name -> game class, board size, move encoder, legacy network class |
+| `features.py` | `FeatureSpec`, `StateHistory` and the input planes; `build_features` is used by self-play, search and training |
+| `tafl_network.py` | the blocks, heads, `TaflNet`, and `load_network` / `load_weights` for checkpoints |
 | `run_config.py` | `TrainingConfig` and the JSON run config: sections, `--set` overrides, typo detection |
 | `run_training.py` | the entry point: `python run_training.py <config.json> [--set ...]` |
-| `train.py` | the pipeline; workers receive the network config and build the network from it |
-| `configs/` | the run configs (section 5); `run_hnefatafl.sh <name>` starts a Hnefatafl one |
+| `train.py` | the pipeline; workers receive the rules and the network config and build both |
+| `configs/` | the run configs (section 5), one directory per rule set; `run.sh <rule set> <name>` starts one |
+| `test_rules.py` | every rule of every rule set on hand-made positions |
 | `test_tafl_network.py` | planes vs move generator, head index order, every block kind through ONNX, checkpoint loading, configs, a short end-to-end run |
-| `network.py`, `network_tablut.py`, `network_hnefatafl.py` | the old fixed classes; still loaded for old checkpoints (`arch: legacy`) |
+| `test_training_fixes.py` | search, agents, replay buffer, training step, checkpoints and the GUI |

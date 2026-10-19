@@ -2,18 +2,18 @@
 """
 Convert a training checkpoint to ONNX for deployment in the browser (onnxruntime-web) or elsewhere.
 
-The network architecture and its input planes are read from the checkpoint, so this works for the
-configurable networks (tafl_network.py) as well as the older fixed classes. Next to the .onnx file a
-.json file is written that says exactly what the model expects and returns: board size, the input
-planes in order, the policy index layout and the rules the network was trained with. A browser
-implementation must build the same planes in the same order (see features.py).
+The network architecture and its input planes are read from the checkpoint. Next to the .onnx file
+a .json file is written that says exactly what the model expects and returns: board size, the input
+planes in order, the policy index layout and the complete rule set the network was trained with
+(see tafl.Rules). A browser implementation must build the same planes in the same order (see
+features.py) and play by the same rules.
 
 Usage:
-    python convert_to_onnx.py <checkpoint_path> [--output OUTPUT] [--board-size N] [--opset N] [--no-verify]
+    python convert_to_onnx.py <checkpoint_path> [--output OUTPUT] [--opset N] [--no-verify]
 
 Examples:
-    python convert_to_onnx.py checkpoints_brandubh/line_4x32/best_model.pth
-    python convert_to_onnx.py checkpoints_tablut/best_model.pth --output model.onnx
+    python convert_to_onnx.py checkpoints/brandubh/line_4x32/best_model.pth
+    python convert_to_onnx.py checkpoints/copenhagen/line_10x64_gpool/best_model.pth --output model.onnx
 """
 
 import argparse
@@ -24,20 +24,8 @@ import sys
 import numpy as np
 import torch
 
-from tafl_network import load_network, network_config_from_checkpoint, describe_network, count_parameters
-
-
-def load_checkpoint(checkpoint_path, board_size=None):
-    """The network of a checkpoint (eval mode), its NetworkConfig, the checkpoint dict and board size."""
-    print(f"Loading checkpoint from {checkpoint_path}...")
-    network, checkpoint = load_network(checkpoint_path, board_size=board_size)
-    board_size = network.board_size if hasattr(network, 'board_size') else board_size
-    if board_size is None:
-        board_size = checkpoint.get('config', {}).get('board_size')
-    net_config = network_config_from_checkpoint(checkpoint, board_size)
-    print(f"  Network: {describe_network(network)}")
-    print(f"  Board: {board_size}x{board_size}; input planes: {', '.join(net_config.features.plane_names())}")
-    return network, net_config, checkpoint, board_size
+from tafl import policy_size
+from tafl_network import load_network, describe_network, count_parameters
 
 
 def export_to_onnx(network, output_path, board_size, num_planes, opset_version=12):
@@ -81,40 +69,42 @@ def export_to_onnx(network, output_path, board_size, num_planes, opset_version=1
     print(f"  File size: {os.path.getsize(output_path) / (1024 * 1024):.2f} MB")
 
 
-def write_model_info(network, net_config, checkpoint, board_size, onnx_path):
+def write_model_info(network, checkpoint, onnx_path):
     """Write <model>.json: everything a client needs to build the input and read the output."""
     info_path = os.path.splitext(onnx_path)[0] + '.json'
-    config = checkpoint.get('config', {}) if isinstance(checkpoint.get('config'), dict) else {}
-    rule_names = ['king_capture_pieces', 'king_can_capture', 'throne_is_hostile', 'throne_enabled']
+    config, features, board_size = checkpoint['config'], network.feature_spec, network.board_size
     info = {
         'board_size': board_size,
         'input': {
-            'shape': [1, net_config.features.num_planes, board_size, board_size],
-            'planes': net_config.features.plane_names(),
+            'shape': [1, features.num_planes, board_size, board_size],
+            'planes': features.plane_names(),
             'description': 'See features.py: piece planes of the last history_length positions (newest '
                            'first, zero planes before the start of the game), the player plane (0 '
-                           'attackers, 1 defenders), then the optional constant, reach and king-region '
+                           'attackers, 1 defenders), then the optional constant, reach and defender-region '
                            'planes. All values are 0 or 1.',
         },
         'policy': {
-            'size': board_size * board_size * 4 * (board_size - 1),
+            'size': policy_size(board_size),
             'index': 'from_square * 4 * (N-1) + direction * (N-1) + (distance - 1), with '
                      'from_square = row * N + col and directions 0 up, 1 down, 2 left, 3 right',
             'note': 'logits; take the softmax over the legal moves only',
         },
         'value': 'tanh output in [-1, 1] for the player to move',
-        'network': net_config.to_dict(),
+        'network': network.config.to_dict(),
         'network_description': describe_network(network),
         'num_parameters': count_parameters(network),
-        'rules': {name: config[name] for name in rule_names if name in config},
-        # The search settings of the training run's evaluation games (None if the checkpoint is too
-        # old to record them). An unvisited move is valued at the mean value of its parent node,
-        # seen by the player to move there, plus fpu_reduction (negative = pessimistic). During
-        # backup the value is multiplied by -discount at every ply, as the training targets were.
-        'search': {'c_puct': config.get('eval_c_puct'),
-                   'fpu_reduction': config.get('eval_fpu_reduction'),
-                   'discount': config.get('search_discount')},
-        'run_name': config.get('name'),
+        # The complete rule set (see tafl.Rules; the setup rows use A attacker, D defender, K king)
+        'ruleset': config['ruleset'],
+        'rules': config['rules'],
+        'max_game_length': config['max_game_length'],
+        # The search settings of the training run's evaluation games. An unvisited move is valued
+        # at the mean value of its parent node, seen by the player to move there, plus
+        # fpu_reduction (negative = pessimistic). During backup the value is multiplied by
+        # -discount at every ply, as the training targets were.
+        'search': {'c_puct': config['eval_c_puct'],
+                   'fpu_reduction': config['eval_fpu_reduction'],
+                   'discount': config['search_discount']},
+        'run_name': config['name'],
         'iteration': checkpoint.get('iteration'),
     }
     with open(info_path, 'w') as f:
@@ -179,10 +169,6 @@ def main():
     parser.add_argument('checkpoint', type=str, help='Path to the checkpoint file (.pth)')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Output path (default: the checkpoint path with .onnx)')
-    parser.add_argument('--board-size', type=int, default=None, choices=[7, 9, 11],
-                        help='Board size, only needed for very old checkpoints that do not record it')
-    parser.add_argument('--game', type=str, choices=['brandubh', 'tablut', 'hnefatafl'], default=None,
-                        help='Alternative to --board-size')
     parser.add_argument('--opset', type=int, default=12, help='ONNX opset version (default: 12)')
     parser.add_argument('--no-verify', action='store_true', help='Skip the verification step')
     args = parser.parse_args()
@@ -190,19 +176,20 @@ def main():
     if not os.path.exists(args.checkpoint):
         print(f"Error: Checkpoint file '{args.checkpoint}' not found")
         sys.exit(1)
-    board_size = args.board_size
-    if board_size is None and args.game is not None:
-        board_size = {'brandubh': 7, 'tablut': 9, 'hnefatafl': 11}[args.game]
     if args.output is None:
         args.output = os.path.splitext(args.checkpoint)[0] + '.onnx'
 
     print("=" * 70)
     print("PyTorch to ONNX Converter")
     print("=" * 70)
-    network, net_config, checkpoint, board_size = load_checkpoint(args.checkpoint, board_size)
-    num_planes = net_config.features.num_planes
+    print(f"Loading checkpoint from {args.checkpoint}...")
+    network, checkpoint = load_network(args.checkpoint)
+    board_size, num_planes = network.board_size, network.feature_spec.num_planes
+    print(f"  Network: {describe_network(network)}")
+    print(f"  Rule set: {checkpoint['config']['ruleset']}; input planes: "
+          f"{', '.join(network.feature_spec.plane_names())}")
     export_to_onnx(network, args.output, board_size, num_planes, args.opset)
-    write_model_info(network, net_config, checkpoint, board_size, args.output)
+    write_model_info(network, checkpoint, args.output)
     if not args.no_verify:
         verify_onnx_model(args.output, network, board_size, num_planes)
     print_model_info(args.output)

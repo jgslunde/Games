@@ -1,15 +1,10 @@
 {
   "name": "brandubh baseline: 6x32 SE blocks, dense heads (the old train_brandubh.py defaults)",
   "game": {
-    "game": "brandubh",
-    "king_capture_pieces": 2,
-    "king_can_capture": true,
-    "throne_is_hostile": false,
-    "throne_enabled": false,
+    "ruleset": "brandubh",
     "max_game_length": 100
   },
   "network": {
-    "arch": "tafl",
     "channels": 32,
     "blocks": [
       "res",
@@ -107,7 +102,7 @@
     "num_workers": null,
     "device": "cpu",
     "temp_dir": "/dev/shm/",
-    "checkpoint_dir": "checkpoints_brandubh/baseline",
+    "checkpoint_dir": "checkpoints/brandubh/baseline",
     "save_frequency": 1,
     "log_frequency": 1,
     "verbose": true

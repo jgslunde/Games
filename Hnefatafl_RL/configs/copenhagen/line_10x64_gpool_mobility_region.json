@@ -1,43 +1,40 @@
 {
-  "name": "hnefatafl baseline: 8x64 res blocks with the old dense heads, 4 planes (the reference for the line networks)",
+  "name": "copenhagen: line_10x64_gpool + reach planes + defender-region plane (the encirclement test)",
   "game": {
-    "game": "hnefatafl",
-    "king_capture_pieces": 4,
-    "king_can_capture": true,
-    "throne_is_hostile": true,
-    "throne_enabled": true,
+    "ruleset": "copenhagen",
     "max_game_length": 300
   },
   "network": {
-    "arch": "tafl",
     "channels": 64,
     "blocks": [
-      "res",
-      "res",
-      "res",
-      "res",
-      "res",
-      "res",
-      "res",
-      "res"
+      "line",
+      "line",
+      "line",
+      "line",
+      "line",
+      "line",
+      "line",
+      "line",
+      "line",
+      "line"
     ],
     "bottleneck": 0.5,
     "squeeze_excitation": false,
-    "global_pool": "none",
+    "global_pool": "every_other",
     "global_pool_channels": 16,
     "tie_blocks": false,
     "attention_heads": 4,
-    "policy_head": "dense",
+    "policy_head": "conv",
     "policy_dense_channels": 2,
     "policy_bilinear_dim": 32,
-    "value_head": "dense",
+    "value_head": "pooled",
     "value_hidden": 128,
     "value_pool_channels": 16,
     "features": {
       "history_length": 1,
-      "constant_planes": false,
-      "mobility_planes": false,
-      "region_plane": false
+      "constant_planes": true,
+      "mobility_planes": true,
+      "region_plane": true
     }
   },
   "self_play": {
@@ -115,7 +112,7 @@
     "num_workers": null,
     "device": "cpu",
     "temp_dir": "/dev/shm/",
-    "checkpoint_dir": "checkpoints_hnefatafl/baseline",
+    "checkpoint_dir": "checkpoints/copenhagen/line_10x64_gpool_mobility_region",
     "save_frequency": 1,
     "log_frequency": 1,
     "verbose": true

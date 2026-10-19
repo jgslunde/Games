@@ -1,11 +1,12 @@
 """
-Interactive Tafl board: play Brandubh (7x7), Tablut (9x9) or Hnefatafl (11x11) by hand, against a
-trained network, or watch the network play itself, and see what the network thinks of each position.
+Interactive Tafl board for any rule set of tafl.RULESETS (7x7, 9x9 or 11x11): play by hand, against
+a trained network, or watch the network play itself, and see what the network thinks of each
+position.
 
-With a checkpoint, the variant, the rules, the network size and the search settings are read from
-the checkpoint's training config. So a checkpoint from any training script opens with the rules it
-was trained with, and an AI that searches as in its evaluation games. Command-line options override
-this. Without a checkpoint the board is for two human players.
+With a checkpoint, the rule set, the network and the search settings are read from the checkpoint's
+training config. So a checkpoint opens with the rules it was trained with, and an AI that searches
+as in its evaluation games. Command-line options override this. Without a checkpoint the board is
+for two human players.
 
 Display:
 - Move probabilities on the board, from the raw network policy or from the visit shares of an MCTS
@@ -21,13 +22,13 @@ Controls:
 - The buttons in the side panel do the same as A, V, P and M
 
 Usage:
-    python gui_play.py [--checkpoint PATH] [--game {brandubh,tablut,hnefatafl}] [options]
+    python gui_play.py [--checkpoint PATH] [--ruleset NAME] [options]
 
 Examples:
-    python gui_play.py --game tablut
-    python gui_play.py --checkpoint checkpoints_tablut/test_6x48/checkpoint_iter_50.pth \\
+    python gui_play.py --ruleset copenhagen
+    python gui_play.py --checkpoint checkpoints/sami_tablut_defenders_first/line_6x48_gpool/checkpoint_iter_50.pth \\
         --ai-side attacker
-    python gui_play.py --checkpoint checkpoints_brandubh_SE/littleboy_decay_fixed/best_model.pth \\
+    python gui_play.py --checkpoint checkpoints/brandubh/line_4x32/best_model.pth \\
         --simulations 200 --temperature 0.5 --temperature-mode decay --temperature-decay-moves 20
 """
 
@@ -40,19 +41,11 @@ import numpy as np
 import pygame
 import torch
 
-from brandubh import Brandubh, EMPTY, ATTACKER, DEFENDER, KING
-from tablut import Tablut
-from hnefatafl import Hnefatafl
-from network import BrandubhNet, MoveEncoder, StateHistory
-from network_tablut import TablutNet, TablutMoveEncoder
-from network_hnefatafl import HnefataflNet, HnefataflMoveEncoder
-from tafl_network import build_network, describe_network, load_weights, network_config_from_checkpoint
+from features import build_features
 from mcts import MCTS
+from tafl import EMPTY, ATTACKER, DEFENDER, KING, RULESETS, Tafl, get_rules, move_index
+from tafl_network import describe_network, load_network
 
-# Game class, network class and move encoder of each variant, by board size
-VARIANTS = {7: (Brandubh, BrandubhNet, MoveEncoder), 9: (Tablut, TablutNet, TablutMoveEncoder),
-            11: (Hnefatafl, HnefataflNet, HnefataflMoveEncoder)}
-BOARD_SIZES = {'brandubh': 7, 'tablut': 9, 'hnefatafl': 11}
 OWN_PIECES = {0: (ATTACKER,), 1: (DEFENDER, KING)}  # pieces of the attackers (0) and defenders (1)
 
 # Board colors
@@ -90,53 +83,37 @@ KEY_ACTIONS = {pygame.K_a: 'ai', pygame.K_m: 'mcts', pygame.K_v: 'value', pygame
 
 
 class TaflGUI:
-    def __init__(self, checkpoint: Optional[str] = None, game: Optional[str] = None,
+    def __init__(self, checkpoint: Optional[str] = None, ruleset: Optional[str] = None,
                  simulations: Optional[int] = None, c_puct: Optional[float] = None,
                  fpu_reduction: Optional[float] = None, dirichlet_noise: bool = False,
                  temperature: float = 0.0, temperature_mode: str = 'fixed',
                  temperature_threshold: int = 0, temperature_decay_moves: int = 30,
-                 max_moves: Optional[int] = None, ai_side: str = 'none',
-                 king_capture_pieces: Optional[int] = None, king_can_capture: Optional[bool] = None,
-                 throne_is_hostile: Optional[bool] = None, throne_enabled: Optional[bool] = None):
+                 max_moves: Optional[int] = None, ai_side: str = 'none'):
         """
         Set up the game, and with a checkpoint also the network and its searches; open the window.
 
         The arguments are the command-line options of main(). Settings left at None are taken from
-        the checkpoint's training config, else from the game and MCTS defaults:
-        - game (variant): the checkpoint's board size; it is an error if `game` names another size
-        - rules: the checkpoint's rules
+        the checkpoint's training config, else from the MCTS defaults:
+        - ruleset: the rules the checkpoint was trained with, else Brandubh 2
         - simulations, c_puct, fpu_reduction: those of the checkpoint's evaluation (gating) games
         - max_moves: the training move limit (a draw once more than this many plies are played)
-        The search always uses the checkpoint's search_discount and history length, and Dirichlet
+        The search always uses the checkpoint's search_discount and input planes, and Dirichlet
         noise (if enabled) its dirichlet_alpha and dirichlet_epsilon.
         """
-        data = torch.load(checkpoint, map_location='cpu', weights_only=False) if checkpoint else {}
+        self.network, data = load_network(checkpoint) if checkpoint else (None, {})
         config = data.get('config', {})
 
-        # Variant: the checkpoint's board size, else `game`, else Brandubh
-        self.board_size = config.get('board_size', BOARD_SIZES[game or 'brandubh'])
-        if game is not None and BOARD_SIZES[game] != self.board_size:
-            raise ValueError(f"The checkpoint is for a {self.board_size}x{self.board_size} board, "
-                             f"not for {game}")
-        self.game_class, network_class, self.encoder = VARIANTS[self.board_size]
+        # Rules: the named rule set, else the checkpoint's, else Brandubh 2
+        trained_rules = get_rules(config['rules']) if config else None
+        self.rules = get_rules(ruleset or trained_rules or 'brandubh')
+        self.board_size = self.rules.board_size
+        if trained_rules is not None and self.rules != trained_rules:
+            print(f"Warning: the network was trained under {trained_rules.name}, not {self.rules.name}")
+            if trained_rules.board_size != self.board_size:
+                raise ValueError(f"Rule set {self.rules.name} is played on another board than the network")
 
-        # Rules: the command-line value, else the checkpoint's, else the game's default
-        rule_options = dict(king_capture_pieces=king_capture_pieces,
-                            king_can_capture=king_can_capture, throne_is_hostile=throne_is_hostile,
-                            throne_enabled=throne_enabled)
-        self.rules = {}
-        for name, value in rule_options.items():
-            value = config.get(name) if value is None else value
-            if value is not None:
-                self.rules[name] = value
-        changed = [name for name, value in rule_options.items()
-                   if value is not None and name in config and value != config[name]]
-        if changed:
-            print(f"Warning: the network was trained with other values of {', '.join(changed)}")
-
-        # Network and searches: one for the MCTS evaluation display (never noisy), one for AI moves
-        self.network, self.analysis_mcts, self.ai_mcts = None, None, None
-        self.history_length = config.get('history_length', 1)
+        # Searches: one for the MCTS evaluation display (never noisy), one for AI moves
+        self.analysis_mcts, self.ai_mcts = None, None
         self.simulations = (simulations if simulations is not None
                             else config.get('eval_mcts_sims_attacker', 100))
         self.c_puct = c_puct if c_puct is not None else config.get('eval_c_puct', 1.4)
@@ -145,16 +122,9 @@ class TaflGUI:
         # The network's value targets were discounted per move, so the search discounts the same way
         search_discount = config.get('search_discount', 1.0)
         if checkpoint:
-            # The architecture and input planes are stored in the checkpoint (older checkpoints
-            # give the fixed classes)
-            net_config = network_config_from_checkpoint(data, self.board_size)
-            self.network = build_network(net_config, self.board_size)
-            load_weights(self.network, data)
-            self.network.eval()
-            self.history_length = net_config.features.history_length
             search = dict(num_simulations=self.simulations, c_puct=self.c_puct,
-                          fpu_reduction=self.fpu_reduction, move_encoder_class=self.encoder,
-                          feature_spec=net_config.features, search_discount=search_discount)
+                          fpu_reduction=self.fpu_reduction, feature_spec=self.network.feature_spec,
+                          search_discount=search_discount)
             self.analysis_mcts = MCTS(self.network, **search)
             self.ai_mcts = MCTS(self.network, add_dirichlet_noise=dirichlet_noise,
                                 dirichlet_alpha=config.get('dirichlet_alpha', 0.3),
@@ -173,7 +143,7 @@ class TaflGUI:
         n = self.board_size
         pygame.init()
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-        self.title = f"{self.game_class.__name__} {n}x{n}"
+        self.title = f"{self.rules.name} {n}x{n}"
         pygame.display.set_caption(self.title + (" - AI evaluation" if self.network else ""))
         self.checkpoint_name = (os.path.join(os.path.basename(os.path.dirname(checkpoint)),
                                              os.path.basename(checkpoint)) if checkpoint else None)
@@ -194,11 +164,8 @@ class TaflGUI:
         self.buttons = {}    # action -> button rectangle, filled while drawing the panel
         self._do('reset')
 
-        g = self.game
-        print(f"Game: {self.title}; king captured by {g.king_capture_pieces}, king can capture: "
-              f"{g.king_can_capture}, throne enabled: {g.throne_enabled}, throne hostile: "
-              f"{g.throne_is_hostile}; "
-              + (f"draw after {self.max_moves} moves" if self.max_moves else "no move limit"))
+        print(self.rules.describe())
+        print(f"Draw after {self.max_moves} plies" if self.max_moves else "No move limit")
         if self.network is not None:
             print(f"Network: {checkpoint} ({describe_network(self.network)})")
             print(f"AI search: {self.simulations} simulations, c_puct {self.c_puct}, FPU reduction "
@@ -209,7 +176,7 @@ class TaflGUI:
     def _do(self, action: str):
         """Carry out a key or panel-button action: 'reset', 'ai', 'mcts', 'value' or 'percent'."""
         if action == 'reset':
-            self.game = self.game_class(**self.rules)
+            self.game = Tafl(self.rules)
             self.selected, self.selected_moves = None, []  # selected square and its legal moves
             self.pending_move, self.animation_progress = None, 0.0  # move sliding across the board
             self.last_move, self.highlight_timer = None, 0  # squares of the last move, fading out
@@ -242,16 +209,12 @@ class TaflGUI:
             self.move_probs = self.analysis_mcts.search(self.game)
             self.value = self.analysis_mcts.root.mean_value
         else:
-            if self.history_length > 1:
-                history = StateHistory.from_game(self.game, self.history_length)
-                state = history.get_state_with_history(self.game.current_player)
-            else:
-                state = self.game.get_state()
+            state = build_features(self.game, self.network.feature_spec)
             with torch.inference_mode():
                 policy_logits, value = self.network(torch.from_numpy(state).unsqueeze(0))
             # Softmax over the legal moves only (the same as masking the illegal moves)
             moves = self.game.get_legal_moves()
-            logits = policy_logits[0].numpy()[[self.encoder.encode_move(move) for move in moves]]
+            logits = policy_logits[0].numpy()[[move_index(move, self.board_size) for move in moves]]
             probs = np.exp(logits - logits.max())
             self.move_probs = dict(zip(moves, probs / probs.sum()))
             self.value = value.item()
@@ -371,7 +334,7 @@ class TaflGUI:
         n, size, board = self.board_size, self.square_size, self.game.board
         self.screen.fill(WHITE)
         special = set(self.game.corners)
-        if self.game.throne_enabled:
+        if self.rules.throne:
             special.add(self.game.throne)
         for r in range(n):
             for c in range(n):
@@ -557,8 +520,8 @@ def main():
                     "left out are taken from the checkpoint's training config.")
     parser.add_argument("--checkpoint", help="Checkpoint (.pth) for evaluation and AI moves; "
                                              "without it the board is for two human players")
-    parser.add_argument("--game", choices=list(BOARD_SIZES),
-                        help="Variant (default: the checkpoint's board size, else brandubh)")
+    parser.add_argument("--ruleset", choices=sorted(RULESETS),
+                        help="Rule set (default: the checkpoint's, else brandubh)")
     parser.add_argument("--ai-side", choices=['none', 'attacker', 'defender', 'both'],
                         default='none',
                         help="Side(s) the AI moves for by itself (default: none; press A instead)")
@@ -587,21 +550,6 @@ def main():
     parser.add_argument("--max-moves", type=int,
                         help="Draw once more than this many plies are played "
                              "(default: the checkpoint's max_game_length, else no limit)")
-    # Rules (default: the checkpoint's rules, else the game's defaults)
-    parser.add_argument("--king-capture-pieces", type=int, choices=[2, 3, 4],
-                        help="Attackers needed to capture the king")
-    parser.add_argument("--king-can-capture", action="store_true", default=None,
-                        help="The king takes part in captures")
-    parser.add_argument("--king-cannot-capture", action="store_false", dest="king_can_capture",
-                        default=None, help="The king does not take part in captures")
-    parser.add_argument("--throne-is-hostile", action="store_true", default=None,
-                        help="The empty throne counts as hostile in captures")
-    parser.add_argument("--throne-not-hostile", action="store_false", dest="throne_is_hostile",
-                        default=None, help="The empty throne is not hostile")
-    parser.add_argument("--throne-enabled", action="store_true", default=None,
-                        help="Only the king may stop on the centre square")
-    parser.add_argument("--throne-disabled", action="store_false", dest="throne_enabled",
-                        default=None, help="The centre square is an ordinary square")
     args = parser.parse_args()
 
     TaflGUI(**vars(args)).run()
