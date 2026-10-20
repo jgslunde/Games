@@ -4,7 +4,7 @@
 # all settings except the network.
 # Start one per free node inside screen:
 #   screen -S sim1 ./run.sh copenhagen line_10x64_gpool
-#   screen -S sim2 ./run.sh sami_tablut_defenders_first line_6x48_gpool
+#   screen -S sim2 ./run.sh sami_tablut line_6x48_gpool
 # Resume after an interruption (replace N by the last saved iteration):
 #   screen -S sim1 ./run.sh copenhagen line_10x64_gpool --resume checkpoints/copenhagen/line_10x64_gpool/checkpoint_iter_N.pth
 # Further arguments go to run_training.py, e.g. --set self_play.num_iterations=300

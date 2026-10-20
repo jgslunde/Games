@@ -1,7 +1,7 @@
 {
-  "name": "sami_tablut_defenders_first: 6 line blocks x 48, global-pool bias + reach planes from the move generator",
+  "name": "sami_tablut: 6 line blocks x 48, global-pool bias + reach planes from the move generator",
   "game": {
-    "ruleset": "sami_tablut_defenders_first",
+    "ruleset": "sami_tablut",
     "max_game_length": 200
   },
   "network": {
@@ -105,7 +105,7 @@
     "num_workers": null,
     "device": "cpu",
     "temp_dir": "/dev/shm/",
-    "checkpoint_dir": "checkpoints/sami_tablut_defenders_first/line_6x48_gpool_mobility",
+    "checkpoint_dir": "checkpoints/sami_tablut/line_6x48_gpool_mobility",
     "save_frequency": 1,
     "log_frequency": 1,
     "verbose": true

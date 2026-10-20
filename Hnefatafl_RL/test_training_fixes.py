@@ -10,19 +10,18 @@ Tests for the training-pipeline fixes:
 8. select_move and select_move_with_stats use the temperature value, and a time limit works.
 9. play_game counts a win on the last allowed ply as a win.
 10. An unarmed king neither captures nor helps to capture.
-11. A capturing move is never refused as a repetition.
-12. Random rollouts return the result for the player to move at the start of the rollout.
-13. load_state_dict_compatible keeps the player plane when the history length differs.
-14. SimulationBalancer: min_win_rate 0.5 reproduces the earlier rule; a band [m, 1-m] only pushes
+11. Random rollouts return the result for the player to move at the start of the rollout.
+12. load_state_dict_compatible keeps the player plane when the history length differs.
+13. SimulationBalancer: min_win_rate 0.5 reproduces the earlier rule; a band [m, 1-m] only pushes
     outside it, drifts back to an equal split inside it, and counts draws as half a win.
-15. The replay buffer's symmetry tables equal augment_sample; the ring buffer keeps the newest data.
-16. train_network: clear error for a too small buffer; small buffers, empty validation sets and
+14. The replay buffer's symmetry tables equal augment_sample; the ring buffer keeps the newest data.
+15. train_network: clear error for a too small buffer; small buffers, empty validation sets and
     draws work.
-17. Temperature 0.001 gives finite probabilities, and a search puts the network into eval mode.
-18. 9x9 and 11x11 networks with history planes search their games.
-19. The cached legal moves equal freshly generated ones.
-20. Checkpoints are written atomically, hold all settings and return their training history.
-21. The GUI takes the rule set, search settings and move limit from a checkpoint.
+16. Temperature 0.001 gives finite probabilities, and a search puts the network into eval mode.
+17. 9x9 and 11x11 networks with history planes search their games.
+18. The cached legal moves equal freshly generated ones.
+19. Checkpoints are written atomically, hold all settings and return their training history.
+20. The GUI takes the rule set, search settings and move limit from a checkpoint.
 
 Run with: python test_training_fixes.py (exit code 1 if a test fails)
 """
@@ -160,8 +159,8 @@ def test_play_game_uses_rules():
     """play_game must play under the given rule set: in Sami Tablut with defenders first, the
     defenders' agent moves first."""
     attackers, defenders = Scripted(), Scripted()
-    play_game(attackers, defenders, "sami_tablut_defenders_first", display=False, max_moves=3)
-    assert defenders.calls[0] == ("sami_tablut_defenders_first", 1) and len(defenders.calls) == 2
+    play_game(attackers, defenders, "sami_tablut", display=False, max_moves=3)
+    assert defenders.calls[0] == ("sami_tablut", 1) and len(defenders.calls) == 2
     print("  play_game: game played under the given rule set")
     return True
 
@@ -285,21 +284,6 @@ def test_unarmed_king_does_not_capture():
     game.make_move((6, 3, 4, 3))
     assert not game.game_over, "defender captured its own king"
     print("  unarmed king: does not capture")
-    return True
-
-
-def test_capture_is_never_repetition():
-    """A capturing move must stay legal even if its board before the capture occurred twice before."""
-    pieces = {(0, 2): ATTACKER, (2, 3): DEFENDER, (2, 4): ATTACKER, (5, 5): KING, (6, 1): ATTACKER}
-    for move, captures in [((0, 2, 2, 2), True), ((2, 4, 1, 4), False)]:
-        # A new game for each case: the legal-move cache assumes the history only grows through
-        # make_move
-        game = set_position(Tafl("brandubh"), pieces, 0)
-        board = game.board.copy()
-        board[move[2], move[3]], board[move[0], move[1]] = board[move[0], move[1]], EMPTY
-        game.position_history = [game._position_key()] + 2 * [(board.tobytes(), 1)]
-        assert (move in game.get_legal_moves()) == captures, f"move {move}: wrong repetition decision"
-    print("  repetition: capturing moves are never repetitions")
     return True
 
 
@@ -457,7 +441,7 @@ def test_low_temperature_and_eval_mode():
 def test_larger_board_networks():
     """9x9 and 11x11 networks with history planes must search their games, and the games' piece
     planes must equal the first planes of their states."""
-    for rules in (RULESETS["sami_tablut_defenders_first"], RULESETS["copenhagen"]):
+    for rules in (RULESETS["sami_tablut"], RULESETS["copenhagen"]):
         n = rules.board_size
         network = small_network(n, history_length=2).eval()
         game = Tafl(rules)
@@ -492,7 +476,7 @@ def test_legal_move_cache():
         # board
         game = Tafl(rules)
         game.get_legal_moves()
-        game.board[game.board == ATTACKER] = EMPTY
+        game.board[:] = EMPTY
         assert game.get_legal_moves() == []
     print("  legal-move cache: equals fresh generation after moves, in clones and after edits")
     return True
@@ -529,7 +513,7 @@ def test_gui_reads_checkpoint_settings():
     from gui_play import TaflGUI
     config = TrainingConfig()
     config.checkpoint_dir = tempfile.mkdtemp()
-    config.ruleset, config.max_game_length = "sami_tablut_defenders_first", 3
+    config.ruleset, config.max_game_length = "sami_tablut", 3
     # Constant planes, so a GUI that builds only the basic planes would fail
     config.network = NetworkConfig(channels=8, blocks=["line"],
                                    features=FeatureSpec(constant_planes=True))
@@ -538,7 +522,7 @@ def test_gui_reads_checkpoint_settings():
     network = TaflNet(config.network, 9)
     save_checkpoint(network, torch.optim.AdamW(network.parameters()), 1, config, {}, 'tablut.pth')
     gui = TaflGUI(os.path.join(config.checkpoint_dir, 'tablut.pth'))
-    assert gui.rules.name == "sami_tablut_defenders_first" and gui.game.current_player == 1
+    assert gui.rules.name == "sami_tablut" and gui.game.current_player == 1
     assert gui.max_moves == 3
     assert (gui.simulations, gui.c_puct, gui.ai_mcts.search_discount) == (5, 1.5, 0.99)
     moves = gui.game.get_legal_moves()
@@ -567,7 +551,7 @@ if __name__ == "__main__":
              test_evaluate_matches_masked_softmax, test_play_game_uses_rules, test_fpu_uses_parent_value,
              test_search_input_matches_training_state, test_single_simulation_policy_is_finite,
              test_temperature_and_time_limit, test_play_game_counts_last_ply_win,
-             test_unarmed_king_does_not_capture, test_capture_is_never_repetition, test_rollout_value_sign,
+             test_unarmed_king_does_not_capture, test_rollout_value_sign,
              test_load_compatible_keeps_player_plane, test_sim_balancer_band, test_replay_buffer_symmetries,
              test_train_network_small_buffers, test_low_temperature_and_eval_mode,
              test_larger_board_networks, test_legal_move_cache,

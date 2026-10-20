@@ -1,18 +1,18 @@
 {
-  "name": "sami_tablut_defenders_first: 6 blocks with 3x3 then row/column convs, x 48, global-pool bias",
+  "name": "sami_tablut: 6 line blocks x 48, global-pool bias in every other block, conv policy, pooled value",
   "game": {
-    "ruleset": "sami_tablut_defenders_first",
+    "ruleset": "sami_tablut",
     "max_game_length": 200
   },
   "network": {
     "channels": 48,
     "blocks": [
-      "line3",
-      "line3",
-      "line3",
-      "line3",
-      "line3",
-      "line3"
+      "line",
+      "line",
+      "line",
+      "line",
+      "line",
+      "line"
     ],
     "global_pool": "every_other",
     "global_pool_channels": 16,
@@ -105,7 +105,7 @@
     "num_workers": null,
     "device": "cpu",
     "temp_dir": "/dev/shm/",
-    "checkpoint_dir": "checkpoints/sami_tablut_defenders_first/line3_6x48_gpool",
+    "checkpoint_dir": "checkpoints/sami_tablut/line_6x48_gpool",
     "save_frequency": 1,
     "log_frequency": 1,
     "verbose": true

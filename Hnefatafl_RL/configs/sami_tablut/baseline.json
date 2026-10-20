@@ -1,7 +1,7 @@
 {
-  "name": "sami_tablut_defenders_first baseline: 6x48 plain blocks, dense heads (the old train_tablut.py defaults)",
+  "name": "sami_tablut baseline: 6x48 plain blocks, dense heads (the old train_tablut.py defaults)",
   "game": {
-    "ruleset": "sami_tablut_defenders_first",
+    "ruleset": "sami_tablut",
     "max_game_length": 200
   },
   "network": {
@@ -102,7 +102,7 @@
     "num_workers": null,
     "device": "cpu",
     "temp_dir": "/dev/shm/",
-    "checkpoint_dir": "checkpoints/sami_tablut_defenders_first/baseline",
+    "checkpoint_dir": "checkpoints/sami_tablut/baseline",
     "save_frequency": 1,
     "log_frequency": 1,
     "verbose": true

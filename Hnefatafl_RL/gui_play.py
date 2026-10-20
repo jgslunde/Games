@@ -26,7 +26,7 @@ Usage:
 
 Examples:
     python gui_play.py --ruleset copenhagen
-    python gui_play.py --checkpoint checkpoints/sami_tablut_defenders_first/line_6x48_gpool/checkpoint_iter_50.pth \\
+    python gui_play.py --checkpoint checkpoints/sami_tablut/line_6x48_gpool/checkpoint_iter_50.pth \\
         --ai-side attacker
     python gui_play.py --checkpoint checkpoints/brandubh/line_4x32/best_model.pth \\
         --simulations 200 --temperature 0.5 --temperature-mode decay --temperature-decay-moves 20

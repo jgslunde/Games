@@ -118,27 +118,38 @@ def constant_planes(game) -> np.ndarray:
     return np.stack([np.ones_like(corners), corners, throne]).astype(np.float32)
 
 
+def _arriving_pieces(board: np.ndarray) -> np.ndarray:
+    """
+    arriving[k] (shape (4, N, N)) = the piece that can slide onto each square from one of the four
+    sides. The left-to-right scan runs on the board seen from each side (one numpy pass for all
+    four), and each result is turned back to the board's orientation.
+    """
+    views = np.stack([board, board[:, ::-1], board.T, board.T[:, ::-1]])
+    nearest = _nearest_piece_to_the_left(views)
+    return np.stack([nearest[0], nearest[1][:, ::-1], nearest[2].T, nearest[3][:, ::-1].T])
+
+
 def reach_planes(game) -> np.ndarray:
     """
     [reach_attackers, reach_defenders, reach_king]: the squares each side can move to this turn,
-    ignoring whose turn it is and the repetition rule. reach_defenders includes the king's moves.
-    Pieces other than the king may pass over the empty throne but not land on it, and may not land
-    on a corner; the king may land anywhere empty. This equals the moves of Tafl.get_legal_moves.
+    ignoring whose turn it is. reach_defenders includes the king's moves. Pieces other than the
+    king may not land on the throne or a corner, and pass over the empty throne only where the
+    rules allow it; the king may land anywhere empty. This equals the moves of Tafl.get_legal_moves.
     """
     board = game.board
     empty = board == EMPTY
     corners, throne = special_squares(game)
-    # arriving[k] = the piece that can slide onto each square from one of the four sides: the
-    # left-to-right scan runs on the board seen from each side (one numpy pass for all four), and
-    # each result is turned back to the board's orientation
-    views = np.stack([board, board[:, ::-1], board.T, board.T[:, ::-1]])
-    nearest = _nearest_piece_to_the_left(views)
-    arriving = np.stack([nearest[0], nearest[1][:, ::-1], nearest[2].T, nearest[3][:, ::-1].T])
-    # The empty throne can be passed but only the king may land on it (or on a corner)
+    arriving = _arriving_pieces(board)
+    if game.rules.throne_passable:
+        soldiers_arriving = arriving
+    else:
+        # The empty throne blocks every piece but the king: scan again with a blocker on it
+        # (code 9 is no piece)
+        soldiers_arriving = _arriving_pieces(np.where(throne & empty, 9, board))
     piece_landable = empty & ~corners & ~throne
     king_reach = empty & (arriving == KING).any(axis=0)
-    attacker_reach = piece_landable & (arriving == ATTACKER).any(axis=0)
-    defender_reach = (piece_landable & (arriving == DEFENDER).any(axis=0)) | king_reach
+    attacker_reach = piece_landable & (soldiers_arriving == ATTACKER).any(axis=0)
+    defender_reach = (piece_landable & (soldiers_arriving == DEFENDER).any(axis=0)) | king_reach
     return np.stack([attacker_reach, defender_reach, king_reach]).astype(np.float32)
 
 

@@ -4,8 +4,9 @@ Tafl games on 7x7, 9x9 and 11x11 boards, played under named rule sets.
 A rule set (Rules) fixes everything that differs between the common variants: the starting
 position, who moves first, where the king escapes to, how he is captured, the throne, and the
 extra rules of some sets (encirclement, shieldwall, exit fort, what an endless repetition means).
-Training runs use only the named sets in RULESETS, which follow published rules; RULESETS.md
-lists their sources and how balanced they are in human play.
+Training runs use only the named sets in RULESETS: the nine most-played variants, as defined in the
+implementation reference of the tafl overview (October 2026). RULESETS.md lists them, their
+sources and how balanced they are in human play.
 
 Board: an NxN int8 array with EMPTY 0, ATTACKER 1, DEFENDER 2, KING 3. Players: 0 attackers,
 1 defenders. A move is (from_row, from_col, to_row, to_col).
@@ -16,9 +17,12 @@ Rules shared by all sets:
   opposite sides, by two enemy pieces or by an enemy piece and a hostile square; moving into a
   sandwich is safe;
 - only the king may stop on the throne (the centre square, in sets with a throne) and on the
-  corners (in sets where the king escapes to a corner); every piece may pass over the empty
-  throne; the corners are hostile to all pieces;
+  corners (in sets where the king escapes to a corner); the corners are hostile to all pieces;
 - a player who cannot move loses. Overlong games are ended as draws by the code that plays them.
+
+After every move the checks run in this order (reference A7): captures, king on a goal square,
+king captured, exit fort (after a defenders' move), encirclement (after an attackers' move),
+repetition, no legal move for the side to move.
 """
 
 import copy
@@ -42,14 +46,11 @@ KING_CAPTURE_RULES = {
                         "it from the three other sides",
     "strong": "from all four sides (next to the throne from the three other sides); never on the "
               "board edge",
-    "strong_edge": "from all four sides, where the board edge, a corner and the empty throne each "
-                   "count as one side",
 }
+# What the repetition_count-th occurrence of a position means, whichever side made the move
 REPETITION_RULES = {
-    "forbidden": "a move that gives a position for the third time is not allowed (a player with "
-                 "no other move loses)",
-    "defenders_lose": "the third occurrence of a position is a win for the attackers",
-    "draw": "the third occurrence of a position is a draw",
+    "defenders_lose": "a win for the attackers",
+    "draw": "a draw",
 }
 
 
@@ -76,7 +77,11 @@ class Rules:
                     row survives)
         exit_fort: the defenders win when the king is on the edge, can move, and sits inside a fort
                    of defenders that the attackers can never break
-        repetition: what a threefold repetition means, a key of REPETITION_RULES
+        repetition: what the repetition_count-th occurrence of a position means, a key of
+                    REPETITION_RULES
+        throne_passable: every piece may pass over the empty throne (else only the king may)
+        repetition_count: the occurrence of a position that ends the game (3 in most sets)
+    The last two have defaults so that checkpoints written before they existed still load.
     """
     name: str
     description: str
@@ -91,6 +96,8 @@ class Rules:
     shieldwall: bool
     exit_fort: bool
     repetition: str
+    throne_passable: bool = True
+    repetition_count: int = 3
 
     def __post_init__(self):
         object.__setattr__(self, "setup", tuple(self.setup))  # JSON gives a list
@@ -115,13 +122,16 @@ class Rules:
         """The rules as a few lines of text (for logs)."""
         extras = [name for name in ("encirclement", "shieldwall", "exit_fort") if getattr(self, name)]
         throne = "none" if not self.throne else ("hostile" if self.throne_hostile else "not hostile")
+        if self.throne and not self.throne_passable:
+            throne += ", only the king may pass"
         return (f"Rule set: {self.name} - {self.description}\n"
                 f"  {self.board_size}x{self.board_size}, {self.first_player} move first, the king "
                 f"wins on {'a corner' if self.king_goal == 'corner' else 'the edge'} and is "
                 f"{'armed' if self.king_armed else 'unarmed'}\n"
                 f"  King captured: {KING_CAPTURE_RULES[self.king_capture]}\n"
                 f"  Throne: {throne}; extra rules: {', '.join(extras) or 'none'}\n"
-                f"  Repetition: {REPETITION_RULES[self.repetition]}")
+                f"  Repetition: occurrence {self.repetition_count} of a position is "
+                f"{REPETITION_RULES[self.repetition]}")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -158,33 +168,81 @@ COPENHAGEN_SETUP = ("...AAAAA...",
                     "...........",
                     ".....A.....",
                     "...AAAAA...")
+SEA_BATTLE_9X9_SETUP = ("....A....",
+                        ".A..A..A.",
+                        "..A...A..",
+                        "...DDD...",
+                        "AA.DKD.AA",
+                        "...DDD...",
+                        "..A...A..",
+                        ".A..A..A.",
+                        "....A....")
+LEWIS_CROSS_SETUP = ("....AAA....",
+                     "....AAA....",
+                     ".....D.....",
+                     ".....D.....",
+                     "AA...D...AA",
+                     "AADDDKDDDAA",
+                     "AA...D...AA",
+                     ".....D.....",
+                     ".....D.....",
+                     "....AAA....",
+                     "....AAA....")
+BELL_SETUP = ("....AAA....",
+              "....A.A....",
+              ".....A.....",
+              ".....D.....",
+              "AA..DDD..AA",
+              "A.ADDKDDA.A",
+              "AA..DDD..AA",
+              ".....D.....",
+              ".....A.....",
+              "....A.A....",
+              "....AAA....")
 
-SAMI_TABLUT = Rules(
-    "sami_tablut", "Sami Tablut 9x9 (historical rules after Linnaeus, aagenielsen.dk), attackers first",
-    TABLUT_SETUP, first_player="attackers", king_goal="edge", king_capture="weak_near_throne",
+# The variant cards C1-C9 of the reference
+BRANDUBH = Rules(
+    "brandubh", "Brandubh 2 (World Tafl Federation, 2020), the most played 7x7 rules",
+    BRANDUBH_SETUP, first_player="attackers", king_goal="corner", king_capture="weak_throne",
     king_armed=True, throne=True, throne_hostile=True, encirclement=True, shieldwall=False,
     exit_fort=False, repetition="defenders_lose")
-FETLAR = Rules(
-    "fetlar", "Fetlar Hnefatafl 11x11 (2007)", COPENHAGEN_SETUP, first_player="attackers",
-    king_goal="corner", king_capture="strong", king_armed=True, throne=True, throne_hostile=True,
-    encirclement=True, shieldwall=False, exit_fort=False, repetition="draw")
+SAMI_TABLUT = Rules(
+    "sami_tablut", "Sami Tablut 9x9 as in the WTF championship (Saami Tablut-w, defenders first)",
+    TABLUT_SETUP, first_player="defenders", king_goal="edge", king_capture="weak_near_throne",
+    king_armed=True, throne=True, throne_hostile=True, encirclement=True, shieldwall=False,
+    exit_fort=False, repetition="defenders_lose")
+COPENHAGEN = Rules(
+    "copenhagen", "Copenhagen Hnefatafl 11x11 (World Tafl Federation, 2012), the most played 11x11 rules",
+    COPENHAGEN_SETUP, first_player="attackers", king_goal="corner", king_capture="strong",
+    king_armed=True, throne=True, throne_hostile=True, encirclement=True, shieldwall=True,
+    exit_fort=True, repetition="defenders_lose")
 
 RULESETS = {rules.name: rules for rules in [
-    Rules("brandubh", "Brandubh 2 (World Tafl Federation, 2020), the most played 7x7 rules",
-          BRANDUBH_SETUP, first_player="attackers", king_goal="corner", king_capture="weak_throne",
-          king_armed=True, throne=True, throne_hostile=True, encirclement=True, shieldwall=False,
-          exit_fort=False, repetition="forbidden"),
+    BRANDUBH,
+    replace(BRANDUBH, name="walker_brandub", king_capture="weak", throne_hostile=False,
+            description="Walker's Brandub 7x7 (2011), as played on aagenielsen.dk"),
+    replace(BRANDUBH, name="brandubh_2_5w", first_player="defenders", throne_passable=False,
+            repetition_count=5, description="Brandubh 2.5W 7x7 (draft of February 2026; start "
+                                            "position assumed to be that of Brandubh 2)"),
     SAMI_TABLUT,
-    replace(SAMI_TABLUT, name="sami_tablut_defenders_first", first_player="defenders",
-            description="Sami Tablut 9x9 with the defenders moving first (WTF championship rules)"),
-    Rules("copenhagen", "Copenhagen Hnefatafl 11x11 (World Tafl Federation, 2012), the most played "
-          "11x11 rules", COPENHAGEN_SETUP, first_player="attackers", king_goal="corner",
-          king_capture="strong", king_armed=True, throne=True, throne_hostile=True,
-          encirclement=True, shieldwall=True, exit_fort=True, repetition="defenders_lose"),
-    FETLAR,
-    replace(FETLAR, name="old_hnefatafl", king_capture="strong_edge", repetition="forbidden",
-            description="Old Hnefatafl 11x11: Fetlar, but the king can be captured on the edge "
-                        "and repetitions are not allowed"),
+    Rules("sea_battle_9x9", "Sea Battle 9x9, Nielsen setup", SEA_BATTLE_9X9_SETUP,
+          first_player="attackers", king_goal="edge", king_capture="strong", king_armed=False,
+          throne=False, throne_hostile=False, encirclement=True, shieldwall=False, exit_fort=False,
+          repetition="defenders_lose"),
+    Rules("market_hnefatafl", "Market Hnefatafl 9x9, the beginners' version of Sami Tablut",
+          TABLUT_SETUP, first_player="defenders", king_goal="edge", king_capture="weak",
+          king_armed=True, throne=False, throne_hostile=False, encirclement=False, shieldwall=False,
+          exit_fort=False, repetition="defenders_lose"),
+    COPENHAGEN,
+    replace(SAMI_TABLUT, name="historical_lewis", setup=LEWIS_CROSS_SETUP,
+            description="Historical 11x11 (Tawlbwrdd), Lewis cross setup, as in the WTF championship"),
+    replace(SAMI_TABLUT, name="historical_bell", setup=BELL_SETUP,
+            description="Historical 11x11 (Tawlbwrdd), Bell setup, defenders first"),
+    replace(SAMI_TABLUT, name="simple_tafl", setup=LEWIS_CROSS_SETUP, throne=False,
+            throne_hostile=False, description="Simple Tafl 11x11: historical rules, Lewis cross "
+                                              "setup, no throne, defenders first"),
+    replace(COPENHAGEN, name="fetlar", shieldwall=False, exit_fort=False, repetition="draw",
+            description="Fetlar Hnefatafl 11x11 (2007)"),
 ]}
 
 
@@ -260,7 +318,7 @@ class Tafl:
                         if self.rules.king_goal == "corner" else [])
         # (board bytes, player to move) of every position so far, the current one last
         self.position_history = [self._position_key()]
-        # Cache of get_legal_moves: the key (board, player to move, history length) and the moves
+        # Cache of get_legal_moves: the key (board, player to move) and the moves
         self._legal_moves_key = None
         self._legal_moves = []
 
@@ -289,15 +347,14 @@ class Tafl:
         """
         All legal moves of the player to move, as (from_row, from_col, to_row, to_col).
 
-        The list is cached until the board, the player to move or the length of the position
-        history changes (the history only grows through make_move), so the move check in make_move
-        and the search's expansion of a position do not generate the moves again.
+        The list is cached until the board or the player to move changes, so the move check in
+        make_move and the search's expansion of a position do not generate the moves again.
 
         Args:
             stop_at_first: if the moves are not cached, return only the first legal move found
                            (enough to know whether there is any)
         """
-        key = (self.board.tobytes(), self.current_player, len(self.position_history))
+        key = (self.board.tobytes(), self.current_player)
         if key == self._legal_moves_key:
             return list(self._legal_moves)
 
@@ -307,9 +364,6 @@ class Tafl:
         n = self.size
         throne = (n // 2) * n + n // 2 if self.rules.throne else -1
         corners = {r * n + c for r, c in self.corners}
-        # A move can only give a third occurrence of a position if some position occurred twice
-        history = self.position_history
-        check_repetition = self.rules.repetition == "forbidden" and len(set(history)) < len(history)
 
         moves = []
         for square, piece in enumerate(cells):
@@ -322,29 +376,16 @@ class Tafl:
                     if piece != KING:
                         if target in corners:  # corners end a ray, so nothing lies beyond
                             break
-                        if target == throne:  # pass over the throne, but never stop on it
-                            continue
-                    move = coords[square] + coords[target]
-                    if check_repetition and self._repeats_position(move):
-                        continue
-                    moves.append(move)
+                        if target == throne:  # never stop on the throne; pass over it if allowed
+                            if self.rules.throne_passable:
+                                continue
+                            break
+                    moves.append(coords[square] + coords[target])
                     if stop_at_first:
                         return moves
 
         self._legal_moves_key, self._legal_moves = key, moves
         return list(moves)
-
-    def _repeats_position(self, move) -> bool:
-        """Whether `move` gives a position that has already occurred twice."""
-        fr, fc, tr, tc = move
-        board = self.board.copy()
-        board[tr, tc], board[fr, fc] = board[fr, fc], EMPTY
-        if self.position_history.count((board.tobytes(), 1 - self.current_player)) < 2:
-            return False
-        # A capture changes the position: pieces are never added, so a position with fewer
-        # pieces has not occurred before (the count above was made without the captures)
-        captured, king_captured = self._find_captures(board, tr, tc)
-        return not captured and not king_captured
 
     def make_move(self, move: Tuple[int, int, int, int]) -> bool:
         """Play a move and decide whether the game is over. Returns False for an illegal move."""
@@ -362,16 +403,16 @@ class Tafl:
         key = self._position_key()
         self.position_history.append(key)
 
-        if king_captured:
+        if piece == KING and self._is_goal(tr, tc):
+            self._end(DEFENDER_PLAYER)
+        elif king_captured:
             self.board[self.board == KING] = EMPTY
             self._end(ATTACKER_PLAYER)
-        elif piece == KING and self._is_goal(tr, tc):
+        elif self.rules.exit_fort and mover == DEFENDER_PLAYER and self._king_in_exit_fort():
             self._end(DEFENDER_PLAYER)
         elif self.rules.encirclement and mover == ATTACKER_PLAYER and self._defenders_encircled():
             self._end(ATTACKER_PLAYER)
-        elif self.rules.exit_fort and self._king_in_exit_fort():
-            self._end(DEFENDER_PLAYER)
-        elif self.rules.repetition != "forbidden" and self.position_history.count(key) >= 3:
+        elif self.position_history.count(key) >= self.rules.repetition_count:
             self._end(ATTACKER_PLAYER if self.rules.repetition == "defenders_lose" else None)
         elif not self.get_legal_moves(stop_at_first=True):
             self._end(mover)
@@ -437,27 +478,17 @@ class Tafl:
         t = n // 2
         on_throne = self.rules.throne and (r, c) == self.throne
         next_to_throne = self.rules.throne and abs(r - t) + abs(c - t) == 1
-        four_sides = (rule in ("strong", "strong_edge") or (rule == "weak_throne" and on_throne)
+        four_sides = (rule == "strong" or (rule == "weak_throne" and on_throne)
                       or (rule == "weak_near_throne" and (on_throne or next_to_throne)))
         if not four_sides:
             # Two opposite sides: the attacker that moved, and an attacker or a corner beyond
             r2, c2 = r + dr, c + dc
             return self._inside(r2, c2) and (board[r2, c2] == ATTACKER or (r2, c2) in self.corners)
-        if rule == "strong" and (r in (0, n - 1) or c in (0, n - 1)):
+        if r in (0, n - 1) or c in (0, n - 1):  # the edge never counts as a side
             return False
-        for ar, ac in DIRECTIONS:
-            nr, nc = r + ar, c + ac
-            if not self._inside(nr, nc):
-                if rule == "strong_edge":
-                    continue
-                return False
-            # The empty throne next to the king counts as one side
-            if board[nr, nc] == ATTACKER or (self.rules.throne and (nr, nc) == self.throne):
-                continue
-            if rule == "strong_edge" and (nr, nc) in self.corners:
-                continue
-            return False
-        return True
+        # Attackers on all four sides; the empty throne next to the king counts as one of them
+        return all(board[r + ar, c + ac] == ATTACKER
+                   or (self.rules.throne and (r + ar, c + ac) == self.throne) for ar, ac in DIRECTIONS)
 
     def _shieldwall_captures(self, board: np.ndarray, r: int, c: int) -> List[Tuple[int, int]]:
         """Pieces captured by a shieldwall that the piece on edge square (r, c) closes."""
@@ -494,13 +525,18 @@ class Tafl:
 
     def _king_in_exit_fort(self) -> bool:
         """
-        True if the king is on the edge, can move, and is walled in by defenders that can never be
-        captured. The fort's inside is the area of empty squares the king can walk to. No attacker
-        may touch it, and every wall piece (a defender next to the inside) must, along both lines
-        through it, have a neighbour that an attacker can never occupy: off the board, inside the
-        fort or another wall piece. With the shieldwall rule a wall piece on the edge must also have
-        such a square in front of it. This misses forts that are only safe thanks to tactics, but
-        never calls a breakable fort safe.
+        The exit fort test (reference B2): the king stands on the edge, can move, and is walled in
+        by defending soldiers that can never be captured, whatever the attackers do.
+
+        The fort's inside is the king's square and the empty squares he can walk to. No attacker may
+        stand next to it, so all its neighbours are defending soldiers: the wall. A square is "open"
+        if it is on the board, outside the fort and not held by a soldier of the safe set, so that an
+        attacker or a hostile square might one day use it. The safe set starts as all defending
+        soldiers. Soldiers that could be captured leave it until nothing changes: a soldier with open
+        squares on both sides along one line, and (with the shieldwall rule) a run of two or more
+        soldiers along an edge whose front squares and both end squares are open. The fort holds if
+        every wall soldier stays safe. This may reject a fort that holds only through good play, but
+        never accepts one that can be broken.
         """
         n, board = self.size, self.board
         kings = np.argwhere(board == KING)
@@ -509,26 +545,49 @@ class Tafl:
         kr, kc = kings[0]
         if not (kr in (0, n - 1) or kc in (0, n - 1)):
             return False
-        open_squares = board == EMPTY
-        open_squares[kr, kc] = True
-        areas, _ = scipy.ndimage.label(open_squares)
+        walkable = board == EMPTY
+        walkable[kr, kc] = True
+        areas, _ = scipy.ndimage.label(walkable)
         inside = areas == areas[kr, kc]
         if inside.sum() < 2:  # the king cannot move
             return False
-        walls = scipy.ndimage.binary_dilation(inside) & ~inside
-        if (board[walls] == ATTACKER).any():
+        wall = scipy.ndimage.binary_dilation(inside) & ~inside
+        if (board[wall] == ATTACKER).any():
             return False
-        safe = lambda rr, cc: not self._inside(rr, cc) or inside[rr, cc] or walls[rr, cc]
-        for r, c in np.argwhere(walls):
-            for dr, dc in ((1, 0), (0, 1)):
-                if not (safe(r - dr, c - dc) or safe(r + dr, c + dc)):
-                    return False
-            if self.rules.shieldwall:
-                for (ir, ic), on_edge in [((1, 0), r == 0), ((-1, 0), r == n - 1),
-                                          ((0, 1), c == 0), ((0, -1), c == n - 1)]:
-                    if on_edge and not (inside[r + ir, c + ic] or walls[r + ir, c + ic]):
-                        return False
-        return True
+
+        safe = board == DEFENDER
+        # The four edge lines, each with the direction into the board (for the shieldwall runs)
+        edge_lines = [([(0, c) for c in range(n)], (1, 0)), ([(n - 1, c) for c in range(n)], (-1, 0)),
+                      ([(r, 0) for r in range(n)], (0, 1)), ([(r, n - 1) for r in range(n)], (0, -1))]
+        changed = True
+        while changed:
+            changed = False
+            is_open = ~inside & ~safe
+            for r, c in np.argwhere(safe):
+                for dr, dc in ((1, 0), (0, 1)):
+                    if (self._inside(r - dr, c - dc) and self._inside(r + dr, c + dc)
+                            and is_open[r - dr, c - dc] and is_open[r + dr, c + dc]):
+                        safe[r, c], changed = False, True
+            if not self.rules.shieldwall:
+                continue
+            is_open = ~inside & ~safe
+            for line, (ir, ic) in edge_lines:
+                i = 0
+                while i < n:
+                    if not safe[line[i]]:
+                        i += 1
+                        continue
+                    j = i
+                    while j < n and safe[line[j]]:
+                        j += 1
+                    run = line[i:j]  # an unbroken run of safe soldiers, line[i] to line[j - 1]
+                    ends_open = i > 0 and j < n and is_open[line[i - 1]] and is_open[line[j]]
+                    if len(run) >= 2 and ends_open and all(is_open[r + ir, c + ic] for r, c in run):
+                        for square in run:
+                            safe[square] = False
+                        changed = True
+                    i = j
+        return bool(safe[wall].all())
 
     def __str__(self) -> str:
         symbols = {EMPTY: '·', ATTACKER: '○', DEFENDER: '●', KING: '♔'}

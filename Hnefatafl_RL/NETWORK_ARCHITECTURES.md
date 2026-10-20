@@ -179,10 +179,10 @@ the same few openings). The 11x11 baseline is new: the old script's settings had
 | brandubh | `line_4x32` | 4 line blocks x 32, conv policy, pooled value, 7 planes | 39,995 | equal or better per node, 1.8x the nodes |
 | brandubh | `line_4x32_mobility` | as above + reach planes, 10 planes | 40,859 | faster learning; if large, 3 blocks are enough |
 | brandubh | `line3_4x32` | 4 line3 blocks x 32, 7 planes | 49,339 | tells whether diagonal shapes matter at 7x7 |
-| sami_tablut_defenders_first | `baseline` | 6x48 res, dense heads, 4 planes | 685,079 | the network of the deprecated runs |
-| sami_tablut_defenders_first | `line_6x48_gpool` | 6 line blocks x 48, global pool, 7 planes | 149,003 | 1.3x faster at equal depth |
-| sami_tablut_defenders_first | `line3_6x48_gpool` | 6 line3 blocks x 48, global pool, 7 planes | 180,395 | my guess for the eventual winner at 9x9 |
-| sami_tablut_defenders_first | `line_6x48_gpool_mobility` | line_6x48_gpool + reach planes, 10 planes | 150,299 | the engine-computed planes |
+| sami_tablut | `baseline` | 6x48 res, dense heads, 4 planes | 685,079 | the network of the deprecated runs |
+| sami_tablut | `line_6x48_gpool` | 6 line blocks x 48, global pool, 7 planes | 149,003 | 1.3x faster at equal depth |
+| sami_tablut | `line3_6x48_gpool` | 6 line3 blocks x 48, global pool, 7 planes | 180,395 | my guess for the eventual winner at 9x9 |
+| sami_tablut | `line_6x48_gpool_mobility` | line_6x48_gpool + reach planes, 10 planes | 150,299 | the engine-computed planes |
 | copenhagen | `baseline` | 8x64 res, dense heads, 4 planes | 1,786,367 | the reference: an old-style network with the same settings |
 | copenhagen | `line_10x64_gpool` | 10 line blocks x 64, global pool, 7 planes | 509,323 | the main run; depth for encirclement, 1.2x faster than the baseline |
 | copenhagen | `line_10x64_gpool_mobility_region` | line_10x64_gpool + reach planes + defender-region plane, 11 planes | 511,627 | the encirclement question answered by the engine (+0.3 ms per node) |
@@ -212,7 +212,7 @@ about a third.
 ```bash
 ./run.sh copenhagen line_10x64_gpool                  # on a cluster node, inside screen
 python run_training.py configs/brandubh/line_4x32.json
-python run_training.py configs/sami_tablut_defenders_first/line_6x48_gpool.json --num-workers 64
+python run_training.py configs/sami_tablut/line_6x48_gpool.json --num-workers 64
 python run_training.py configs/brandubh/baseline.json --show        # print the resolved config
 python run_training.py configs/brandubh/baseline.json --resume checkpoints/brandubh/baseline/checkpoint_iter_40.pth
 ```
