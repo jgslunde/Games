@@ -18,6 +18,7 @@ Tests for the training-pipeline fixes:
 15. train_network: clear error for a too small buffer; small buffers, empty validation sets and
     draws work.
 16. Temperature 0.001 gives finite probabilities, and a search puts the network into eval mode.
+    (Also: self-play gives each position the game's ending and its plies left.)
 17. 9x9 and 11x11 networks with history planes search their games.
 18. The cached legal moves equal freshly generated ones.
 19. Checkpoints are written atomically, hold all settings and return their training history.
@@ -37,10 +38,11 @@ from agent import Agent, RandomAgent, play_game
 from features import FeatureSpec, StateHistory
 from mcts import MCTS, MCTSNode, RandomRolloutMCTS
 from network_config import NetworkConfig
-from tafl import ATTACKER, DEFENDER, EMPTY, KING, RULESETS, Tafl, move_index, policy_size
+from tafl import ATTACKER, DEFENDER, EMPTY, ENDINGS, KING, RULESETS, Tafl, move_index, policy_size
 from tafl_network import TaflNet, move_index_tables
 from train import (augment_sample, symmetry_permutations, ReplayBuffer, SimulationBalancer,
-                   TrainingConfig, train_network, save_checkpoint, load_checkpoint)
+                   TrainingConfig, generate_self_play_data, train_network, save_checkpoint,
+                   load_checkpoint)
 
 # Brandubh without the throne and with a king captured by two attackers everywhere: the positions
 # of the tests below were written for these rules
@@ -134,7 +136,7 @@ def test_evaluate_matches_masked_softmax():
         legal = game.get_legal_moves()
         probs, value = mcts._evaluate(game, legal)
         with torch.inference_mode():
-            logits, _ = network(torch.from_numpy(game.get_state()).unsqueeze(0))
+            logits = network(torch.from_numpy(game.get_state()).unsqueeze(0))[0]
         logits = logits.numpy()[0]
         mask = np.zeros(policy_size(7), dtype=np.float32)
         mask[[move_index(m, 7) for m in legal]] = 1.0
@@ -254,10 +256,11 @@ def test_play_game_counts_last_ply_win():
     original_tafl = agent_module.Tafl
     agent_module.Tafl = lambda rules: set_position(original_tafl(rules), start, player=0)
     try:
-        winner = play_game(attackers, defenders, SIMPLE_7X7, display=False, max_moves=2)
+        game = play_game(attackers, defenders, SIMPLE_7X7, display=False, max_moves=2)
     finally:
         agent_module.Tafl = original_tafl
-    assert winner == 0, f"expected attacker win, got {winner}"
+    assert game.winner == 0 and game.end_reason == "king_captured", \
+        f"got {game.winner}, {game.end_reason}"
     print("  play_game: a win on the last allowed ply counts")
     return True
 
@@ -374,7 +377,8 @@ def test_replay_buffer_symmetries():
     buffer = ReplayBuffer(5 * 8, (4, 7, 7), 1176, num_symmetries=8)  # room for 5 positions
     for values in (np.arange(3), np.arange(3, 7)):
         n = len(values)
-        buffer.add(np.zeros((n, 4, 7, 7)), np.zeros((n, 1176)), values, np.zeros(n))
+        buffer.add(np.zeros((n, 4, 7, 7)), np.zeros((n, 1176)), values, np.zeros(n), np.zeros(n),
+                   values)
     assert len(buffer) == 40 and sorted(buffer.values) == [2, 3, 4, 5, 6] and buffer.next_index == 2
     print("  replay buffer: symmetry tables equal augment_sample; ring buffer keeps the newest")
     return True
@@ -396,7 +400,9 @@ def test_train_network_small_buffers():
             buffer = ReplayBuffer(64, (4, 7, 7), 1176, num_symmetries)
             buffer.add(np.repeat(game.get_state()[None], num_positions, axis=0),
                        np.repeat(policy[None], num_positions, axis=0), np.ones(num_positions),
-                       np.arange(num_positions) % 3 - 1)  # draws, attacker wins and defender wins
+                       np.arange(num_positions) % 3 - 1,  # draws, attacker wins and defender wins
+                       np.array([0, 3, 4, 6])[np.arange(num_positions) % 4],  # allowed endings
+                       np.arange(num_positions) * 10.0)  # plies left
             network = small_network(7)
             optimizer = torch.optim.AdamW(network.parameters())
             try:
@@ -406,11 +412,38 @@ def test_train_network_small_buffers():
                 assert not trains, f"{num_positions} positions: training should have run"
                 continue
             assert trains, f"{num_positions} positions: a too small buffer must raise ValueError"
-            assert np.isfinite(losses['policy_loss'])
+            assert all(np.isfinite(losses[key])
+                       for key in ('policy_loss', 'ending_loss', 'moves_left_loss'))
             assert np.isnan(losses['val_policy_loss']) == val_is_empty
     finally:
         torch.compile = original_compile
     print("  train_network: clear error for a too small buffer; small buffers and draws train")
+    return True
+
+
+def test_self_play_targets():
+    """Self-play must give every position of a game the game's ending and the number of plies from
+    the position to the end, and return a game record with the final board."""
+    config = TrainingConfig()
+    config.num_games_per_iteration, config.num_workers, config.temp_dir = 1, 1, None
+    config.num_mcts_sims_attacker = config.num_mcts_sims_defender = 2
+    config.network = NetworkConfig(channels=8, blocks=["res"])
+    original_compile = torch.compile
+    torch.compile = lambda model, **kwargs: model  # no compilation in this test
+    try:
+        for max_game_length in (6, 300):  # a draw by the move limit, then (usually) a real ending
+            config.max_game_length = max_game_length
+            positions, games = generate_self_play_data(Agent(TaflNet(config.network, 7)), config)
+            (states, policies, values, winners, endings, moves_left), record = positions, games[0]
+            assert np.all(endings == ENDINGS.index(record['ending']))
+            # The stored positions follow each other ply by ply (random opening plies come first and
+            # are not stored), up to one ply before the end
+            assert moves_left[-1] == 1 and np.all(np.diff(moves_left) == -1)
+            assert len(record['board']) == 7 and record['type'] == 'selfplay'
+            assert record['ending'] != 'move_limit' or record['plies'] > max_game_length
+    finally:
+        torch.compile = original_compile
+    print("  self-play: ending and moves-left targets, game record")
     return True
 
 
@@ -447,7 +480,7 @@ def test_larger_board_networks():
         game = Tafl(rules)
         assert np.array_equal(game.get_piece_planes(), game.get_state()[:3])
         state = StateHistory.from_game(game, 2).get_state_with_history(game.current_player)
-        policy, value = network(torch.from_numpy(state)[None])
+        policy, value = network(torch.from_numpy(state)[None])[:2]
         assert state.shape == (7, n, n) and policy.shape == (1, policy_size(n))
         visit_probs = MCTS(network, num_simulations=3, history_length=2).search(game)
         assert np.isclose(sum(visit_probs.values()), 1.0)
@@ -553,7 +586,8 @@ if __name__ == "__main__":
              test_temperature_and_time_limit, test_play_game_counts_last_ply_win,
              test_unarmed_king_does_not_capture, test_rollout_value_sign,
              test_load_compatible_keeps_player_plane, test_sim_balancer_band, test_replay_buffer_symmetries,
-             test_train_network_small_buffers, test_low_temperature_and_eval_mode,
+             test_train_network_small_buffers, test_self_play_targets,
+             test_low_temperature_and_eval_mode,
              test_larger_board_networks, test_legal_move_cache,
              test_checkpoint_save_and_resume_history, test_gui_reads_checkpoint_settings]
     all_passed = True

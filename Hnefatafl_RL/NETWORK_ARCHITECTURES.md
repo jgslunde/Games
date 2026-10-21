@@ -98,6 +98,13 @@ board size is the number of facts built on other facts, so add blocks before cha
 - `policy_head: dense`: the old head, kept for the baselines.
 - `value_head: pooled` (new default): board-wide average and maximum of 16 planes plus one spatial
   plane, then two dense layers. `dense` is the old head.
+- Two extra outputs in every network, which the search does not use: how the game will end (logits
+  over `tafl.ENDINGS`, the same eight classes for all rule sets; training leaves the endings a rule
+  set does not have out of the softmax), and how many plies are left (a Huber loss, as in Leela
+  Chess Zero's moves-left head). Each is a small head on the board-wide average and maximum of 16
+  planes. They give the trunk more to learn from each game, and show what the network expects.
+  They add about 7,000 parameters at 64 channels and 2-4 % to a batch-1 call. Networks trained
+  before these outputs existed (`deprecated_checkpoints_2/`) can no longer be loaded.
 
 ### Input planes (`features.py`)
 
@@ -175,19 +182,19 @@ the same few openings). The 11x11 baseline is new: the old script's settings had
 
 | Rule set | Config | Network | Parameters | Hypothesis |
 |---|---|---|---|---|
-| brandubh | `baseline` | 6x32 res + SE, dense heads, 4 planes | 243,911 | the network of the deprecated runs |
-| brandubh | `line_4x32` | 4 line blocks x 32, conv policy, pooled value, 7 planes | 39,995 | equal or better per node, 1.8x the nodes |
-| brandubh | `line_4x32_mobility` | as above + reach planes, 10 planes | 40,859 | faster learning; if large, 3 blocks are enough |
-| brandubh | `line3_4x32` | 4 line3 blocks x 32, 7 planes | 49,339 | tells whether diagonal shapes matter at 7x7 |
-| sami_tablut | `baseline` | 6x48 res, dense heads, 4 planes | 685,079 | the network of the deprecated runs |
-| sami_tablut | `line_6x48_gpool` | 6 line blocks x 48, global pool, 7 planes | 149,003 | 1.3x faster at equal depth |
-| sami_tablut | `line3_6x48_gpool` | 6 line3 blocks x 48, global pool, 7 planes | 180,395 | my guess for the eventual winner at 9x9 |
-| sami_tablut | `line_6x48_gpool_mobility` | line_6x48_gpool + reach planes, 10 planes | 150,299 | the engine-computed planes |
-| copenhagen | `baseline` | 8x64 res, dense heads, 4 planes | 1,786,367 | the reference: an old-style network with the same settings |
-| copenhagen | `line_10x64_gpool` | 10 line blocks x 64, global pool, 7 planes | 509,323 | the main run; depth for encirclement, 1.2x faster than the baseline |
-| copenhagen | `line_10x64_gpool_mobility_region` | line_10x64_gpool + reach planes + defender-region plane, 11 planes | 511,627 | the encirclement question answered by the engine (+0.3 ms per node) |
-| copenhagen | `line_10x64_gpool_attention` | line_10x64_gpool with blocks 4 and 8 as attention blocks, 7 planes | 485,075 | whole-board shapes learned instead of computed; 8.2 ms per call against 6.6 ms |
-| copenhagen | `attention_8x64` | 8 attention blocks x 64 (4 heads), bilinear policy, pooled value, 7 planes | 311,301 | experiment: a pure transformer as in Leela Chess Zero; 1.3x slower per call than `line_10x64_gpool` (owl33: 9.8 against 7.4 ms) |
+| brandubh | `baseline` | 6x32 res + SE, dense heads, 4 planes | 249,808 | the network of the deprecated runs |
+| brandubh | `line_4x32` | 4 line blocks x 32, conv policy, pooled value, 7 planes | 45,892 | equal or better per node, 1.8x the nodes |
+| brandubh | `line_4x32_mobility` | as above + reach planes, 10 planes | 46,756 | faster learning; if large, 3 blocks are enough |
+| brandubh | `line3_4x32` | 4 line3 blocks x 32, 7 planes | 55,236 | tells whether diagonal shapes matter at 7x7 |
+| sami_tablut | `baseline` | 6x48 res, dense heads, 4 planes | 691,488 | the network of the deprecated runs |
+| sami_tablut | `line_6x48_gpool` | 6 line blocks x 48, global pool, 7 planes | 155,412 | 1.3x faster at equal depth |
+| sami_tablut | `line3_6x48_gpool` | 6 line3 blocks x 48, global pool, 7 planes | 186,804 | my guess for the eventual winner at 9x9 |
+| sami_tablut | `line_6x48_gpool_mobility` | line_6x48_gpool + reach planes, 10 planes | 156,708 | the engine-computed planes |
+| copenhagen | `baseline` | 8x64 res, dense heads, 4 planes | 1,793,288 | the reference: an old-style network with the same settings |
+| copenhagen | `line_10x64_gpool` | 10 line blocks x 64, global pool, 7 planes | 516,244 | the main run; depth for encirclement, 1.2x faster than the baseline |
+| copenhagen | `line_10x64_gpool_mobility_region` | line_10x64_gpool + reach planes + defender-region plane, 11 planes | 518,548 | the encirclement question answered by the engine (+0.3 ms per node) |
+| copenhagen | `line_10x64_gpool_attention` | line_10x64_gpool with blocks 4 and 8 as attention blocks, 7 planes | 491,996 | whole-board shapes learned instead of computed; 8.2 ms per call against 6.6 ms |
+| copenhagen | `attention_8x64` | 8 attention blocks x 64 (4 heads), bilinear policy, pooled value, 7 planes | 318,222 | experiment: a pure transformer as in Leela Chess Zero; 1.3x slower per call than `line_10x64_gpool` (owl33: 9.8 against 7.4 ms) |
 
 Not in the configs, but one `--set` away: `network.policy_head=bilinear`,
 `network.tie_blocks=true`, `network.features.history_length=4`, `network.blocks=["thick",...]`,
@@ -254,6 +261,9 @@ network was trained with (`rules`: the fields of `tafl.Rules`, setup included). 
 
 The policy output keeps the old index: `from_square * 4(N-1) + direction * (N-1) + distance - 1`,
 directions 0 up, 1 down, 2 left, 3 right; take the softmax over the legal moves only.
+
+The ONNX model has four named outputs: `policy_logits`, `value`, `ending_logits` (classes listed
+under `ending` in the JSON) and `moves_left` (plies). The first two are as before.
 
 ## 8. Code map
 

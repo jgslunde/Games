@@ -211,7 +211,7 @@ class TaflGUI:
         else:
             state = build_features(self.game, self.network.feature_spec)
             with torch.inference_mode():
-                policy_logits, value = self.network(torch.from_numpy(state).unsqueeze(0))
+                policy_logits, value = self.network(torch.from_numpy(state).unsqueeze(0))[:2]
             # Softmax over the legal moves only (the same as masking the illegal moves)
             moves = self.game.get_legal_moves()
             logits = policy_logits[0].numpy()[[move_index(move, self.board_size) for move in moves]]
@@ -258,7 +258,7 @@ class TaflGUI:
         # As in training: a draw once more than max_moves plies are played (a win on that ply wins)
         if (self.max_moves is not None and self.game.move_count > self.max_moves
                 and not self.game.game_over):
-            self.game.game_over, self.game.winner = True, None
+            self.game._end(None, "move_limit")
         self._evaluate_position()
 
     def _update_animation(self):

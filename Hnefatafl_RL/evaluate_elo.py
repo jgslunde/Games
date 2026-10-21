@@ -125,8 +125,8 @@ def play_single_game(agent1_is_attacker: bool, rules, network1_path: str, networ
         move = agent.select_move(game, temperature=temperature if move_count < temperature_plies else 0.0)
 
         if move is None:
-            game.game_over = True
-            game.winner = 1 - game.current_player
+            blocked = ("attackers_blocked", "defenders_blocked")[game.current_player]
+            game._end(1 - game.current_player, blocked)
             break
 
         game.make_move(move)
@@ -134,8 +134,7 @@ def play_single_game(agent1_is_attacker: bool, rules, network1_path: str, networ
 
         # Move limit (a win on the last allowed ply still counts as a win)
         if move_count > max_moves and not game.game_over:
-            game.game_over = True
-            game.winner = None
+            game._end(None, "move_limit")
             break
     
     # Return result from agent1's perspective

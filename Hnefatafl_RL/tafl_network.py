@@ -6,6 +6,11 @@ network from a checkpoint.
 Input:  (batch, FeatureSpec.num_planes, N, N), see features.py
 Output: policy logits (batch, N*N*4*(N-1)) in policy index order (tafl.move_index)
         value (batch, 1) in [-1, 1] for the player to move
+        ending logits (batch, len(tafl.ENDINGS)): how the game will end, the same classes for all
+            rule sets (endings the rules do not allow are left out of the softmax in training)
+        moves left (batch, 1): the number of plies until the game ends
+The search uses only the policy and the value. The last two outputs are extra training targets
+that give the network more to learn from each game, and are shown to the user.
 """
 
 import math
@@ -18,6 +23,11 @@ import torch.nn.functional as F
 
 from features import FeatureSpec
 from network_config import NetworkConfig
+from tafl import ENDINGS
+
+# The moves-left output is softplus(head) * MOVES_LEFT_SCALE plies: the head works in units of 100
+# plies, so that its numbers are of order 1 like those of the other heads
+MOVES_LEFT_SCALE = 100.0
 
 
 def _conv_bn(cin: int, cout: int, kernel, padding) -> nn.Sequential:
@@ -279,6 +289,22 @@ class PooledValueHead(nn.Module):
         return torch.tanh(self.fc2(F.relu(self.fc1(h))))
 
 
+class GlobalHead(nn.Module):
+    """Board-wide average and maximum of a few planes, then two dense layers to `outputs` numbers
+    (no final activation). Used for the ending and moves-left outputs."""
+
+    def __init__(self, channels: int, outputs: int, hidden: int = 64, pool_planes: int = 16):
+        super().__init__()
+        self.pool_conv = _conv_bn(channels, pool_planes, 1, 0)
+        self.fc1 = nn.Linear(2 * pool_planes, hidden)
+        self.fc2 = nn.Linear(hidden, outputs)
+
+    def forward(self, x):
+        pooled = F.relu(self.pool_conv(x))
+        h = torch.cat([pooled.mean((2, 3)), pooled.amax((2, 3))], dim=1)
+        return self.fc2(F.relu(self.fc1(h)))
+
+
 # ---------------------------------------------------------------------------------------------
 # Network
 # ---------------------------------------------------------------------------------------------
@@ -324,12 +350,16 @@ class TaflNet(nn.Module):
             self.value_head = DenseValueHead(c, n, config.value_hidden)
         else:
             self.value_head = PooledValueHead(c, n, config.value_hidden, config.value_pool_channels)
+        self.ending_head = GlobalHead(c, len(ENDINGS))
+        self.moves_left_head = GlobalHead(c, 1)
 
     def forward(self, x):
+        """(policy logits, value, ending logits, moves left); see the module docstring."""
         h = F.relu(self.stem(x))
         for i in self.block_order:
             h = self.blocks[i](h)
-        return self.policy_head(h), self.value_head(h)
+        return (self.policy_head(h), self.value_head(h), self.ending_head(h),
+                MOVES_LEFT_SCALE * F.softplus(self.moves_left_head(h)))
 
     def load_state_dict_compatible(self, state_dict, strict: bool = True, saved_plane_names=None):
         """
@@ -379,6 +409,9 @@ def describe_network(network: TaflNet) -> str:
 def load_weights(network: TaflNet, checkpoint: dict):
     """Load a checkpoint's weights into `network`, adapting the input planes where they differ."""
     state_dict = checkpoint.get('network_state_dict') or checkpoint['model_state_dict']
+    if not any(key.startswith('ending_head.') for key in state_dict):
+        raise ValueError("The checkpoint has no ending and moves-left outputs: networks trained "
+                         "before these outputs existed are deprecated and can no longer be loaded")
     saved_names = None
     if 'network_config' in checkpoint:
         saved_names = NetworkConfig.from_dict(checkpoint['network_config']).features.plane_names()

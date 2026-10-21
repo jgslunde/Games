@@ -49,6 +49,12 @@ a draw after `max_game_length` plies; the published rules have no such limit.
   - Walker's Brandub with encirclement.
 - Not implemented: draws by agreement (A10) and two-game match scoring (A11). Neither matters for
   self-play.
+- A finished game records how it ended in `Tafl.end_reason`, one of `tafl.ENDINGS`:
+  `king_escaped`, `exit_fort`, `attackers_blocked`, `king_captured`, `encircled`,
+  `defenders_blocked` (a side without legal moves loses), `repetition`, or `move_limit` (the draw
+  that training imposes after `max_game_length` plies). Training prints these counts for its
+  self-play and evaluation games, and appends every game's ending and final board to
+  `checkpoints/<rule set>/<run>/games.jsonl`.
 
 ## Changes since the first version of the rule sets (commit 2c6f2f5)
 
@@ -78,3 +84,10 @@ cannot load it. None of these runs used a published rule set:
 
 The ONNX example files in git (`deprecated_checkpoints/*/.../checkpoint_iter_*.onnx`) belong to
 these runs. Their `.json` files list the old rule switches.
+
+`deprecated_checkpoints_2/copenhagen/` holds the first Copenhagen runs under the named rule sets
+(`baseline`, `line_10x64_gpool`, `line_10x64_gpool_mobility_region`, to iteration 17-30;
+`attention_8x64` crashed in its first training step). Their rules equal today's `copenhagen`, except
+that runs started before commit 460c6c1 and not resumed since used the exit fort test of 2c6f2f5
+(see above). Their networks lack the ending
+and moves-left outputs, so the current code cannot load them.

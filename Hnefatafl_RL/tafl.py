@@ -52,6 +52,11 @@ REPETITION_RULES = {
     "defenders_lose": "a win for the attackers",
     "draw": "a draw",
 }
+# The ways a game can end, the same list for all rule sets: the end_reason of a finished game and
+# the classes of the network's ending output. "x_blocked" means side x has no legal move (and
+# loses); "move_limit" is the draw that training and play impose after max_game_length plies.
+ENDINGS = ("king_escaped", "exit_fort", "attackers_blocked", "king_captured", "encircled",
+           "defenders_blocked", "repetition", "move_limit")
 
 
 @dataclass(frozen=True)
@@ -132,6 +137,11 @@ class Rules:
                 f"  Throne: {throne}; extra rules: {', '.join(extras) or 'none'}\n"
                 f"  Repetition: occurrence {self.repetition_count} of a position is "
                 f"{REPETITION_RULES[self.repetition]}")
+
+    def endings(self) -> Tuple[str, ...]:
+        """The endings of ENDINGS that these rules allow, in the order of ENDINGS."""
+        unused = {"exit_fort": not self.exit_fort, "encircled": not self.encirclement}
+        return tuple(ending for ending in ENDINGS if not unused.get(ending, False))
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -312,6 +322,7 @@ class Tafl:
         self.current_player = ATTACKER_PLAYER if self.rules.first_player == "attackers" else DEFENDER_PLAYER
         self.game_over = False
         self.winner = None  # stays None for a draw
+        self.end_reason = None  # one of ENDINGS once the game is over
         self.move_count = 0
         self.throne = (n // 2, n // 2)  # the centre square, also when it is not a throne
         self.corners = ([(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
@@ -404,22 +415,25 @@ class Tafl:
         self.position_history.append(key)
 
         if piece == KING and self._is_goal(tr, tc):
-            self._end(DEFENDER_PLAYER)
+            self._end(DEFENDER_PLAYER, "king_escaped")
         elif king_captured:
             self.board[self.board == KING] = EMPTY
-            self._end(ATTACKER_PLAYER)
+            self._end(ATTACKER_PLAYER, "king_captured")
         elif self.rules.exit_fort and mover == DEFENDER_PLAYER and self._king_in_exit_fort():
-            self._end(DEFENDER_PLAYER)
+            self._end(DEFENDER_PLAYER, "exit_fort")
         elif self.rules.encirclement and mover == ATTACKER_PLAYER and self._defenders_encircled():
-            self._end(ATTACKER_PLAYER)
+            self._end(ATTACKER_PLAYER, "encircled")
         elif self.position_history.count(key) >= self.rules.repetition_count:
-            self._end(ATTACKER_PLAYER if self.rules.repetition == "defenders_lose" else None)
+            winner = ATTACKER_PLAYER if self.rules.repetition == "defenders_lose" else None
+            self._end(winner, "repetition")
         elif not self.get_legal_moves(stop_at_first=True):
-            self._end(mover)
+            blocked = "defenders_blocked" if mover == ATTACKER_PLAYER else "attackers_blocked"
+            self._end(mover, blocked)
         return True
 
-    def _end(self, winner: Optional[int]):
-        self.game_over, self.winner = True, winner
+    def _end(self, winner: Optional[int], reason: str):
+        """End the game. `reason` is one of ENDINGS."""
+        self.game_over, self.winner, self.end_reason = True, winner, reason
 
     def _is_goal(self, r: int, c: int) -> bool:
         if self.rules.king_goal == "corner":

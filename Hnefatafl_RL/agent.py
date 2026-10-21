@@ -152,7 +152,7 @@ class MCTSAgent:
 def play_game(agent1, agent2, rules, display: bool = True,
               temperature: float = 0.0, temperature_mode: str = "fixed",
               temperature_threshold: int = 0, temperature_decay_moves: int = 0,
-              max_moves: int = 500) -> int:
+              max_moves: int = 500) -> Tafl:
     """
     Play a game between two agents.
 
@@ -168,7 +168,8 @@ def play_game(agent1, agent2, rules, display: bool = True,
         max_moves: the game is a draw once more than this many plies have been played
 
     Returns:
-        winner: 0 for attackers, 1 for defenders, None for draw
+        the finished game: game.winner (0 attackers, 1 defenders, None draw), game.end_reason (one
+        of tafl.ENDINGS), game.move_count and the final game.board
     """
     game = Tafl(rules)
     agents = [agent1, agent2]
@@ -212,9 +213,9 @@ def play_game(agent1, agent2, rules, display: bool = True,
         move = agent.select_move(game, temperature=temp)
         
         if move is None:
-            # No legal moves
-            game.game_over = True
-            game.winner = 1 - game.current_player
+            # No legal moves (make_move ends such games already; this covers a start without moves)
+            blocked = ("attackers_blocked", "defenders_blocked")[game.current_player]
+            game._end(1 - game.current_player, blocked)
             break
         
         if display:
@@ -234,8 +235,7 @@ def play_game(agent1, agent2, rules, display: bool = True,
         if move_count > max_moves and not game.game_over:
             if display:
                 print(f"Game exceeded {max_moves} moves - draw")
-            game.game_over = True
-            game.winner = None  # Draw
+            game._end(None, "move_limit")
             break
     
     if display:
@@ -244,11 +244,11 @@ def play_game(agent1, agent2, rules, display: bool = True,
             winner_name = "Draw"
         else:
             winner_name = "Attackers" if game.winner == 0 else "Defenders"
-        print(f"Game Over! Winner: {winner_name}")
+        print(f"Game Over! Winner: {winner_name} ({game.end_reason})")
         print(f"Total moves: {move_count}")
         print("=" * 50)
-    
-    return game.winner
+
+    return game
 
 
 if __name__ == "__main__":

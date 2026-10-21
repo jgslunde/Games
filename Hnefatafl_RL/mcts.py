@@ -402,7 +402,7 @@ class MCTS:
         # Evaluate with network
         # Use inference_mode for better performance than no_grad
         with torch.inference_mode():
-            policy_logits, value = self.network(state_tensor)
+            policy_logits, value = self.network(state_tensor)[:2]  # the search uses no other output
         
         policy_logits = policy_logits.cpu().numpy()[0]
         value = value.cpu().item()

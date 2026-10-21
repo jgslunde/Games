@@ -10,7 +10,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from tafl import ATTACKER, DEFENDER, EMPTY, KING, RULESETS, Tafl
+from tafl import ATTACKER, DEFENDER, EMPTY, ENDINGS, KING, RULESETS, Tafl
 
 A, D, K = ATTACKER, DEFENDER, KING
 
@@ -221,10 +221,40 @@ def test_repetition():
     return True
 
 
+def test_end_reasons():
+    """Every way a game ends is recorded in end_reason (one of ENDINGS), and Rules.endings() leaves
+    out the endings a rule set does not have."""
+    far = {(2, 2): A, (3, 8): A}
+    fort = {(10, 5): K, (8, 5): D, (8, 6): D, (9, 4): D, (9, 7): D, (10, 4): D, (10, 9): D, **far}
+    ring = {(5, 5): K, (3, 5): A, (7, 5): A, (5, 3): A, (5, 7): A, (4, 4): A, (4, 6): A, (6, 4): A,
+            (6, 9): A}
+    cases = [
+        (after("brandubh", {(0, 1): K, (5, 5): A}, 1, (0, 1, 0, 0)), 1, "king_escaped"),
+        (after("brandubh", {(2, 2): K, (2, 1): A, (2, 5): A}, 0, (2, 5, 2, 3)), 0, "king_captured"),
+        (after("copenhagen", fort, 1, (10, 9, 10, 7)), 1, "exit_fort"),
+        (after("copenhagen", ring, 0, (6, 9, 6, 6)), 0, "encircled"),
+        # The king alone on the edge, walled in: no capture on the edge, but no legal move either
+        (after("copenhagen", {(0, 5): K, (0, 4): A, (0, 6): A, (1, 9): A}, 0, (1, 9, 1, 5)), 0,
+         "defenders_blocked"),
+    ]
+    for game, winner, reason in cases:
+        assert game.game_over and game.winner == winner and game.end_reason == reason, \
+            f"expected {reason}, got {game.end_reason} (winner {game.winner})"
+    game = position("copenhagen", {(2, 2): K, (7, 7): D, (4, 8): A, (8, 3): A}, 0)
+    for move in [(4, 8, 4, 9), (7, 7, 7, 6), (4, 9, 4, 8), (7, 6, 7, 7)] * 2:
+        game.make_move(move)
+    assert game.end_reason == "repetition" and Tafl("copenhagen").end_reason is None
+    assert RULESETS["copenhagen"].endings() == ENDINGS
+    assert set(ENDINGS) - set(RULESETS["market_hnefatafl"].endings()) == {"exit_fort", "encircled"}
+    print("  end reasons: escape, capture, fort, encirclement, blocked, repetition; endings per "
+          "rule set")
+    return True
+
+
 if __name__ == "__main__":
     print("Testing the rule sets...")
     tests = [test_setups, test_movement, test_king_goal, test_king_capture, test_hostile_squares,
-             test_shieldwall, test_exit_fort, test_encirclement, test_repetition]
+             test_shieldwall, test_exit_fort, test_encirclement, test_repetition, test_end_reasons]
     all_passed = True
     for test in tests:
         try:

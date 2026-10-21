@@ -289,7 +289,27 @@ def parse_output_file(filepath):
             global_epoch_step += 1
             continue
         
-        # Epoch-level losses (new columnar format)
+        # Epoch-level losses with the ending and moves-left losses: training policy, value,
+        # ending, moves left, L2, total | gradients policy, value | the same six for validation.
+        # Only the losses the plots show are kept.
+        number = r'\s+([\d.]+|nan)'
+        columns = r'\s+(\d+)\s+\|' + number * 6 + r'\s+\|' + number * 2 + r'\s+\|' + number * 6
+        match = re.match(columns, line)
+        if match:
+            values = [float(x) for x in match.groups()[1:]]
+            data['epoch_steps'].append(global_epoch_step)
+            data['epoch_policy_loss'].append(values[0])
+            data['epoch_value_loss'].append(values[1])
+            data['epoch_l2_loss'].append(values[4])
+            data['epoch_policy_grad'].append(values[6])
+            data['epoch_value_grad'].append(values[7])
+            data['epoch_val_policy_loss'].append(values[8])
+            data['epoch_val_value_loss'].append(values[9])
+            data['epoch_val_l2_loss'].append(values[12])
+            global_epoch_step += 1
+            continue
+
+        # Epoch-level losses (older columnar format)
         # e.g., "      1 |   3.5152   0.5707   0.368899   3.6578 |   1.5566   0.7306 |   3.4958   0.5636   0.373004   3.6367"
         match = re.match(r'\s+(\d+)\s+\|\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+\|\s+([\d.]+)\s+([\d.]+)\s+\|\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)', line)
         if match:

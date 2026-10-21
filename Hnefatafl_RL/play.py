@@ -193,8 +193,8 @@ def play_game_between_agents(agent1, agent2, rules, display=True, temperature=0.
         
         if move is None:
             # No legal moves - opponent wins
-            game.game_over = True
-            game.winner = 1 - game.current_player
+            blocked = ("attackers_blocked", "defenders_blocked")[game.current_player]
+            game._end(1 - game.current_player, blocked)
             break
         
         from_r, from_c, to_r, to_c = move
@@ -218,8 +218,7 @@ def play_game_between_agents(agent1, agent2, rules, display=True, temperature=0.
         if move_count > max_moves and not game.game_over:
             if display:
                 print(f"Game exceeded {max_moves} moves - draw by move limit")
-            game.game_over = True
-            game.winner = None
+            game._end(None, "move_limit")
             break
     
     if display:

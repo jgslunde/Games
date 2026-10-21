@@ -76,6 +76,8 @@ class TrainingConfig:
     lr_step_values = []               # LR values for each step (len(lr_step_iterations) + 1 of them)
     weight_decay = 1e-4               # L2 regularization
     value_loss_weight = 10.0          # Weight for value loss (policy loss weight is always 1.0)
+    ending_loss_weight = 0.5          # Weight for the loss of the ending output (how the game ends)
+    moves_left_loss_weight = 1.0      # Weight for the loss of the moves-left output
     use_dynamic_boosting = True       # Scale losses by the smoothed win rates of the two sides
     dynamic_boost_alpha = 0.1         # Smoothing factor for win rate tracking
     dynamic_boost_min = 0.5           # Minimum boost factor
@@ -162,7 +164,8 @@ SECTIONS: Dict[str, List[str]] = {
                   "reward_discount", "track_unique_states"],
     "training": ["batch_size", "num_epochs", "batches_per_epoch", "learning_rate", "lr_decay", "lr_floor",
                  "use_stepping_lr", "lr_step_iterations", "lr_step_values", "weight_decay",
-                 "value_loss_weight", "use_dynamic_boosting", "dynamic_boost_alpha", "dynamic_boost_min",
+                 "value_loss_weight", "ending_loss_weight", "moves_left_loss_weight",
+                 "use_dynamic_boosting", "dynamic_boost_alpha", "dynamic_boost_min",
                  "dynamic_boost_max", "attacker_win_loss_boost", "draw_penalty_attacker",
                  "draw_penalty_defender"],
     "replay_buffer": ["replay_buffer_size", "min_buffer_size", "use_data_augmentation"],

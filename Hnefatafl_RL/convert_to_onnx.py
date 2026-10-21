@@ -24,8 +24,11 @@ import sys
 import numpy as np
 import torch
 
-from tafl import policy_size
+from tafl import ENDINGS, policy_size
 from tafl_network import load_network, describe_network, count_parameters
+
+# The network's outputs in order (see tafl_network.py); clients can read them by name
+OUTPUT_NAMES = ['policy_logits', 'value', 'ending_logits', 'moves_left']
 
 
 def export_to_onnx(network, output_path, board_size, num_planes, opset_version=12):
@@ -56,12 +59,8 @@ def export_to_onnx(network, output_path, board_size, num_planes, opset_version=1
         opset_version=opset_version,
         do_constant_folding=True,
         input_names=['board_state'],
-        output_names=['policy_logits', 'value'],
-        dynamic_axes={
-            'board_state': {0: 'batch_size'},
-            'policy_logits': {0: 'batch_size'},
-            'value': {0: 'batch_size'}
-        },
+        output_names=OUTPUT_NAMES,
+        dynamic_axes={name: {0: 'batch_size'} for name in ['board_state'] + OUTPUT_NAMES},
         dynamo=False,
         verbose=False
     )
@@ -90,6 +89,10 @@ def write_model_info(network, checkpoint, onnx_path):
             'note': 'logits; take the softmax over the legal moves only',
         },
         'value': 'tanh output in [-1, 1] for the player to move',
+        'ending': {'classes': list(ENDINGS),
+                   'note': 'logits of how the game will end; take the softmax over the endings the '
+                           'rules allow (exit_fort and encircled only where those rules are on)'},
+        'moves_left': 'the expected number of plies until the game ends',
         'network': network.config.to_dict(),
         'network_description': describe_network(network),
         'num_parameters': count_parameters(network),
@@ -125,19 +128,19 @@ def verify_onnx_model(onnx_path, network, board_size, num_planes):
     test_input = (torch.rand(1, num_planes, board_size, board_size) < 0.2).float()
     network.eval()
     with torch.no_grad():
-        pytorch_policy, pytorch_value = network(test_input)
-        pytorch_policy = pytorch_policy.numpy()
-        pytorch_value = pytorch_value.numpy()
+        pytorch_outputs = [output.numpy() for output in network(test_input)]
 
     ort_session = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
-    onnx_policy, onnx_value = ort_session.run(None, {ort_session.get_inputs()[0].name: test_input.numpy()})
+    input_name = ort_session.get_inputs()[0].name
+    onnx_outputs = ort_session.run(OUTPUT_NAMES, {input_name: test_input.numpy()})
 
-    policy_diff = np.abs(pytorch_policy - onnx_policy).max()
-    value_diff = np.abs(pytorch_value - onnx_value).max()
+    # Relative to the size of each output (moves_left is in plies, the others are of order 1)
     tolerance = 1e-4
-    print(f"  Policy output difference: {policy_diff:.2e} (tolerance: {tolerance:.2e})")
-    print(f"  Value output difference: {value_diff:.2e} (tolerance: {tolerance:.2e})")
-    if policy_diff < tolerance and value_diff < tolerance:
+    diffs = [np.abs(a - b).max() / max(1.0, np.abs(a).max())
+             for a, b in zip(pytorch_outputs, onnx_outputs)]
+    for name, diff in zip(OUTPUT_NAMES, diffs):
+        print(f"  {name} difference: {diff:.2e} (tolerance: {tolerance:.2e})")
+    if max(diffs) < tolerance:
         print("  ✓ Verification passed! ONNX model outputs match PyTorch model")
         return True
     print("  ✗ Verification failed! Outputs differ beyond tolerance")

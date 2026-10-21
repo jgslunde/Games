@@ -38,13 +38,14 @@ except ImportError:
     exit(1)
 
 import torch.nn as nn
+import torch.nn.functional as F
 
 from agent import Agent
 from features import StateHistory, build_features
 from network_config import NetworkConfig
 from run_config import TrainingConfig, save_config  # TrainingConfig lives in run_config.py (JSON form there)
-from tafl import Tafl, move_index
-from tafl_network import TaflNet, load_weights, describe_network
+from tafl import ENDINGS, Tafl, move_index
+from tafl_network import MOVES_LEFT_SCALE, TaflNet, load_weights, describe_network
 
 
 # =============================================================================
@@ -59,7 +60,8 @@ class ReplayBuffer:
     in samples (positions x num_symmetries), the unit of replay_buffer_size and min_buffer_size, and
     train_network applies a random symmetry to every position it draws. States are stored as uint8,
     since all input planes are 0 or 1. winners holds the game result: 0 attacker, 1 defender,
-    -1 draw.
+    -1 draw. endings holds how the game ended (an index into tafl.ENDINGS), moves_left the number
+    of plies from the position to the end of the game.
     """
 
     def __init__(self, max_samples: int, state_shape: Tuple[int, ...], policy_size: int,
@@ -70,11 +72,13 @@ class ReplayBuffer:
         self.policies = np.zeros((capacity, policy_size), dtype=np.float32)
         self.values = np.zeros(capacity, dtype=np.float32)
         self.winners = np.zeros(capacity, dtype=np.int8)
+        self.endings = np.zeros(capacity, dtype=np.int64)
+        self.moves_left = np.zeros(capacity, dtype=np.float32)
         self.num_positions = 0  # number of filled entries
         self.next_index = 0     # entry written next; once the buffer is full, the oldest entry
 
     def add(self, states: np.ndarray, policies: np.ndarray, values: np.ndarray,
-            winners: np.ndarray):
+            winners: np.ndarray, endings: np.ndarray, moves_left: np.ndarray):
         """Add positions (one row each), overwriting the oldest ones when the buffer is full."""
         if not np.all((states == 0) | (states == 1)):
             raise ValueError("ReplayBuffer stores states as uint8: planes must hold only 0 and 1")
@@ -84,6 +88,8 @@ class ReplayBuffer:
         self.policies[indices] = policies
         self.values[indices] = values
         self.winners[indices] = winners
+        self.endings[indices] = endings
+        self.moves_left[indices] = moves_left
         self.next_index = (self.next_index + len(values)) % capacity
         self.num_positions = min(self.num_positions + len(values), capacity)
 
@@ -125,7 +131,7 @@ def setup_temp_directory(temp_dir: str = None) -> str:
         
         # Verify tempfile will use our directory
         actual_temp = tempfile.gettempdir()
-        if actual_temp != temp_dir:
+        if os.path.normpath(actual_temp) != os.path.normpath(temp_dir):  # "/dev/shm/" is "/dev/shm"
             print(f"Warning: tempfile.gettempdir() returns {actual_temp}, expected {temp_dir}")
         
         return temp_dir
@@ -456,6 +462,37 @@ def symmetry_permutations(board_size: int) -> Tuple[np.ndarray, np.ndarray]:
 
 
 # =============================================================================
+# GAME RECORDS
+# =============================================================================
+
+def game_record(game: Tafl, game_type: str, network_side: str = None) -> dict:
+    """
+    What games.jsonl keeps of a finished game: its type ("selfplay", "vs_random" or "vs_best"), who
+    won ("attackers", "defenders" or None for a draw), how (one of tafl.ENDINGS), after how many
+    plies, and the final board (one string per row, as in tafl setups: A, D, K and . for empty).
+    In evaluation games, network_side is the side the network under evaluation played.
+    """
+    winner = None if game.winner is None else ('attackers', 'defenders')[game.winner]
+    record = {'type': game_type, 'winner': winner, 'ending': game.end_reason,
+              'plies': game.move_count,
+              'board':["".join(".ADK"[piece] for piece in row) for row in game.board]}
+    if network_side is not None:
+        record['network_side'] = network_side
+    return record
+
+
+def print_endings(columns: Dict[str, List[dict]], rules):
+    """Print how many games of each column (a list of game records) ended in each way the rules
+    allow, with the share of the column's games."""
+    print("  " + f"{'Ending':<20}" + "".join(f"{name:>24}" for name in columns))
+    for ending in rules.endings():
+        counts = [(sum(record['ending'] == ending for record in records), len(records))
+                  for records in columns.values()]
+        print("  " + f"{ending:<20}"
+              + "".join(f"{n:>15} ({100 * n / max(total, 1):5.1f}%)" for n, total in counts))
+
+
+# =============================================================================
 # SELF-PLAY
 # =============================================================================
 
@@ -571,6 +608,7 @@ def _play_self_play_game_worker(network_path, network_config, rules,
         states = []
         policies = []
         players = []
+        plies = []  # the ply number of each stored position (for the moves-left target)
         mate_in_1_flags = []  # Track which positions had mate-in-1
         move_count = 0
         
@@ -676,6 +714,7 @@ def _play_self_play_game_worker(network_path, network_config, rules,
             states.append(state)
             policies.append(policy)
             players.append(current_player)
+            plies.append(move_count)
             mate_in_1_flags.append(mate_in_1_move is not None)  # Mark if this was a mate-in-1 position
             
             # Track state hash if enabled (for diversity analysis)
@@ -706,17 +745,10 @@ def _play_self_play_game_worker(network_path, network_config, rules,
             if state_history is not None:
                 state_history.push(game.get_piece_planes())
             
-            # Safety check for move limit
-            if move_count > max_game_length:
-                break
-        
-        # Draw reason: the move limit, or a repetition in rule sets where a repetition is a draw
-        draw_reason = None
-        if not game.game_over and move_count > max_game_length:
-            draw_reason = 'move_limit'
-        elif game.game_over and game.winner is None:
-            draw_reason = 'repetition'
-        
+            # Move limit (a win on the last allowed ply still counts as a win)
+            if move_count > max_game_length and not game.game_over:
+                game._end(None, "move_limit")
+
         # Combine timing stats from both MCTS instances
         timing_attacker = mcts_attacker.get_timing_stats()
         timing_defender = mcts_defender.get_timing_stats()
@@ -730,13 +762,14 @@ def _play_self_play_game_worker(network_path, network_config, rules,
         # Extract game results before cleanup
         winner = int(game.winner) if game.winner is not None else None
         num_moves = int(move_count)
-        draw_reason_clean = str(draw_reason) if draw_reason else None
-        
+        record = game_record(game, 'selfplay')
+
         # Clean up references to prevent pickle errors
         # Convert states/policies to ensure they're picklable numpy arrays without references
         states_clean = [np.array(s, dtype=np.float32).copy() for s in states]
         policies_clean = [np.array(p, dtype=np.float32).copy() for p in policies]
         players_clean = [int(p) for p in players]
+        plies_clean = [int(p) for p in plies]
         mate_in_1_flags_clean = [bool(f) for f in mate_in_1_flags]
         
         # Delete ALL objects that might hold references to compiled network
@@ -760,9 +793,10 @@ def _play_self_play_game_worker(network_path, network_config, rules,
             'policies': policies_clean,
             'winner': winner,
             'players': players_clean,
+            'plies': plies_clean,
             'mate_in_1_flags': mate_in_1_flags_clean,
             'num_moves': num_moves,
-            'draw_reason': draw_reason_clean,
+            'record': record,  # for the ending statistics and games.jsonl
             'timing': combined_timing
         }
         
@@ -786,7 +820,7 @@ def _play_self_play_game_worker(network_path, network_config, rules,
 
 def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None,
                            attacker_sims: int = None,
-                           defender_sims: int = None) -> Tuple[Tuple, int, int, float]:
+                           defender_sims: int = None) -> Tuple[Tuple, List[dict]]:
     """
     Generate self-play games and their training positions.
     Uses multiprocessing to parallelize game generation.
@@ -801,12 +835,10 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         defender_sims: Override for defender simulation count (uses config value if None)
 
     Returns:
-        Tuple of (positions, attacker_wins, defender_wins, avg_game_length) where:
-        - positions: (states, policies, values, winners) arrays with one row per position, for
-          ReplayBuffer.add (without symmetries; train_network applies those)
-        - attacker_wins: Number of games won by attacker
-        - defender_wins: Number of games won by defender
-        - avg_game_length: Mean number of plies per game (including random opening plies)
+        Tuple of (positions, games) where:
+        - positions: (states, policies, values, winners, endings, moves_left) arrays with one row
+          per position, for ReplayBuffer.add (without symmetries; train_network applies those)
+        - games: one game_record per game (plies include the random opening plies)
     """
     # Use provided simulation counts or fall back to config
     num_sims_attacker = attacker_sims if attacker_sims is not None else config.num_mcts_sims_attacker
@@ -888,13 +920,6 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
             except Exception:
                 pass
     
-    # Process results
-    total_moves = 0
-    attacker_wins = 0
-    defender_wins = 0
-    draws = 0
-    move_limit_draws = 0
-    
     # MCTS timing aggregation
     mcts_timing_totals = {
         'selection': 0.0,
@@ -908,20 +933,10 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
 
     # Training positions of all games
     position_states, position_policies, position_values, position_winners = [], [], [], []
+    position_endings, position_moves_left = [], []
     for game_data in game_results:
-        total_moves += game_data['num_moves']
         winner = game_data['winner']
-        draw_reason = game_data.get('draw_reason', None)
-        
-        if winner == 0:
-            attacker_wins += 1
-        elif winner == 1:
-            defender_wins += 1
-        else:  # winner is None (only possible if move limit reached)
-            draws += 1
-            if draw_reason == 'move_limit':
-                move_limit_draws += 1
-        
+
         # Aggregate MCTS timing data
         if 'timing' in game_data:
             for key, value in game_data['timing'].items():
@@ -948,7 +963,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
                 # Mate-in-1 position: always value +1.0 for the player to move (no discount)
                 value = 1.0
             elif winner is None:
-                # Draw (only by move limit - repetitions are illegal moves)
+                # Draw (move limit, or repetition where the rules make it a draw)
                 # Apply player-specific draw penalty
                 if player == 0:  # Attacker
                     base_value = config.draw_penalty_attacker
@@ -969,19 +984,27 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
             position_policies.append(policy)
             position_values.append(value)
             position_winners.append(-1 if winner is None else winner)  # -1 = draw
+        position_endings += [ENDINGS.index(game_data['record']['ending'])] * num_positions
+        position_moves_left += [game_data['num_moves'] - ply for ply in game_data['plies']]
     positions = (np.array(position_states, dtype=np.uint8),
                  np.array(position_policies, dtype=np.float32),
                  np.array(position_values, dtype=np.float32),
-                 np.array(position_winners, dtype=np.int8))
+                 np.array(position_winners, dtype=np.int8),
+                 np.array(position_endings, dtype=np.int64),
+                 np.array(position_moves_left, dtype=np.float32))
 
+    games = [game_data['record'] for game_data in game_results]
+    total_games = len(games)
+    attacker_wins = sum(record['winner'] == 'attackers' for record in games)
+    defender_wins = sum(record['winner'] == 'defenders' for record in games)
+    draws = total_games - attacker_wins - defender_wins
     print(f"Generated {len(position_values)} training positions")
-    total_games = config.num_games_per_iteration
     print(f"Results: {attacker_wins} attacker wins ({100*attacker_wins/total_games:.1f}%), "
           f"{defender_wins} defender wins ({100*defender_wins/total_games:.1f}%), "
           f"{draws} draws ({100*draws/total_games:.1f}%)")
-    if draws > 0:
-        print(f"  All draws by move limit ({config.max_game_length}+ moves): {move_limit_draws}")
-    print(f"Average game length: {total_moves/total_games:.1f} moves")
+    print(f"Average game length: {np.mean([record['plies'] for record in games]):.1f} moves")
+    print("How the games ended:")
+    print_endings({'self-play games': games}, config.rules)
     
     # Analyze unique states if tracking is enabled
     if config.track_unique_states:
@@ -1035,8 +1058,8 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         print(f"  Get legal moves:   {mcts_timing_totals['get_legal_moves']:7.1f}s ({100*mcts_timing_totals['get_legal_moves']/total_mcts_time:5.1f}%)")
         print(f"  Terminal eval:     {mcts_timing_totals['terminal_eval']:7.1f}s ({100*mcts_timing_totals['terminal_eval']/total_mcts_time:5.1f}%)")
         print(f"  Total MCTS time:   {total_mcts_time:7.1f}s")
-    
-    return positions, attacker_wins, defender_wins, total_moves / total_games
+
+    return positions, games
 
 
 # =============================================================================
@@ -1062,13 +1085,16 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
         defender_boost: Loss boost factor for defender-won games
     
     Returns:
-        dict with 'policy_loss', 'value_loss', 'total_loss', 'policy_grad', 'value_grad',
-        'val_policy_loss', 'val_value_loss', 'val_l2_loss', 'val_total_loss'
+        dict with the training losses '<name>_loss' (name: policy, value, ending, moves_left,
+        total) averaged over all batches, 'policy_grad', 'value_grad', 'l2_loss', and the
+        validation losses 'val_<name>_loss' and 'val_l2_loss' of the last epoch
     """
     # Compile network for faster training (~18% speedup)
-    # This creates a compiled wrapper that's only used during training
-    # Use dynamic=True to handle variable batch sizes properly
-    network_compiled = torch.compile(network, mode='default', dynamic=True)
+    # This creates a compiled wrapper that's only used during training. The default dynamic=None
+    # recompiles once when the batch size changes (the last validation batch) and then keeps only
+    # the batch size variable. dynamic=True makes the board size variable too, which the compiler
+    # cannot handle for the attention blocks.
+    network_compiled = torch.compile(network, mode='default')
     network_compiled.train()
     device = config.device
     
@@ -1079,8 +1105,8 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
     cell_perm, move_perm = symmetry_permutations(config.board_size)
 
     def get_batch(indices, symmetries):
-        """Tensors (states, policies, values, winners) of buffer entries `indices`, each entry
-        turned by its board symmetry (an index into cell_perm / move_perm)."""
+        """Tensors (states, policies, values, winners, endings, moves_left) of buffer entries
+        `indices`, each entry turned by its board symmetry (an index into cell_perm / move_perm)."""
         # Flatten the board, so that a symmetry reorders the last axis
         states = buffer.states[indices].reshape(len(indices), buffer.states.shape[1], -1)
         policies = buffer.policies[indices]
@@ -1092,8 +1118,10 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
         states = states.reshape((len(indices),) + buffer.states.shape[1:]).astype(np.float32)
         return (torch.from_numpy(states).to(device),
                 torch.from_numpy(policies).to(device),
-                torch.from_numpy(buffer.values[indices]).unsqueeze(1).to(device),
-                torch.from_numpy(buffer.winners[indices]).to(device))
+                torch.from_numpy(buffer.values[indices]).to(device),
+                torch.from_numpy(buffer.winners[indices]).to(device),
+                torch.from_numpy(buffer.endings[indices]).to(device),
+                torch.from_numpy(buffer.moves_left[indices]).to(device))
 
     # Training: batch_size * batches_per_epoch samples per epoch (fewer if the buffer is smaller).
     # Validation: 0.25x that volume, from the newest positions in the buffer, each under all its
@@ -1116,70 +1144,62 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
                          f"outside the validation set, batch size {config.batch_size}. "
                          "Increase min_buffer_size.")
 
-    total_policy_loss = 0.0
-    total_value_loss = 0.0
-    total_loss = 0.0
-    total_policy_grad = 0.0
-    total_value_grad = 0.0
-    # Note: L2 loss is not accumulated - it's a snapshot of network weights, not a per-batch metric
-    final_l2_loss = 0.0  # Will be set to the last epoch's L2 value
+    # Endings the rules do not allow get no probability in the ending output
+    allowed_endings = torch.tensor([ending in config.rules.endings() for ending in ENDINGS],
+                                   device=device)
+    loss_names = ['policy', 'value', 'ending', 'moves_left', 'total']
+
+    def batch_losses(batch) -> Dict[str, torch.Tensor]:
+        """The mean losses (loss_names) of one batch from get_batch."""
+        states, policies, values, winners, endings, moves_left = batch
+        pred_policies, pred_values, pred_endings, pred_moves_left = network_compiled(states)
+        policy = -torch.sum(policies * torch.log_softmax(pred_policies, dim=1), dim=1)
+        value = (pred_values.squeeze(1) - values) ** 2
+        # Boost factors: attacker-won games get attacker_boost, defender-won games defender_boost,
+        # draws 1, divided by the mean weight to keep the effective learning rate stable
+        if attacker_boost != 1.0 or defender_boost != 1.0:
+            weights = torch.where(winners == 0, attacker_boost,
+                                  torch.where(winners == 1, defender_boost, 1.0))
+            policy, value = policy * weights / weights.mean(), value * weights / weights.mean()
+        losses = {
+            'policy': policy.mean(),
+            'value': value.mean(),
+            'ending': F.cross_entropy(pred_endings.masked_fill(~allowed_endings, float('-inf')),
+                                      endings),
+            # In units of MOVES_LEFT_SCALE plies: the squared error up to one unit, linear beyond
+            # it, so that the rare very long games do not dominate
+            'moves_left': F.huber_loss(pred_moves_left.squeeze(1) / MOVES_LEFT_SCALE,
+                                       moves_left / MOVES_LEFT_SCALE),
+        }
+        losses['total'] = (losses['policy'] + config.value_loss_weight * losses['value']
+                           + config.ending_loss_weight * losses['ending']
+                           + config.moves_left_loss_weight * losses['moves_left'])
+        return losses
+
+    totals = dict.fromkeys(loss_names + ['policy_grad', 'value_grad'], 0.0)  # sums over all batches
     num_batches = 0
-    
+
     # Print header for training output
-    print("\n  " + "-" * 110)
-    print(f"  {'Epoch':>5} | {'Policy':>8} {'Value':>8} {'L2':>10} {'Total':>8} | "
-          f"{'PolGrad':>8} {'ValGrad':>8} | {'ValPol':>8} {'ValVal':>8} {'ValL2':>10} {'ValTot':>8}")
-    print(f"  {'':>5} | {'Loss':>8} {'Loss':>8} {'Loss':>10} {'Loss':>8} | "
-          f"{'':>8} {'':>8} | {'Loss':>8} {'Loss':>8} {'Loss':>10} {'Loss':>8}")
-    print("  " + "-" * 110)
-    
+    header = " ".join(f"{name:>9}"
+                      for name in ['Policy', 'Value', 'Ending', 'MovesLeft', 'L2', 'Total'])
+    print("\n  " + "-" * 149)
+    print(f"  {'':>5} | {'Training losses':^59} | {'Gradients':^17} | {'Validation losses':^59}")
+    print(f"  {'Epoch':>5} | {header} | {'Policy':>8} {'Value':>8} | {header}")
+    print("  " + "-" * 149)
+
     for epoch in range(config.num_epochs):
-        epoch_policy_loss = 0.0
-        epoch_value_loss = 0.0
-        epoch_total_loss = 0.0
-        epoch_policy_grad = 0.0
-        epoch_value_grad = 0.0
-        # L2 loss will be computed once at the end of the epoch (not accumulated per batch)
-        
+        epoch_sums = dict.fromkeys(totals, 0.0)
         for batch_idx in range(batches_per_epoch):
             # Sample positions randomly from the buffer, without the validation positions, each
             # under a random board symmetry
             chosen = rng.choice(len(train_positions), config.batch_size, replace=False)
             symmetries = rng.integers(0, num_symmetries, config.batch_size)
-            states, policies, values, winners = get_batch(train_positions[chosen], symmetries)
+            losses = batch_losses(get_batch(train_positions[chosen], symmetries))
 
-            # Forward pass (using compiled network for speed)
-            pred_policies, pred_values = network_compiled(states)
-            
-            # Compute per-sample losses
-            policy_loss_per_sample = -torch.sum(policies * 
-                                      torch.log_softmax(pred_policies, dim=1), dim=1)
-            value_loss_per_sample = (pred_values.squeeze(1) - values.squeeze(1)) ** 2
-            
-            # Apply dynamic boost factors based on which side won
-            # Attacker-won games get attacker_boost, defender-won games get defender_boost, draws 1
-            if attacker_boost != 1.0 or defender_boost != 1.0:
-                boost_weights = torch.where(winners == 0, attacker_boost,
-                                            torch.where(winners == 1, defender_boost, 1.0))
-
-                # Normalize by mean weight to keep effective learning rate stable
-                # This prevents gradient explosion when boost factors are very different
-                mean_weight = torch.mean(boost_weights)
-                normalized_weights = boost_weights / mean_weight
-                
-                policy_loss_per_sample = policy_loss_per_sample * normalized_weights
-                value_loss_per_sample = value_loss_per_sample * normalized_weights
-            
-            # Aggregate losses
-            policy_loss = torch.mean(policy_loss_per_sample)
-            value_loss = torch.mean(value_loss_per_sample)
-            
-            loss = policy_loss + config.value_loss_weight * value_loss
-            
             # Backward pass (set_to_none=True is faster than default zero_grad)
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            
+            losses['total'].backward()
+
             # Compute gradient norms after backward pass, separately for policy and value heads.
             # Squared norms are summed as tensors so that only two .item() syncs happen per batch.
             policy_grad_sq = torch.zeros((), device=device)
@@ -1193,131 +1213,70 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
                         policy_grad_sq += grad_sq
                     elif 'value' in name.lower():
                         value_grad_sq += grad_sq
+                    elif name.startswith(('ending_head.', 'moves_left_head.')):
+                        continue  # the extra outputs are in neither norm
                     else:
                         # Shared layers contribute to both
                         policy_grad_sq += grad_sq / 2
                         value_grad_sq += grad_sq / 2
 
-            # Take square root to get L2 norm
-            policy_grad_norm = policy_grad_sq.item() ** 0.5
-            value_grad_norm = value_grad_sq.item() ** 0.5
+            batch_values = {name: losses[name].item() for name in loss_names}
+            batch_values['policy_grad'] = policy_grad_sq.item() ** 0.5
+            batch_values['value_grad'] = value_grad_sq.item() ** 0.5
 
             # Stop on NaN or infinity instead of writing it into the weights (and all later
             # checkpoints)
-            if not np.isfinite(policy_grad_norm + value_grad_norm + loss.item()):
+            if not np.isfinite(sum(batch_values.values())):
                 raise RuntimeError(f"Non-finite loss or gradient in epoch {epoch + 1}, batch "
-                                   f"{batch_idx + 1}: loss {loss.item()}, gradient norms "
-                                   f"{policy_grad_norm}, {value_grad_norm}")
+                                   f"{batch_idx + 1}: {batch_values}")
 
             optimizer.step()
-            
-            # Accumulate losses and gradients
-            batch_policy_loss = policy_loss.item()
-            batch_value_loss = value_loss.item()
-            batch_total_loss = loss.item()
-            
-            total_policy_loss += batch_policy_loss
-            total_value_loss += batch_value_loss
-            total_loss += batch_total_loss
-            total_policy_grad += policy_grad_norm
-            total_value_grad += value_grad_norm
-            # Note: L2 loss is computed once per epoch, not per batch
-            
-            epoch_policy_loss += batch_policy_loss
-            epoch_value_loss += batch_value_loss
-            epoch_total_loss += batch_total_loss
-            epoch_policy_grad += policy_grad_norm
-            epoch_value_grad += value_grad_norm
-            # Note: epoch_l2_loss is computed once at end of epoch, not accumulated per batch
-            
+            for key, value in batch_values.items():
+                epoch_sums[key] += value
             num_batches += 1
-        
-        # Compute L2 loss once at the end of the epoch (current network state)
-        epoch_l2_loss = 0.0
-        for param in network.parameters():
-            if param.requires_grad:
-                epoch_l2_loss += torch.sum(param ** 2).item()
-        epoch_l2_loss = 0.5 * config.weight_decay * epoch_l2_loss
-        final_l2_loss = epoch_l2_loss  # Store for return value
-        
+        for key in totals:
+            totals[key] += epoch_sums[key]
+
+        # The L2 penalty of the weights after this epoch, for reporting (AdamW applies the decay)
+        l2_loss = 0.5 * config.weight_decay * sum(
+            torch.sum(param ** 2).item() for param in network.parameters() if param.requires_grad)
+
         # Validation pass for this epoch - evaluate on validation set without gradients
         network_compiled.eval()
-        val_policy_loss = 0.0
-        val_value_loss = 0.0
-
+        val_sums = dict.fromkeys(loss_names, 0.0)
         with torch.no_grad():
             # Process the validation samples in batches (the last one may be smaller)
             for start in range(0, len(val_indices), config.batch_size):
-                end = start + config.batch_size
-                states, policies, values, winners = get_batch(val_indices[start:end],
-                                                              val_symmetries[start:end])
-
-                # Forward pass
-                pred_policies, pred_values = network_compiled(states)
-                
-                # Compute per-sample losses
-                policy_loss_per_sample = -torch.sum(policies * 
-                                          torch.log_softmax(pred_policies, dim=1), dim=1)
-                value_loss_per_sample = (pred_values.squeeze(1) - values.squeeze(1)) ** 2
-                
-                # Apply boost factors (same as training)
-                if attacker_boost != 1.0 or defender_boost != 1.0:
-                    boost_weights = torch.where(winners == 0, attacker_boost,
-                                                torch.where(winners == 1, defender_boost, 1.0))
-                    mean_weight = torch.mean(boost_weights)
-                    normalized_weights = boost_weights / mean_weight
-                    policy_loss_per_sample = policy_loss_per_sample * normalized_weights
-                    value_loss_per_sample = value_loss_per_sample * normalized_weights
-
+                batch = slice(start, start + config.batch_size)
+                batch_indices = val_indices[batch]
+                losses = batch_losses(get_batch(batch_indices, val_symmetries[batch]))
                 # Sum the batch means weighted by batch size, for the mean over all validation
                 # samples
-                val_policy_loss += torch.mean(policy_loss_per_sample).item() * len(states)
-                val_value_loss += torch.mean(value_loss_per_sample).item() * len(states)
-
-        # Average validation losses (NaN if the buffer is too small for a validation set)
-        num_val = len(val_indices)
-        val_policy_loss = val_policy_loss / num_val if num_val > 0 else float('nan')
-        val_value_loss = val_value_loss / num_val if num_val > 0 else float('nan')
-        
-        # Compute L2 loss for validation (same as training, just for reporting)
-        l2_loss = 0.0
-        for param in network.parameters():
-            if param.requires_grad:
-                l2_loss += torch.sum(param ** 2).item()
-        val_l2_loss = 0.5 * config.weight_decay * l2_loss
-        val_total_loss = val_policy_loss + config.value_loss_weight * val_value_loss
-        
-        # Back to training mode for next epoch
+                for name in loss_names:
+                    val_sums[name] += losses[name].item() * len(batch_indices)
         network_compiled.train()
-        
+
+        # Mean validation losses (NaN if the buffer is too small for a validation set)
+        val = {name: val_sums[name] / len(val_indices) if len(val_indices) > 0 else float('nan')
+               for name in loss_names}
+
         # Print per-epoch losses in columnar format
-        avg_epoch_policy = epoch_policy_loss / batches_per_epoch
-        avg_epoch_value = epoch_value_loss / batches_per_epoch
-        avg_epoch_total = epoch_total_loss / batches_per_epoch
-        avg_epoch_policy_grad = epoch_policy_grad / batches_per_epoch
-        avg_epoch_value_grad = epoch_value_grad / batches_per_epoch
-        # epoch_l2_loss is already the final value (computed once), no need to average
-        
-        print(f"  {epoch+1:>5} | {avg_epoch_policy:>8.4f} {avg_epoch_value:>8.4f} {epoch_l2_loss:>10.6f} {avg_epoch_total:>8.4f} | "
-              f"{avg_epoch_policy_grad:>8.4f} {avg_epoch_value_grad:>8.4f} | "
-              f"{val_policy_loss:>8.4f} {val_value_loss:>8.4f} {val_l2_loss:>10.6f} {val_total_loss:>8.4f}")
-    
-    print("  " + "-" * 110)
-    
-    # Compute average validation losses across all epochs for return value
-    # Use the last epoch's validation losses as the final validation metrics
-    return {
-        'policy_loss': total_policy_loss / num_batches,
-        'value_loss': total_value_loss / num_batches,
-        'total_loss': total_loss / num_batches,
-        'policy_grad': total_policy_grad / num_batches,
-        'value_grad': total_value_grad / num_batches,
-        'l2_loss': final_l2_loss,  # L2 loss from the last epoch (network state after training)
-        'val_policy_loss': val_policy_loss,
-        'val_value_loss': val_value_loss,
-        'val_l2_loss': val_l2_loss,
-        'val_total_loss': val_total_loss
-    }
+        means = {key: value / batches_per_epoch for key, value in epoch_sums.items()}
+        train_row = [means[name] for name in loss_names[:4]] + [l2_loss, means['total']]
+        val_row = [val[name] for name in loss_names[:4]] + [l2_loss, val['total']]
+        print(f"  {epoch + 1:>5} | " + " ".join(f"{x:>9.4f}" for x in train_row)
+              + f" | {means['policy_grad']:>8.4f} {means['value_grad']:>8.4f} | "
+              + " ".join(f"{x:>9.4f}" for x in val_row))
+
+    print("  " + "-" * 149)
+
+    # Training losses and gradients averaged over all batches; validation losses of the last epoch
+    result = {f'{name}_loss': totals[name] / num_batches for name in loss_names}
+    result.update(policy_grad=totals['policy_grad'] / num_batches,
+                  value_grad=totals['value_grad'] / num_batches,
+                  l2_loss=l2_loss, val_l2_loss=l2_loss)
+    result.update({f'val_{name}_loss': val[name] for name in loss_names})
+    return result
 
 
 # =============================================================================
@@ -1345,7 +1304,7 @@ def _evaluate_vs_random_worker(network_path, network_config, rules,
         search_discount: MCTS backup discount per move (same as self-play)
 
     Returns:
-        1.0 if NN wins, 0.5 if draw, 0.0 if NN loses
+        the game_record of the game, with network_side the side the network played
     """
     # Fresh seeds from the operating system for every game (see _play_self_play_game_worker)
     np.random.seed()
@@ -1392,22 +1351,14 @@ def _evaluate_vs_random_worker(network_path, network_config, rules,
     random_agent = RandomAgent()
 
     # Play game
-    if nn_plays_attacker:
-        winner = play_game(nn_agent, random_agent, rules, display=False, max_moves=max_moves)
-        if winner == 0:
-            return 1.0  # NN wins
-        elif winner is None:
-            return 0.5  # Draw
-        else:
-            return 0.0  # NN loses
-    else:
-        winner = play_game(random_agent, nn_agent, rules, display=False, max_moves=max_moves)
-        if winner == 1:
-            return 1.0  # NN wins
-        elif winner is None:
-            return 0.5  # Draw
-        else:
-            return 0.0  # NN loses
+    agents = (nn_agent, random_agent) if nn_plays_attacker else (random_agent, nn_agent)
+    game = play_game(*agents, rules, display=False, max_moves=max_moves)
+    return game_record(game, 'vs_random', 'attackers' if nn_plays_attacker else 'defenders')
+
+
+def game_score(record: dict) -> float:
+    """The score of the evaluated network in an evaluation game record: 1 win, 0.5 draw, 0 loss."""
+    return 0.5 if record['winner'] is None else float(record['winner'] == record['network_side'])
 
 
 def calculate_elo_difference(win_rate: float) -> float:
@@ -1448,9 +1399,10 @@ def evaluate_vs_random(network: nn.Module, config: TrainingConfig,
         temp_network_path: Path to temporary network file (avoids pickling large tensors)
     
     Returns:
-        dict with 'total_wins', 'total_draws', 'total_losses', 'total_games', 
+        dict with 'total_wins', 'total_draws', 'total_losses', 'total_games',
         'win_rate' (score rate where draws = 0.5), 'elo_diff',
-        'attacker_wins', 'attacker_draws', 'defender_wins', 'defender_draws'
+        'attacker_wins', 'attacker_draws', 'defender_wins', 'defender_draws', and 'games' (the
+        game records)
     """
     print(f"\nEvaluating vs Random player ({num_games * 2} games using {config.num_workers} workers)...")
     
@@ -1527,29 +1479,35 @@ def evaluate_vs_random(network: nn.Module, config: TrainingConfig,
             except Exception:
                 pass
     
-    # Process results
-    # Results are now floats: 1.0 = win, 0.5 = draw, 0.0 = loss
-    attacker_wins = sum(1 for r in attacker_results if r == 1.0)
-    attacker_draws = sum(1 for r in attacker_results if r == 0.5)
-    defender_wins = sum(1 for r in defender_results if r == 1.0)
-    defender_draws = sum(1 for r in defender_results if r == 0.5)
-    
+    # Process results: the network's score per game, 1.0 = win, 0.5 = draw, 0.0 = loss
+    games = attacker_results + defender_results
+    attacker_scores = [game_score(record) for record in attacker_results]
+    defender_scores = [game_score(record) for record in defender_results]
+    attacker_wins = attacker_scores.count(1.0)
+    attacker_draws = attacker_scores.count(0.5)
+    defender_wins = defender_scores.count(1.0)
+    defender_draws = defender_scores.count(0.5)
+
     total_wins = attacker_wins + defender_wins
     total_draws = attacker_draws + defender_draws
     total_games = num_games * 2
     total_losses = total_games - total_wins - total_draws
-    
+
     # Calculate score (wins + 0.5 * draws) for ELO and win rate
-    total_score = sum(attacker_results) + sum(defender_results)
+    total_score = sum(attacker_scores) + sum(defender_scores)
     score_rate = total_score / total_games
     elo_diff = calculate_elo_difference(score_rate)
-    
+
     print(f"  As Attacker: {attacker_wins}/{num_games} wins, {attacker_draws} draws")
     print(f"  As Defender: {defender_wins}/{num_games} wins, {defender_draws} draws")
     print(f"  Total: {total_wins}W-{total_losses}L-{total_draws}D ({100*score_rate:.1f}% score)")
     print(f"  ELO vs Random: {elo_diff:+.0f}")
-    
+    print("  How the games ended:")
+    print_endings({'network as attackers': attacker_results,
+                   'network as defenders': defender_results}, config.rules)
+
     return {
+        'games': games,
         'total_wins': total_wins,
         'total_draws': total_draws,
         'total_losses': total_losses,
@@ -1591,7 +1549,7 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
         search_discount: MCTS backup discount per move (same as self-play)
 
     Returns:
-        1.0 if new network wins, 0.5 if draw, 0.0 if new network loses
+        the game_record of the game, with network_side the side the new network played
     """
     # Fresh seeds from the operating system for every game (see _play_self_play_game_worker)
     np.random.seed()
@@ -1662,32 +1620,16 @@ def _evaluate_networks_worker(new_network_path, old_network_path,
                       search_discount=search_discount)
 
     # Play game
-    if new_plays_attacker:
-        winner = play_game(new_agent, old_agent, rules, display=False,
-                          temperature=temperature, temperature_mode=temperature_mode,
-                          temperature_threshold=temperature_threshold,
-                          temperature_decay_moves=temperature_decay_moves, max_moves=max_moves)
-        if winner == 0:
-            return 1.0  # New network wins
-        elif winner is None:
-            return 0.5  # Draw
-        else:
-            return 0.0  # New network loses
-    else:
-        winner = play_game(old_agent, new_agent, rules, display=False,
-                          temperature=temperature, temperature_mode=temperature_mode,
-                          temperature_threshold=temperature_threshold,
-                          temperature_decay_moves=temperature_decay_moves, max_moves=max_moves)
-        if winner == 1:
-            return 1.0  # New network wins
-        elif winner is None:
-            return 0.5  # Draw
-        else:
-            return 0.0  # New network loses
+    agents = (new_agent, old_agent) if new_plays_attacker else (old_agent, new_agent)
+    game = play_game(*agents, rules, display=False, temperature=temperature,
+                     temperature_mode=temperature_mode, temperature_threshold=temperature_threshold,
+                     temperature_decay_moves=temperature_decay_moves, max_moves=max_moves)
+    return game_record(game, 'vs_best', 'attackers' if new_plays_attacker else 'defenders')
 
 
 def evaluate_networks(new_network: nn.Module, old_network: nn.Module,
-                     config: TrainingConfig, pool=None, temp_new_path=None, temp_old_path=None) -> float:
+                     config: TrainingConfig, pool=None, temp_new_path=None,
+                     temp_old_path=None) -> Tuple[float, List[dict]]:
     """
     Evaluate new network against old network.
     Uses multiprocessing to parallelize evaluation games.
@@ -1702,6 +1644,7 @@ def evaluate_networks(new_network: nn.Module, old_network: nn.Module,
     
     Returns:
         score_rate: score as fraction (wins + 0.5 * draws) / total_games
+        games: the game records
     """
     print(f"\nEvaluating new network vs old network ({config.eval_games} games using {config.num_workers} workers)...")
     
@@ -1825,30 +1768,35 @@ def evaluate_networks(new_network: nn.Module, old_network: nn.Module,
             except Exception:
                 pass
     
-    # Process results - split by attacker/defender
-    # Results are now floats: 1.0 = win, 0.5 = draw, 0.0 = loss
+    # Process results - split by attacker/defender. Scores: 1.0 = win, 0.5 = draw, 0.0 = loss
     attacker_results = results[:half_games + remainder]
     defender_results = results[half_games + remainder:]
-    
+    attacker_scores = [game_score(record) for record in attacker_results]
+    defender_scores = [game_score(record) for record in defender_results]
+    scores = attacker_scores + defender_scores
+
     # Count wins and draws separately
-    attacker_wins = sum(1 for r in attacker_results if r == 1.0)
-    attacker_draws = sum(1 for r in attacker_results if r == 0.5)
-    defender_wins = sum(1 for r in defender_results if r == 1.0)
-    defender_draws = sum(1 for r in defender_results if r == 0.5)
-    
+    attacker_wins = attacker_scores.count(1.0)
+    attacker_draws = attacker_scores.count(0.5)
+    defender_wins = defender_scores.count(1.0)
+    defender_draws = defender_scores.count(0.5)
+
     total_wins = attacker_wins + defender_wins
     total_draws = attacker_draws + defender_draws
     total_losses = config.eval_games - total_wins - total_draws
-    
+
     # Calculate score (wins + 0.5 * draws) for ELO
-    total_score = sum(results)
+    total_score = sum(scores)
     score_rate = total_score / config.eval_games
-    
+
     print(f"  As Attacker: {attacker_wins}/{half_games + remainder} wins, {attacker_draws} draws")
     print(f"  As Defender: {defender_wins}/{half_games} wins, {defender_draws} draws")
     print(f"New network results: {total_wins}W-{total_losses}L-{total_draws}D ({100*score_rate:.1f}% score)")
-    
-    return score_rate
+    print("  How the games ended:")
+    print_endings({'new as attackers': attacker_results, 'new as defenders': defender_results},
+                  config.rules)
+
+    return score_rate, results
 
 
 # =============================================================================
@@ -1997,6 +1945,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
           f"{', '.join(config.network.features.plane_names())}")
     print(f"Policy output: {config.policy_size} moves ({config.num_squares} squares × 4 directions × {config.board_size - 1} distances)")
     print("Value output: single scalar (win probability)")
+    print(f"Extra outputs: how the game ends ({', '.join(config.rules.endings())}; loss weight "
+          f"{config.ending_loss_weight}), plies left (loss weight {config.moves_left_loss_weight})")
     
     # MCTS parameters
     print("\n--- MCTS Parameters ---")
@@ -2418,7 +2368,13 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             selfplay = generate_self_play_data(agent, config, pool=worker_pool,
                                                attacker_sims=attacker_sims,
                                                defender_sims=defender_sims)
-            new_positions, attacker_game_wins, defender_game_wins, avg_game_length = selfplay
+            # iteration_games collects all game records of this iteration, evaluation games included
+            new_positions, iteration_games = selfplay
+            attacker_game_wins = sum(record['winner'] == 'attackers' for record in iteration_games)
+            defender_game_wins = sum(record['winner'] == 'defenders' for record in iteration_games)
+            avg_game_length = float(np.mean([record['plies'] for record in iteration_games]))
+            selfplay_endings = {ending: sum(game['ending'] == ending for game in iteration_games)
+                                for ending in config.rules.endings()}
             selfplay_time = time.time() - selfplay_start
 
             # generate_self_play_data terminated the pool (so its workers hold no memory during training).
@@ -2478,27 +2434,23 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 
                 print(f"Training time: {training_time:.1f}s")
                 print(f"\nFinal Summary (averaged over all epochs):")
-                print(f"  Training   - Policy: {losses['policy_loss']:.4f}, Value: {losses['value_loss']:.4f}, "
-                      f"L2: {losses['l2_loss']:.6f}, Total: {losses['total_loss']:.4f}")
+                for prefix, name in (('', 'Training  '), ('val_', 'Validation')):
+                    print(f"  {name} - Policy: {losses[prefix + 'policy_loss']:.4f}, "
+                          f"Value: {losses[prefix + 'value_loss']:.4f}, "
+                          f"Ending: {losses[prefix + 'ending_loss']:.4f}, "
+                          f"Moves left: {losses[prefix + 'moves_left_loss']:.4f}, "
+                          f"L2: {losses[prefix + 'l2_loss']:.6f}, "
+                          f"Total: {losses[prefix + 'total_loss']:.4f}")
                 print(f"  Gradients  - Policy: {losses['policy_grad']:.4f}, Value: {losses['value_grad']:.4f}")
-                print(f"  Validation - Policy: {losses['val_policy_loss']:.4f}, Value: {losses['val_value_loss']:.4f}, "
-                      f"L2: {losses['val_l2_loss']:.6f}, Total: {losses['val_total_loss']:.4f}")
-                
+
                 # Get current learning rate
                 current_lr = optimizer.param_groups[0]['lr']
-                
-                # Record metrics - only add iteration once during training step
+
+                # Record metrics (all losses under their own names) - only add iteration once
+                # during training step
                 training_history['iterations'].append(iteration + 1)
-                training_history['policy_loss'].append(losses['policy_loss'])
-                training_history['value_loss'].append(losses['value_loss'])
-                training_history['l2_loss'].append(losses['l2_loss'])
-                training_history['total_loss'].append(losses['total_loss'])
-                training_history['policy_grad'].append(losses['policy_grad'])
-                training_history['value_grad'].append(losses['value_grad'])
-                training_history['val_policy_loss'].append(losses['val_policy_loss'])
-                training_history['val_value_loss'].append(losses['val_value_loss'])
-                training_history['val_l2_loss'].append(losses['val_l2_loss'])
-                training_history['val_total_loss'].append(losses['val_total_loss'])
+                for key, value in losses.items():
+                    training_history.setdefault(key, []).append(value)
                 training_history['buffer_size'].append(len(replay_buffer))
                 training_history['learning_rate'].append(current_lr)
                 
@@ -2514,6 +2466,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 training_history['selfplay_results']['defender_wins'].append(defender_game_wins)
                 training_history['selfplay_results']['draws'].append(draws)
                 training_history['selfplay_results']['avg_game_length'].append(avg_game_length)
+                selfplay_results = training_history['selfplay_results']
+                selfplay_results.setdefault('endings', []).append(selfplay_endings)
                 
                 # Record timing for this iteration
                 if 'timing' not in training_history:
@@ -2549,6 +2503,7 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                                                 num_games=config.eval_vs_random_games,
                                                 pool=worker_pool)
                 eval_random_time = time.time() - eval_random_start
+                iteration_games += random_eval['games']
                 print(f"Random evaluation time: {eval_random_time:.1f}s")
                 training_history['vs_random_win_rate'].append(random_eval['win_rate'])
                 training_history['vs_random_elo'].append(random_eval['elo_diff'])
@@ -2576,7 +2531,9 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             if (iteration + 1) % config.eval_frequency == 0:
                 print("\n[4/4] Evaluating new vs old network...")
                 eval_network_start = time.time()
-                score_rate = evaluate_networks(network, best_network, config, pool=worker_pool)
+                score_rate, eval_games = evaluate_networks(network, best_network, config,
+                                                           pool=worker_pool)
+                iteration_games += eval_games
                 eval_network_time = time.time() - eval_network_start
                 print(f"Network evaluation time: {eval_network_time:.1f}s")
                 training_history['win_rates'].append(score_rate)
@@ -2630,7 +2587,14 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             with open(history_path + '.tmp', 'w') as f:
                 json.dump(training_history, f, indent=2)
             os.replace(history_path + '.tmp', history_path)
-            
+
+            # 7. Append this iteration's games (self-play and evaluation) to games.jsonl, one JSON
+            # object per line (see game_record). A resumed run appends the repeated iterations
+            # again.
+            with open(os.path.join(config.checkpoint_dir, "games.jsonl"), 'a') as f:
+                for record in iteration_games:
+                    f.write(json.dumps({'iteration': iteration + 1, **record}) + '\n')
+
             # Print timing summary
             print("\n" + "-" * 70)
             print("Timing Summary:")

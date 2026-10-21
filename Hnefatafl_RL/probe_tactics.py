@@ -18,10 +18,11 @@ Printed per kind:
     top1     how often the policy's first choice wins
     rank     the median rank of the best winning move in the policy (1 = first choice)
     value    the mean value of the position for the side to move (+1 = sure win)
+    ending   the mean probability the network's ending output gives to this kind of win
     search   with --sims: how often a search with that many simulations plays a winning move
 
 Usage:
-    python probe_tactics.py checkpoints/copenhagen/*/checkpoint_iter_30.pth --positions 200 --sims 100
+    python probe_tactics.py checkpoints/copenhagen/*/checkpoint_iter_30.pth --sims 100
 """
 
 import argparse
@@ -33,11 +34,14 @@ import torch
 
 from agent import Agent
 from features import build_features, special_squares
-from tafl import (ATTACKER, ATTACKER_PLAYER, DEFENDER, DEFENDER_PLAYER, DIRECTIONS, EMPTY, KING,
-                  Tafl, get_rules, move_index)
+from tafl import (ATTACKER, ATTACKER_PLAYER, DEFENDER, DEFENDER_PLAYER, DIRECTIONS, EMPTY, ENDINGS,
+                  KING, Tafl, get_rules, move_index)
 from tafl_network import load_network
 
 KINDS = ("escape", "capture", "capture_throne", "encircle", "fort")
+# The game ending (tafl.ENDINGS) that each kind of win gives
+KIND_ENDINGS = {"escape": "king_escaped", "capture": "king_captured",
+                "capture_throne": "king_captured", "encircle": "encircled", "fort": "exit_fort"}
 
 
 def scatter(board: np.ndarray, piece: int, count: int, allowed: np.ndarray, rng):
@@ -110,7 +114,8 @@ def random_position(kind: str, rules, rng) -> Optional[Tafl]:
         inside[0, kc] = True
         rows = np.arange(n)[:, None] * np.ones(n, dtype=int)
         for _ in range(rng.integers(1, 4)):
-            frontier = np.argwhere(scipy.ndimage.binary_dilation(inside) & ~inside & (rows < 2) & free)
+            frontier = scipy.ndimage.binary_dilation(inside) & ~inside & (rows < 2) & free
+            frontier = np.argwhere(frontier)
             inside[tuple(frontier[rng.integers(len(frontier))])] = True
         wall = scipy.ndimage.binary_dilation(inside) & ~inside
         if (wall & ~free).any():
@@ -149,7 +154,8 @@ def win_kind(game: Tafl, move: Tuple[int, int, int, int]) -> Optional[str]:
         return "fort" if after.rules.exit_fort and after._king_in_exit_fort() else "other"
     if not (after.board == KING).any():
         kr, kc = np.argwhere(game.board == KING)[0]
-        beside_throne = game.rules.throne and abs(kr - game.size // 2) + abs(kc - game.size // 2) == 1
+        m = game.size // 2
+        beside_throne = game.rules.throne and abs(kr - m) + abs(kc - m) == 1
         return "capture_throne" if beside_throne else "capture"
     return "encircle" if after._defenders_encircled() else "other"
 
@@ -171,18 +177,27 @@ def make_probes(kind: str, rules, count: int, rng, max_tries: int = 100_000):
     return probes
 
 
-def probe_network(path: str, probes: List[Tuple[Tafl, Set]], sims: int) -> dict:
-    """The policy share and rank of the winning moves, the value, and (if sims > 0) whether the
-    search plays a winning move, for every probe position."""
+def probe_network(path: str, probes: List[Tuple[Tafl, Set]], endings: List[str], sims: int) -> dict:
+    """The policy share and rank of the winning moves, the value, the probability of the probe's
+    ending (endings: one name of tafl.ENDINGS per probe), and (if sims > 0) whether the search plays
+    a winning move, for every probe position."""
     network, checkpoint = load_network(path)
     states = np.stack([build_features(game, network.feature_spec) for game, _ in probes])
     with torch.inference_mode():
-        logits, values = network(torch.from_numpy(states))
+        logits, values, ending_logits = network(torch.from_numpy(states))[:3]
+    # Softmax of the ending output over the endings the rules allow
+    allowed = np.array([ending in probes[0][0].rules.endings() for ending in ENDINGS])
+    ending_logits = np.where(allowed, ending_logits.numpy(), -np.inf)
+    ending_probs = np.exp(ending_logits - ending_logits.max(axis=1, keepdims=True))
+    ending_probs /= ending_probs.sum(axis=1, keepdims=True)
     config = checkpoint['config']
     agent = Agent(network, num_simulations=sims, c_puct=config['c_puct'],
                   fpu_reduction=config['fpu_reduction'], search_discount=config['search_discount'])
-    results = {key: [] for key in ("legal", "uniform", "p_win", "top1", "rank", "value", "search")}
-    for (game, winning), position_logits, value in zip(probes, logits.numpy(), values.numpy()[:, 0]):
+    results = {key: [] for key in
+               ("legal", "uniform", "p_win", "top1", "rank", "value", "ending", "search")}
+    logits, values = logits.numpy(), values.numpy()[:, 0]
+    for i, (game, winning) in enumerate(probes):
+        position_logits, value = logits[i], values[i]
         moves = game.get_legal_moves()
         legal_logits = position_logits[[move_index(move, game.size) for move in moves]]
         probs = np.exp(legal_logits - legal_logits.max())
@@ -194,15 +209,18 @@ def probe_network(path: str, probes: List[Tuple[Tafl, Set]], sims: int) -> dict:
         results["top1"].append(wins[np.argmax(probs)])
         results["rank"].append(1 + np.flatnonzero(wins[np.argsort(-probs)])[0])
         results["value"].append(value)
-        results["search"].append(agent.select_move(game, temperature=0.0) in winning if sims else np.nan)
+        results["ending"].append(ending_probs[i, ENDINGS.index(endings[i])])
+        results["search"].append(agent.select_move(game, 0.0) in winning if sims else np.nan)
     return {key: np.array(values) for key, values in results.items()}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("checkpoints", nargs="+", help="training checkpoints (.pth) of one rule set")
+    parser.add_argument("checkpoints", nargs="+",
+                        help="training checkpoints (.pth) of one rule set")
     parser.add_argument("--positions", type=int, default=200, help="positions per kind of win")
-    parser.add_argument("--sims", type=int, default=0, help="also run a search with this many simulations")
+    parser.add_argument("--sims", type=int, default=0,
+                        help="also run a search with this many simulations")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--show", action="store_true", help="print one position of each kind")
     args = parser.parse_args()
@@ -220,21 +238,24 @@ def main():
             print(f"\n{kind}: winning moves {sorted(winning)}\n{game}")
 
     all_probes = [probe for kind in kinds for probe in probes[kind]]
+    all_endings = [KIND_ENDINGS[kind] for kind in kinds for _ in probes[kind]]
     for path in args.checkpoints:
-        if get_rules(torch.load(path, map_location="cpu", weights_only=False)['config']['rules']) != rules:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        if get_rules(checkpoint['config']['rules']) != rules:
             raise ValueError(f"{path} was trained under other rules than {args.checkpoints[0]}")
-        results = probe_network(path, all_probes, args.sims)
+        results = probe_network(path, all_probes, all_endings, args.sims)
         print(f"\n{path}")
         print(f"  {'kind':<15} {'legal':>5} {'uniform':>7} {'p_win':>6} {'top1':>5} {'rank':>5} "
-              f"{'value':>6} {'search':>6}")
+              f"{'value':>6} {'ending':>6} {'search':>6}")
         start = 0
         for kind in kinds:
             part = {key: values[start:start + len(probes[kind])] for key, values in results.items()}
             start += len(probes[kind])
             search = f"{np.mean(part['search']):6.0%}" if args.sims else "     -"
             print(f"  {kind:<15} {part['legal'].mean():5.0f} {part['uniform'].mean():7.3f} "
-                  f"{part['p_win'].mean():6.3f} {part['top1'].mean():5.0%} {np.median(part['rank']):5.0f} "
-                  f"{part['value'].mean():+6.2f} {search}")
+                  f"{part['p_win'].mean():6.3f} {part['top1'].mean():5.0%} "
+                  f"{np.median(part['rank']):5.0f} "
+                  f"{part['value'].mean():+6.2f} {part['ending'].mean():6.3f} {search}")
 
 
 if __name__ == "__main__":

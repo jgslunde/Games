@@ -14,10 +14,11 @@ import torch
 
 from dataclasses import replace
 
+from convert_to_onnx import OUTPUT_NAMES, export_to_onnx
 from features import FeatureSpec, build_features, constant_planes, defender_region_plane, reach_planes
 from network_config import NetworkConfig
 from run_config import TrainingConfig, apply_overrides, from_dict, load_config
-from tafl import ATTACKER, DEFENDER, KING, RULESETS, Tafl, move_index, policy_size
+from tafl import ATTACKER, DEFENDER, ENDINGS, KING, RULESETS, Tafl, move_index, policy_size
 from tafl_network import (BilinearPolicyHead, ConvPolicyHead, TaflNet, count_parameters, load_network,
                           load_weights, move_index_tables)
 
@@ -193,29 +194,30 @@ def test_architectures_forward_and_onnx():
             planes = config.features.num_planes
             x = (torch.rand(4, planes, n, n) < 0.2).float()
             network.train()
-            policy, value = network(x)
+            policy, value, ending, moves_left = network(x)
             assert policy.shape == (4, policy_size(n)) and value.shape == (4, 1)
-            (policy.logsumexp(1).mean() + value.mean()).backward()
+            assert ending.shape == (4, len(ENDINGS)) and moves_left.shape == (4, 1)
+            assert (moves_left >= 0).all()
+            (policy.logsumexp(1).mean() + value.mean() + ending.logsumexp(1).mean()
+             + moves_left.mean()).backward()
             network.eval()
             with torch.no_grad():
-                policy1, value1 = network(x[:1])
+                policy1, value1 = network(x[:1])[:2]
             assert policy1.shape == (1, policy_size(n)) and -1 <= value1.item() <= 1
             assert count_parameters(network) > 0
             if config.tie_blocks:
                 assert len(network.blocks) == 1 and len(network.block_order) == 3
             with tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, "net.onnx")
-                torch.onnx.export(network, x[:1], path, opset_version=12, input_names=["board_state"],
-                                  output_names=["policy_logits", "value"],
-                                  dynamic_axes={"board_state": {0: "b"}, "policy_logits": {0: "b"}, "value": {0: "b"}},
-                                  dynamo=False)
+                export_to_onnx(network, path, n, planes)
                 if ort is not None:
                     session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-                    onnx_policy, onnx_value = session.run(None, {"board_state": x[:2].numpy()})
+                    onnx_outputs = session.run(OUTPUT_NAMES, {"board_state": x[:2].numpy()})
                     with torch.no_grad():
-                        torch_policy, torch_value = network(x[:2])
-                    assert np.allclose(onnx_policy, torch_policy.numpy(), atol=1e-4), "ONNX policy differs"
-                    assert np.allclose(onnx_value, torch_value.numpy(), atol=1e-4), "ONNX value differs"
+                        torch_outputs = network(x[:2])
+                    for name, onnx_out, torch_out in zip(OUTPUT_NAMES, onnx_outputs, torch_outputs):
+                        assert np.allclose(onnx_out, torch_out.numpy(), atol=1e-4, rtol=1e-4), \
+                            f"ONNX output {name} differs"
     print("  all block kinds, heads and features: forward, backward, batch-1 eval, ONNX export match")
     return True
 
@@ -336,6 +338,18 @@ def test_training_end_to_end():
             with open(os.path.join(tmp, "run_config.json")) as f:
                 assert json.load(f) == config.to_dict()
             assert len(history["iterations"]) == 2 and np.isfinite(history["policy_loss"][-1])
+            assert np.isfinite(history["ending_loss"][-1])
+            assert np.isfinite(history["moves_left_loss"][-1])
+            assert sum(history["selfplay_results"]["endings"][-1].values()) == 2
+            # games.jsonl: every self-play and evaluation game of both iterations, with its ending
+            # and final board
+            with open(os.path.join(tmp, "games.jsonl")) as f:
+                games = [json.loads(line) for line in f]
+            types = [g["type"] for g in games]
+            assert types.count("selfplay") == 4 and {"vs_random", "vs_best"} <= set(types)
+            assert all(g["ending"] in ENDINGS and len(g["board"]) == 7 for g in games)
+            assert all(g["network_side"] in ("attackers", "defenders")
+                       for g in games if g["type"] != "selfplay")
             path = os.path.join(tmp, "checkpoint_iter_2.pth")
             loaded, checkpoint = load_network(path)
             assert checkpoint["network_config"] == config.network.to_dict()
