@@ -2267,6 +2267,20 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         training_history.setdefault('vs_random_iterations', [
             eval_params['eval_vs_random_frequency'] * (k + 1)
             for k in range(len(training_history['vs_random_win_rate']))])
+
+        # Older histories do not record the simulation counts each iteration used, only
+        # 'sim_counts': the counts set after each iteration (the last one after the resumed
+        # iteration), which the next iteration used. Iteration 1 used the start settings. Iterations
+        # whose counts are unknown get None.
+        if 'simulations' not in training_history['selfplay_results']:
+            mcts_params = training_history['metadata']['mcts_params']
+            counts_after = {0: [mcts_params['selfplay_simulations_attacker'],
+                                mcts_params['selfplay_simulations_defender']]}
+            sim_counts = training_history.get('sim_counts', [])
+            for k, counts in enumerate(sim_counts):
+                counts_after[start_iteration - len(sim_counts) + 1 + k] = counts
+            training_history['selfplay_results']['simulations'] = [
+                counts_after.get(iteration - 1) for iteration in training_history['iterations']]
     else:
         # Initialize new training history with metadata
         training_history = {

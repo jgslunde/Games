@@ -85,11 +85,19 @@ def parse_output_file(filepath: str) -> dict:
     by_iteration = {}  # iteration number -> {history key: value} from its output
     values = None      # the dict of the iteration being read
     section = None     # '[1/4]' self-play, '[2/4]' training, '[3/4]' vs random, '[4/4]' new vs best
+    fixed_simulations = None  # [attacker, defender] simulations of a run without balancing
     for i, line in enumerate(lines):
         match = re.match(r'Iteration (\d+)/\d+', line)
         if match:
-            values = by_iteration[int(match.group(1))] = {}  # an iteration run again starts over
+            # An iteration run again starts over
+            values = by_iteration[int(match.group(1))] = {'simulations': fixed_simulations}
             continue
+        # Printed once at the start of a run (and of each restart)
+        match = re.search(r'Using fixed simulation counts \(attacker=(\d+), defender=(\d+)\)', line)
+        if match:
+            fixed_simulations = [int(match.group(1)), int(match.group(2))]
+        if re.search(r'Using dynamic simulation balancing', line):
+            fixed_simulations = None
         if re.match(r'\[\d/4\]', line):
             section = line[:5]
             continue
@@ -102,6 +110,11 @@ def parse_output_file(filepath: str) -> dict:
             match = re.search(pattern, line)
             if match:
                 values[key] = convert(match.group(1))
+
+        # MCTS simulations per move of each side in this iteration's self-play (with balancing)
+        match = re.search(r'Using dynamic simulation counts: Attacker (\d+), Defender (\d+)', line)
+        if match:
+            values['simulations'] = [int(match.group(1)), int(match.group(2))]
 
         # Self-play results (game counts)
         match = re.match(r'Results: (\d+) attacker wins.*?, (\d+) defender wins.*?, (\d+) draws', line)
@@ -172,7 +185,7 @@ def parse_output_file(filepath: str) -> dict:
                   'vs_random_iterations', 'vs_random_win_rate', 'vs_random_elo', 'vs_random_results']}
     history['selfplay_results'] = {key: [] for key in ['attacker_wins', 'defender_wins', 'draws',
                                                        'avg_game_length', 'endings', 'positions',
-                                                       'unique_states']}
+                                                       'simulations', 'unique_states']}
     history['timing'] = {'total_time': []}
     for iteration in sorted(by_iteration):
         values = by_iteration[iteration]
@@ -243,7 +256,14 @@ def plot_win_rates(history: dict, output_dir: str):
     total = sum(counts.values())
     for (name, count), marker in zip(counts.items(), ['o-', 's-', '^-']):
         ax.plot(history['iterations'], 100 * count / total, marker, label=name, linewidth=2, markersize=4)
-    ax.set_title('Self-Play Win Rates', fontsize=13, fontweight='bold')
+    # The attackers' share of the MCTS simulations per move of both sides: the win rates depend on
+    # how the search effort is divided (balanced so that the attacker score stays in a band)
+    simulations = np.array([counts if counts else [np.nan, np.nan] for counts in selfplay['simulations']],
+                           dtype=float)
+    ax.plot(history['iterations'], 100 * simulations[:, 0] / simulations.sum(axis=1), '--',
+            color='tab:blue', label='Attacker share of simulations', linewidth=1.5)
+    ax.axhline(y=50, color='gray', linestyle=':', linewidth=1)
+    ax.set_title('Self-Play Win Rates and Simulation Balance', fontsize=13, fontweight='bold')
 
     # Evaluation: the new network's wins as each side, its draws, and its score (draws count half)
     ax = axes[1]
