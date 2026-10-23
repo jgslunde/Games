@@ -28,12 +28,12 @@ def print_training_summary(history_file="checkpoints/training_history.json"):
     num_iters = len(history['iterations'])
     print(f"\nTotal iterations: {num_iters}")
     
-    # Loss progression
-    if history['policy_loss']:
+    # Loss progression (the losses are None in iterations where training was skipped)
+    if any(loss is not None for loss in history['policy_loss']):
         print("\nLoss progression:")
-        print(f"  Policy loss:  {history['policy_loss'][0]:.4f} → {history['policy_loss'][-1]:.4f}")
-        print(f"  Value loss:   {history['value_loss'][0]:.4f} → {history['value_loss'][-1]:.4f}")
-        print(f"  Total loss:   {history['total_loss'][0]:.4f} → {history['total_loss'][-1]:.4f}")
+        for name, key in [('Policy', 'policy_loss'), ('Value', 'value_loss'), ('Total', 'total_loss')]:
+            losses = [loss for loss in history[key] if loss is not None]
+            print(f"  {name + ' loss:':<13} {losses[0]:.4f} → {losses[-1]:.4f}")
     
     # Buffer size
     if history['buffer_size']:

@@ -42,7 +42,7 @@ from tafl import ATTACKER, DEFENDER, EMPTY, ENDINGS, KING, RULESETS, Tafl, move_
 from tafl_network import TaflNet, move_index_tables
 from train import (augment_sample, symmetry_permutations, ReplayBuffer, SimulationBalancer,
                    TrainingConfig, generate_self_play_data, train_network, save_checkpoint,
-                   load_checkpoint)
+                   load_checkpoint, LOSS_KEYS)
 
 # Brandubh without the throne and with a king captured by two attackers everywhere: the positions
 # of the tests below were written for these rules
@@ -415,6 +415,9 @@ def test_train_network_small_buffers():
             assert all(np.isfinite(losses[key])
                        for key in ('policy_loss', 'ending_loss', 'moves_left_loss'))
             assert np.isnan(losses['val_policy_loss']) == val_is_empty
+            # The per-epoch table: the same keys, one value per epoch
+            assert set(losses) == set(LOSS_KEYS) and list(losses['epochs']) == LOSS_KEYS[:-1]
+            assert all(len(values) == config.num_epochs for values in losses['epochs'].values())
     finally:
         torch.compile = original_compile
     print("  train_network: clear error for a too small buffer; small buffers and draws train")
@@ -433,7 +436,8 @@ def test_self_play_targets():
     try:
         for max_game_length in (6, 300):  # a draw by the move limit, then (usually) a real ending
             config.max_game_length = max_game_length
-            positions, games = generate_self_play_data(Agent(TaflNet(config.network, 7)), config)
+            positions, games, stats = generate_self_play_data(Agent(TaflNet(config.network, 7)), config)
+            assert stats['unique_states'] is None and stats['mcts_timing']['network_eval'] > 0
             (states, policies, values, winners, endings, moves_left), record = positions, games[0]
             assert np.all(endings == ENDINGS.index(record['ending']))
             # The stored positions follow each other ply by ply (random opening plies come first and

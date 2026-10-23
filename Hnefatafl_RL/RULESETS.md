@@ -70,24 +70,3 @@ a draw after `max_game_length` plies; the published rules have no such limit.
 - New: `walker_brandub`, `brandubh_2_5w`, `sea_battle_9x9`, `market_hnefatafl`,
   `historical_lewis`, `historical_bell` and `simple_tafl`.
 
-## Deprecated runs
-
-Everything trained before the rule sets is in `deprecated_checkpoints/`, and the current code
-cannot load it. None of these runs used a published rule set:
-
-| Folder | Board | Rules (verified where stated) |
-|---|---|---|
-| `checkpoints_brandubh`, `checkpoints_brandubh_new`, `checkpoints_brandubh_SE` | 7x7 | No throne, king captured by two attackers everywhere, armed king, hostile corners, corner goal, no encirclement, third repetition forbidden (verified for `littleboy_decay_fixed`, `littleboy_decay`, `fatman_nothrone` and `jack_nothrone`). Closest published set: Walker's Brandub, which has a throne. |
-| `checkpoints_tablut` | 9x9 | The same rules on the Tablut board (verified for `test_6x48`). Closest published set: Corner Tablut (38 % defender wins), which has a throne. |
-| `checkpoints_hnefatafl` | 11x11 | King captured on four sides with the edge and corners counting, hostile throne, corner goal, encirclement of the king alone (verified for `baseline` and `line_10x64_gpool`). This is "Old Hnefatafl" with a different encirclement rule. |
-| `checkpoints_old`, `checkpoints` | all | Early experiments with various rules. |
-
-The ONNX example files in git (`deprecated_checkpoints/*/.../checkpoint_iter_*.onnx`) belong to
-these runs. Their `.json` files list the old rule switches.
-
-`deprecated_checkpoints_2/copenhagen/` holds the first Copenhagen runs under the named rule sets
-(`baseline`, `line_10x64_gpool`, `line_10x64_gpool_mobility_region`, to iteration 17-30;
-`attention_8x64` crashed in its first training step). Their rules equal today's `copenhagen`, except
-that runs started before commit 460c6c1 and not resumed since used the exit fort test of 2c6f2f5
-(see above). Their networks lack the ending
-and moves-left outputs, so the current code cannot load them.

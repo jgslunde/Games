@@ -492,6 +492,23 @@ def print_endings(columns: Dict[str, List[dict]], rules):
               + "".join(f"{n:>15} ({100 * n / max(total, 1):5.1f}%)" for n, total in counts))
 
 
+def evaluation_summary(games: List[dict], rules) -> dict:
+    """The results of the evaluated network in evaluation games (game records with
+    'network_side'), for the training history: for each side it played ('attackers',
+    'defenders'), the number of games, wins and draws, and how many games ended in each way."""
+    summary = {}
+    for side in ('attackers', 'defenders'):
+        records = [record for record in games if record['network_side'] == side]
+        summary[side] = {
+            'games': len(records),
+            'wins': sum(record['winner'] == side for record in records),
+            'draws': sum(record['winner'] is None for record in records),
+            'endings': {ending: sum(record['ending'] == ending for record in records)
+                        for ending in rules.endings()},
+        }
+    return summary
+
+
 # =============================================================================
 # SELF-PLAY
 # =============================================================================
@@ -820,7 +837,7 @@ def _play_self_play_game_worker(network_path, network_config, rules,
 
 def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, temp_network_path=None,
                            attacker_sims: int = None,
-                           defender_sims: int = None) -> Tuple[Tuple, List[dict]]:
+                           defender_sims: int = None) -> Tuple[Tuple, List[dict], dict]:
     """
     Generate self-play games and their training positions.
     Uses multiprocessing to parallelize game generation.
@@ -835,10 +852,13 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         defender_sims: Override for defender simulation count (uses config value if None)
 
     Returns:
-        Tuple of (positions, games) where:
+        Tuple of (positions, games, stats) where:
         - positions: (states, policies, values, winners, endings, moves_left) arrays with one row
           per position, for ReplayBuffer.add (without symmetries; train_network applies those)
         - games: one game_record per game (plies include the random opening plies)
+        - stats: 'unique_states', the number of board states and of distinct ones, of all states
+          and without the first 1 and 6 plies of each game (None unless
+          config.track_unique_states), and 'mcts_timing', the seconds spent in each part of MCTS
     """
     # Use provided simulation counts or fall back to config
     num_sims_attacker = attacker_sims if attacker_sims is not None else config.num_mcts_sims_attacker
@@ -1007,6 +1027,7 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
     print_endings({'self-play games': games}, config.rules)
     
     # Analyze unique states if tracking is enabled
+    unique_states = None
     if config.track_unique_states:
         # Collect all state hashes from all games
         all_state_hashes = []
@@ -1030,7 +1051,12 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         unique_all = len(set(all_state_hashes))
         unique_skip_initial = len(set(all_state_hashes_skip_initial))
         unique_skip_6ply = len(set(all_state_hashes_skip_6ply))
-        
+        unique_states = {'total': total_states, 'unique': unique_all,
+                         'total_skip_initial': len(all_state_hashes_skip_initial),
+                         'unique_skip_initial': unique_skip_initial,
+                         'total_skip_6ply': len(all_state_hashes_skip_6ply),
+                         'unique_skip_6ply': unique_skip_6ply}
+
         print("\n--- Board State Diversity Analysis ---")
         if total_states > 0:
             print(f"Total states encountered: {total_states}")
@@ -1059,12 +1085,19 @@ def generate_self_play_data(agent: Agent, config: TrainingConfig, pool=None, tem
         print(f"  Terminal eval:     {mcts_timing_totals['terminal_eval']:7.1f}s ({100*mcts_timing_totals['terminal_eval']/total_mcts_time:5.1f}%)")
         print(f"  Total MCTS time:   {total_mcts_time:7.1f}s")
 
-    return positions, games
+    return positions, games, {'unique_states': unique_states, 'mcts_timing': mcts_timing_totals}
 
 
 # =============================================================================
 # TRAINING
 # =============================================================================
+
+# The keys of train_network's result, which are also lists in the training history
+LOSS_KEYS = ['policy_loss', 'value_loss', 'ending_loss', 'moves_left_loss', 'l2_loss', 'total_loss',
+             'policy_grad', 'value_grad',
+             'val_policy_loss', 'val_value_loss', 'val_ending_loss', 'val_moves_left_loss',
+             'val_l2_loss', 'val_total_loss', 'epochs']
+
 
 def train_network(network: nn.Module, buffer: ReplayBuffer,
                   optimizer: optim.Optimizer, config: TrainingConfig,
@@ -1085,9 +1118,10 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
         defender_boost: Loss boost factor for defender-won games
     
     Returns:
-        dict with the training losses '<name>_loss' (name: policy, value, ending, moves_left,
-        total) averaged over all batches, 'policy_grad', 'value_grad', 'l2_loss', and the
-        validation losses 'val_<name>_loss' and 'val_l2_loss' of the last epoch
+        dict (keys LOSS_KEYS) with the training losses '<name>_loss' (name: policy, value, ending,
+        moves_left, total) averaged over all batches, 'policy_grad', 'value_grad', 'l2_loss', the
+        validation losses 'val_<name>_loss' and 'val_l2_loss' of the last epoch, and 'epochs': the
+        same keys, each with a list of the per-epoch values (the printed table)
     """
     # Compile network for faster training (~18% speedup)
     # This creates a compiled wrapper that's only used during training. The default dynamic=None
@@ -1178,6 +1212,7 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
 
     totals = dict.fromkeys(loss_names + ['policy_grad', 'value_grad'], 0.0)  # sums over all batches
     num_batches = 0
+    epochs = {key: [] for key in LOSS_KEYS if key != 'epochs'}  # one value per epoch for each key
 
     # Print header for training output
     header = " ".join(f"{name:>9}"
@@ -1267,6 +1302,12 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
         print(f"  {epoch + 1:>5} | " + " ".join(f"{x:>9.4f}" for x in train_row)
               + f" | {means['policy_grad']:>8.4f} {means['value_grad']:>8.4f} | "
               + " ".join(f"{x:>9.4f}" for x in val_row))
+        for name in loss_names:
+            epochs[f'{name}_loss'].append(means[name])
+            epochs[f'val_{name}_loss'].append(val[name])
+        for key, value in [('l2_loss', l2_loss), ('val_l2_loss', l2_loss),
+                           ('policy_grad', means['policy_grad']), ('value_grad', means['value_grad'])]:
+            epochs[key].append(value)
 
     print("  " + "-" * 149)
 
@@ -1276,6 +1317,7 @@ def train_network(network: nn.Module, buffer: ReplayBuffer,
                   value_grad=totals['value_grad'] / num_batches,
                   l2_loss=l2_loss, val_l2_loss=l2_loss)
     result.update({f'val_{name}_loss': val[name] for name in loss_names})
+    result['epochs'] = epochs
     return result
 
 
@@ -2215,6 +2257,16 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
         if win_rate_tracker is not None and training_history.get('win_rate_smoothed'):
             win_rate_tracker.attacker_wins_smooth, win_rate_tracker.defender_wins_smooth = \
                 training_history['win_rate_smoothed'][-1]
+
+        # Older histories do not record at which iterations the evaluations ran. They ran every
+        # eval_frequency (eval_vs_random_frequency) iterations of the run's start settings, from
+        # iteration 1 on, which gives these iterations unless the frequency was changed on a resume.
+        eval_params = training_history['metadata']['evaluation_params']
+        training_history.setdefault('eval_iterations', [
+            eval_params['eval_frequency'] * (k + 1) for k in range(len(training_history['win_rates']))])
+        training_history.setdefault('vs_random_iterations', [
+            eval_params['eval_vs_random_frequency'] * (k + 1)
+            for k in range(len(training_history['vs_random_win_rate']))])
     else:
         # Initialize new training history with metadata
         training_history = {
@@ -2275,52 +2327,36 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                     'num_eval_vs_random_games': config.eval_vs_random_games,
                 },
             },
-            'iterations': [],
-            'policy_loss': [],
-            'value_loss': [],
-            'l2_loss': [],
-            'total_loss': [],
-            'policy_grad': [],
-            'value_grad': [],
-            'val_policy_loss': [],
-            'val_value_loss': [],
-            'val_l2_loss': [],
-            'val_total_loss': [],
-            'learning_rate': [],
-            'selfplay_results': {
-                'attacker_wins': [],
-                'defender_wins': [],
-                'draws': [],
-                'avg_game_length': [],
-            },
-            'win_rates': [],
-            'buffer_size': [],
-            'vs_random_win_rate': [],
-            'vs_random_elo': [],
-            'vs_random_attacker_wins': [],
-            'vs_random_defender_wins': [],
-            'vs_random_total_draws': [],
-            'cumulative_elo': [],  # ELO relative to iteration 0
-            'elo_gain': [],  # ELO gained in network vs network evaluation
-            'timing': {
-                'selfplay_time': [],
-                'training_time': [],
-                'random_eval_time': [],
-                'network_eval_time': [],
-                'total_time': [],
-            },
         }
-    
-    # Ensure all list fields exist for backwards compatibility
-    # This applies whether we're resuming or starting fresh
-    for key in ['iterations', 'policy_loss', 'value_loss', 'l2_loss', 'total_loss', 'policy_grad', 'value_grad',
-                'val_policy_loss', 'val_value_loss', 'val_l2_loss', 'val_total_loss',
-                'win_rates', 'buffer_size', 'vs_random_win_rate', 'vs_random_elo', 
-                'vs_random_attacker_wins', 'vs_random_defender_wins', 
-                'vs_random_total_draws', 'cumulative_elo', 'elo_gain']:
-        if key not in training_history:
-            training_history[key] = []
-    
+
+    # The lists of the training history, by what they have one entry for:
+    # - each iteration (lines up with 'iterations'): the losses and gradient norms of LOSS_KEYS
+    #   (None if training was skipped), the learning rate, buffer size, loss boosts [attacker,
+    #   defender], 'selfplay_results' and 'timing'
+    # - each new-vs-best evaluation (lines up with 'eval_iterations'): the score of the new network
+    #   ('win_rates', draws count half), ELO gain, cumulative ELO vs iteration 0 and
+    #   evaluation_summary ('eval_results')
+    # - each evaluation vs random (lines up with 'vs_random_iterations')
+    # A list that an older history lacks (train.py added it later) starts with one None per earlier
+    # entry, so that the lists still line up.
+    num_iterations = len(training_history.setdefault('iterations', []))
+    num_evals = len(training_history.setdefault('eval_iterations', []))
+    num_random_evals = len(training_history.setdefault('vs_random_iterations', []))
+    selfplay_results = training_history.setdefault('selfplay_results', {})
+    timing = training_history.setdefault('timing', {})
+    for lists, keys, length in [
+            (training_history, LOSS_KEYS + ['learning_rate', 'buffer_size', 'loss_boosts'], num_iterations),
+            (selfplay_results, ['attacker_wins', 'defender_wins', 'draws', 'avg_game_length', 'endings',
+                                'positions', 'simulations', 'unique_states'], num_iterations),
+            (timing, ['selfplay_time', 'training_time', 'random_eval_time', 'network_eval_time',
+                      'total_time', 'mcts'], num_iterations),
+            (training_history, ['win_rates', 'elo_gain', 'cumulative_elo', 'eval_results'], num_evals),
+            (training_history, ['vs_random_win_rate', 'vs_random_elo', 'vs_random_attacker_wins',
+                                'vs_random_defender_wins', 'vs_random_total_draws', 'vs_random_results'],
+             num_random_evals)]:
+        for key in keys:
+            lists.setdefault(key, [None] * length)
+
     # Create persistent worker pool to avoid file descriptor leaks
     # Use maxtasksperchild to periodically recycle workers and free resources
     worker_pool = None
@@ -2365,11 +2401,9 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 attacker_sims, defender_sims = sim_balancer.get_simulation_counts()
             else:
                 attacker_sims, defender_sims = None, None
-            selfplay = generate_self_play_data(agent, config, pool=worker_pool,
-                                               attacker_sims=attacker_sims,
-                                               defender_sims=defender_sims)
             # iteration_games collects all game records of this iteration, evaluation games included
-            new_positions, iteration_games = selfplay
+            new_positions, iteration_games, selfplay_stats = generate_self_play_data(
+                agent, config, pool=worker_pool, attacker_sims=attacker_sims, defender_sims=defender_sims)
             attacker_game_wins = sum(record['winner'] == 'attackers' for record in iteration_games)
             defender_game_wins = sum(record['winner'] == 'defenders' for record in iteration_games)
             avg_game_length = float(np.mean([record['plies'] for record in iteration_games]))
@@ -2445,42 +2479,6 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
 
                 # Get current learning rate
                 current_lr = optimizer.param_groups[0]['lr']
-
-                # Record metrics (all losses under their own names) - only add iteration once
-                # during training step
-                training_history['iterations'].append(iteration + 1)
-                for key, value in losses.items():
-                    training_history.setdefault(key, []).append(value)
-                training_history['buffer_size'].append(len(replay_buffer))
-                training_history['learning_rate'].append(current_lr)
-                
-                # Record self-play results
-                if 'selfplay_results' not in training_history:
-                    training_history['selfplay_results'] = {
-                        'attacker_wins': [],
-                        'defender_wins': [],
-                        'draws': [],
-                        'avg_game_length': [],
-                    }
-                training_history['selfplay_results']['attacker_wins'].append(attacker_game_wins)
-                training_history['selfplay_results']['defender_wins'].append(defender_game_wins)
-                training_history['selfplay_results']['draws'].append(draws)
-                training_history['selfplay_results']['avg_game_length'].append(avg_game_length)
-                selfplay_results = training_history['selfplay_results']
-                selfplay_results.setdefault('endings', []).append(selfplay_endings)
-                
-                # Record timing for this iteration
-                if 'timing' not in training_history:
-                    training_history['timing'] = {
-                        'selfplay_time': [],
-                        'training_time': [],
-                        'random_eval_time': [],
-                        'network_eval_time': [],
-                        'total_time': [],
-                    }
-                training_history['timing']['selfplay_time'].append(selfplay_time)
-                training_history['timing']['training_time'].append(training_time)
-                
                 print(f"\nLearning rate: {current_lr:.6f}")  # the one used in this iteration
 
                 # Exponential learning rate decay for the next iteration (stepping LR is set before training)
@@ -2494,6 +2492,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 print(f"\n[2/4] Skipping training: buffer size {len(replay_buffer)} < "
                       f"minimum {config.min_buffer_size}")
                 training_time = 0
+                losses = dict.fromkeys(LOSS_KEYS)  # None in the training history
+                current_lr = optimizer.param_groups[0]['lr']
             
             # 3. Evaluate vs random player (only if 100% win rate not yet achieved)
             if not achieved_100_percent_vs_random and (iteration + 1) % config.eval_vs_random_frequency == 0:
@@ -2505,6 +2505,9 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 eval_random_time = time.time() - eval_random_start
                 iteration_games += random_eval['games']
                 print(f"Random evaluation time: {eval_random_time:.1f}s")
+                training_history['vs_random_iterations'].append(iteration + 1)
+                training_history['vs_random_results'].append(
+                    evaluation_summary(random_eval['games'], config.rules))
                 training_history['vs_random_win_rate'].append(random_eval['win_rate'])
                 training_history['vs_random_elo'].append(random_eval['elo_diff'])
                 training_history['vs_random_attacker_wins'].append(random_eval['attacker_wins'])
@@ -2536,6 +2539,8 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
                 iteration_games += eval_games
                 eval_network_time = time.time() - eval_network_start
                 print(f"Network evaluation time: {eval_network_time:.1f}s")
+                training_history['eval_iterations'].append(iteration + 1)
+                training_history['eval_results'].append(evaluation_summary(eval_games, config.rules))
                 training_history['win_rates'].append(score_rate)
                 
                 # Calculate ELO gain from this evaluation (using score that counts draws as 0.5)
@@ -2567,13 +2572,26 @@ def train(config: TrainingConfig, resume_from: str = None, load_weights_from: st
             # Calculate total iteration time
             iter_time = time.time() - iter_start_time
 
-            # Record timing data (append to timing arrays, padding with 0 if evaluation was skipped)
-            if 'timing' in training_history:
-                # Update timing only if we trained (iteration was added to history)
-                if len(training_history['iterations']) > 0 and training_history['iterations'][-1] == iteration + 1:
-                    training_history['timing']['random_eval_time'].append(eval_random_time)
-                    training_history['timing']['network_eval_time'].append(eval_network_time)
-                    training_history['timing']['total_time'].append(iter_time)
+            # Record this iteration in all per-iteration lists of the training history
+            training_history['iterations'].append(iteration + 1)
+            for key, value in losses.items():
+                training_history[key].append(value)
+            training_history['learning_rate'].append(current_lr)
+            training_history['buffer_size'].append(len(replay_buffer))
+            training_history['loss_boosts'].append([attacker_boost, defender_boost])
+            if attacker_sims is None:  # fixed simulation counts
+                attacker_sims, defender_sims = config.num_mcts_sims_attacker, config.num_mcts_sims_defender
+            for key, value in [('attacker_wins', attacker_game_wins), ('defender_wins', defender_game_wins),
+                               ('draws', draws), ('avg_game_length', avg_game_length),
+                               ('endings', selfplay_endings), ('positions', len(new_positions[0])),
+                               ('simulations', [attacker_sims, defender_sims]),
+                               ('unique_states', selfplay_stats['unique_states'])]:
+                selfplay_results[key].append(value)
+            for key, value in [('selfplay_time', selfplay_time), ('training_time', training_time),
+                               ('random_eval_time', eval_random_time),
+                               ('network_eval_time', eval_network_time), ('total_time', iter_time),
+                               ('mcts', selfplay_stats['mcts_timing'])]:
+                timing[key].append(value)
 
             # 5. Save checkpoint (only the current network, not best), after all records of this
             # iteration, since a resume continues from the training history stored in it
